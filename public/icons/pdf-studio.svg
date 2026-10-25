@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="PDF Studio application icon">
+  <defs>
+    <linearGradient id="tile" x1="120" y1="72" x2="906" y2="970" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6B61E8"/>
+      <stop offset="0.52" stop-color="#5147D0"/>
+      <stop offset="1" stop-color="#3932A8"/>
+    </linearGradient>
+    <linearGradient id="backPage" x1="235" y1="284" x2="675" y2="800" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D9D9FF"/>
+      <stop offset="1" stop-color="#9F9BF8"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="606" y1="207" x2="744" y2="349" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F0F1FF"/>
+      <stop offset="1" stop-color="#CFD2FF"/>
+    </linearGradient>
+    <filter id="pageShadow" x="180" y="160" width="690" height="720" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+  </defs>
+  <rect x="8" y="8" width="1008" height="1008" rx="236" fill="url(#tile)"/>
+  <path d="M180 222C180 168 224 124 278 124H746C800 124 844 168 844 222V802C844 856 800 900 746 900H278C224 900 180 856 180 802Z" fill="#201B75" opacity=".12"/>
+  <path d="M305 304H560L690 434V748C690 772 671 791 647 791H305C281 791 262 772 262 748V347C262 323 281 304 305 304Z" fill="#28246F" opacity=".22" filter="url(#pageShadow)"/>
+  <path d="M300 280H558L686 408V735C686 759 667 778 643 778H300C276 778 257 759 257 735V323C257 299 276 280 300 280Z" fill="url(#backPage)"/>
+  <path d="M558 280V383C558 397 569 408 583 408H686Z" fill="#8580E8" opacity=".68"/>
+  <path d="M389 205H609L759 355V755C759 781 738 802 712 802H389C363 802 342 781 342 755V252C342 226 363 205 389 205Z" fill="#28246F" opacity=".20"/>
+  <path d="M385 192H604L760 348V748C760 774 739 795 713 795H385C359 795 338 774 338 748V239C338 213 359 192 385 192Z" fill="#FFFFFF"/>
+  <path d="M604 192V324C604 338 615 349 629 349H760Z" fill="url(#fold)"/>
+  <path d="M432 420H651" stroke="#554BD1" stroke-width="31" stroke-linecap="round"/>
+  <path d="M432 497H624" stroke="#554BD1" stroke-width="31" stroke-linecap="round"/>
+  <path d="M432 574H568" stroke="#554BD1" stroke-width="31" stroke-linecap="round"/>
+  <path d="M432 651H529" stroke="#C1BEFF" stroke-width="24" stroke-linecap="round"/>
+  <path d="M216 151C216 133 231 118 249 118H775" fill="none" stroke="#FFFFFF" stroke-opacity=".10" stroke-width="8" stroke-linecap="round"/>
+</svg>

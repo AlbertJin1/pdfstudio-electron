@@ -1,9 +1,21 @@
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
-import { Document, Paragraph, TextRun, PageBreak, Packer } from 'docx';
+// Heavy document libraries are loaded only when a PDF operation actually needs them.
+// This keeps the application shell small and lets Vite create feature-specific chunks.
+let pdfjsLibPromise;
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+async function getPdfJsLib() {
+  if (!pdfjsLibPromise) {
+    pdfjsLibPromise = import('pdfjs-dist/build/pdf.min.mjs').then((pdfjsLib) => {
+      // The worker is copied into public/pdfjs by the postinstall script. Keeping it as a
+      // public runtime asset avoids bundling a 1 MB+ worker into Vite's chunk graph.
+      pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs/pdf.worker.min.mjs', window.location.href).href;
+      return pdfjsLib;
+    }).catch((error) => {
+      pdfjsLibPromise = undefined;
+      throw error;
+    });
+  }
+  return pdfjsLibPromise;
+}
 
 export const isPdf = (item) => item?.kind === 'pdf' || item?.mime === 'application/pdf';
 export const isImage = (item) => item?.kind === 'image' || String(item?.mime || '').startsWith('image/');
@@ -13,6 +25,7 @@ export const normalizeBytes = (value) => value instanceof Uint8Array ? value : n
 export async function loadPdfSource(bytes, password) {
   const data = normalizeBytes(bytes).slice();
   const resourceBase = new URL('pdfjs/', window.location.href);
+  const pdfjsLib = await getPdfJsLib();
   return pdfjsLib.getDocument({
     data,
     password,
@@ -125,6 +138,7 @@ export async function imageSourceForPdf(source) {
 
 export async function composePdf(pages, sources, metadata = {}) {
   if (!pages.length) throw new Error('Add at least one page before exporting.');
+  const { PDFDocument, StandardFonts, rgb, degrees } = await import('pdf-lib');
   const output = await PDFDocument.create();
   const sourcePdfs = new Map();
   const font = await output.embedFont(StandardFonts.Helvetica);
@@ -192,13 +206,13 @@ export async function composePdf(pages, sources, metadata = {}) {
       if (overlay.type === 'rect') {
         const w = Math.max(4, (Number(overlay.width) || 30) / 100 * width);
         const h = Math.max(4, (Number(overlay.height) || 8) / 100 * height);
-        target.drawRectangle({ x: (Number(overlay.x) || 50) / 100 * width, y: height - ((Number(overlay.y) || 50) / 100 * height) - h, width: w, height: h, color: hexToPdfColor(overlay.color || '#272a3c'), opacity: 0.95 });
+        target.drawRectangle({ x: (Number(overlay.x) || 50) / 100 * width, y: height - ((Number(overlay.y) || 50) / 100 * height) - h, width: w, height: h, color: hexToPdfColor(overlay.color || '#272a3c', rgb), opacity: 0.95 });
       } else if (overlay.text) {
         const size = Math.max(6, Math.min(72, Number(overlay.size) || 18));
         const textWidth = font.widthOfTextAtSize(String(overlay.text), size);
         const x = Math.max(0, Math.min(width - textWidth, (Number(overlay.x) || 50) / 100 * width));
         const y = Math.max(0, Math.min(height - size, height - (Number(overlay.y) || 50) / 100 * height - size));
-        target.drawText(String(overlay.text), { x, y, size, font, color: hexToPdfColor(overlay.color || '#6e54ea'), opacity: 0.98 });
+        target.drawText(String(overlay.text), { x, y, size, font, color: hexToPdfColor(overlay.color || '#6e54ea', rgb), opacity: 0.98 });
       }
     }
     if (metadata.pageNumbers) {
@@ -217,12 +231,13 @@ export async function composePdf(pages, sources, metadata = {}) {
   return output.save({ useObjectStreams: true, addDefaultPage: false, objectsPerTick: 50 });
 }
 
-function hexToPdfColor(hex) {
+function hexToPdfColor(hex, rgb) {
   const safe = /^#[0-9a-f]{6}$/i.test(hex) ? hex : '#6e54ea';
   return rgb(parseInt(safe.slice(1, 3), 16) / 255, parseInt(safe.slice(3, 5), 16) / 255, parseInt(safe.slice(5, 7), 16) / 255);
 }
 
 export async function pdfToDocx(pdfBytes, pdfSource) {
+  const { Document, Paragraph, TextRun, PageBreak, Packer } = await import('docx');
   const pdf = pdfSource || await loadPdfSource(pdfBytes);
   const children = [];
   for (let pageIndex = 1; pageIndex <= pdf.numPages; pageIndex += 1) {

@@ -3,12 +3,52 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f6f7fb" />
+    <meta name="theme-color" content="#5147d0" />
+    <link rel="icon" type="image/svg+xml" href="./icons/pdf-studio.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./icons/pdf-studio-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./icons/pdf-studio-180.png" />
     <meta name="description" content="PDF Studio — a modern local-first PDF workspace." />
     <title>PDF Studio</title>
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // If the renderer bundle fails to load or React never mounts, show a useful
+      // diagnostic instead of leaving the user with an unhelpful blank window.
+      (() => {
+        let dismissed = false;
+        const hasUi = () => {
+          const root = document.getElementById('root');
+          return Boolean(root && root.childElementCount > 0);
+        };
+        const showStartupError = (detail) => {
+          if (dismissed || hasUi()) return;
+          let panel = document.getElementById('pdfstudio-startup-error');
+          if (!panel) {
+            panel = document.createElement('section');
+            panel.id = 'pdfstudio-startup-error';
+            panel.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;padding:28px;background:#f5f6fb;color:#20223a;font:15px/1.55 Segoe UI,Arial,sans-serif;';
+            panel.innerHTML = '<div style="width:min(720px,100%);padding:clamp(24px,5vw,42px);border:1px solid #e1e4ef;border-radius:22px;background:white;box-shadow:0 20px 70px #28305b14"><div style="font-size:12px;font-weight:800;letter-spacing:.16em;color:#765df5">PDF STUDIO · STARTUP CHECK</div><h1 style="font-size:30px;letter-spacing:-.03em;margin:22px 0 8px">The interface did not start</h1><p style="color:#606982">The app could not load its frontend. Close this window and run the following commands from the project folder.</p><pre style="white-space:pre-wrap;overflow-wrap:anywhere;background:#f6f7fb;border:1px solid #e4e7f0;border-radius:12px;padding:14px;color:#4a526c;font:13px/1.5 Consolas,monospace">npm install\nnpm start</pre><p style="color:#606982">If the problem continues, run <code>npm run check</code> and read the first build error in the terminal.</p><button id="pdfstudio-startup-reload" style="border:0;border-radius:10px;padding:11px 16px;background:#765df5;color:white;font-weight:700;cursor:pointer">Try reloading</button><pre id="pdfstudio-startup-detail" style="display:none;white-space:pre-wrap;overflow-wrap:anywhere;color:#8a4560;font:12px/1.5 Consolas,monospace;margin-top:18px"></pre></div>';
+            panel.querySelector('#pdfstudio-startup-reload').addEventListener('click', () => window.location.reload());
+            document.body.appendChild(panel);
+          }
+          const details = panel.querySelector('#pdfstudio-startup-detail');
+          if (detail && details) { details.textContent = String(detail); details.style.display = 'block'; }
+        };
+        const watchdog = window.setTimeout(() => showStartupError('The React interface did not render within 15 seconds.'), 15000);
+        window.addEventListener('error', (event) => {
+          if (!hasUi()) showStartupError(event.message || 'A script or resource failed to load.');
+        });
+        window.addEventListener('unhandledrejection', (event) => {
+          if (!hasUi()) showStartupError(event.reason?.message || String(event.reason || 'An unhandled startup promise failed.'));
+        });
+        window.__PDF_STUDIO_BOOT_SUCCESS = () => {
+          window.clearTimeout(watchdog);
+          dismissed = true;
+          document.getElementById('pdfstudio-startup-error')?.remove();
+        };
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

@@ -4,5 +4,5 @@ release/
 .DS_Store
 *.log
 .env*
-
+*.zip
 # Local marker written only after the 2.8.15 migration bridge is successfully published.

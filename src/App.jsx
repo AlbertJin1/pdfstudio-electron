@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, LayoutGroup, MotionConfig, motion } from 'motion/react';
 import {
   Activity, AlignLeft, ArrowDownToLine, ArrowDownUp, ArrowLeft, ArrowRight, ArrowUpRight,
   BadgeCheck, BookOpen, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight,
   CircleHelp, Clock3, Cloud, Command, Copy, Download, FileArchive, FileCheck2, FileImage,
-  FilePlus2, FileStack, FileText, Files, FolderOpen, Gauge, GripVertical, HardDrive,
+  FilePlus2, FileText, Files, FolderOpen, Gauge, GripVertical, HardDrive,
   History, ImagePlus, Layers3, LayoutDashboard, ListFilter, LockKeyhole, Maximize2,
   Minimize2, Minus, Moon, MoreHorizontal, PackageCheck, PanelRightClose, PanelRightOpen,
-  Plus, Redo2, RotateCcw, RotateCw, Search, Settings2, ShieldCheck, Sparkles, Split,
-  Sun, Trash2, Type, Undo2, Upload, WandSparkles, X, ZoomIn, ZoomOut, Scissors,
+  Plus, Redo2, RotateCcw, RotateCw, Search, Settings2, ShieldCheck, Sparkles, Split, SlidersHorizontal, FileOutput,
+  Sun, Trash2, Type, Undo2, Upload, WandSparkles, X, ZoomIn, ZoomOut, Scissors, MonitorDown, CheckCircle, CircleAlert, LoaderCircle, Laptop,
 } from 'lucide-react';
 import { composePdf, createPageThumbnail, isImage, isPdf, loadPdfSource, normalizeBytes, pdfToDocx, renderPageCanvas, renderPdfImages, uid } from './lib/pdfWorkspace.js';
 
@@ -18,6 +19,23 @@ const initialTools = [
   { label: 'Images to PDF', description: 'Build a polished PDF from your image files', icon: ImagePlus, tone: 'green', mode: 'workspace' },
 ];
 
+
+// Shared motion presets keep transitions coherent across the whole desktop UI.
+const pageVariants = {
+  initial: { opacity: 0, y: 10, scale: 0.997 },
+  animate: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] } },
+  exit: { opacity: 0, y: -5, scale: 0.999, transition: { duration: 0.13, ease: 'easeIn' } },
+};
+const staggerVariants = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.045, delayChildren: 0.025 } },
+};
+const staggerItemVariants = {
+  hidden: { opacity: 0, y: 8 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.24, ease: [0.22, 1, 0.36, 1] } },
+};
+const interactiveSpring = { type: 'spring', stiffness: 480, damping: 32, mass: 0.55 };
+
 function cx(...parts) { return parts.filter(Boolean).join(' '); }
 function formatBytes(size = 0) {
   if (size < 1024) return `${size} B`;
@@ -26,13 +44,76 @@ function formatBytes(size = 0) {
 }
 function extName(name = '') { return name.split('.').pop()?.toUpperCase() || 'FILE'; }
 
+const DEFAULT_PREFERENCES = Object.freeze({
+  theme: 'light',
+  accentTheme: 'violet',
+  fontScale: 'standard',
+  density: 'comfortable',
+  highContrast: false,
+  reduceMotion: false,
+  confirmDelete: true,
+  showInspector: true,
+  defaultImageFormat: 'png',
+  defaultImageQuality: 92,
+});
+
+function readPreferences() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('pdfstudio-settings') || '{}');
+    // Ignore any URL from older settings: the update endpoint is hardcoded in the Electron main process.
+    delete saved.updateFeedUrl;
+    const legacyTheme = localStorage.getItem('pdfstudio-theme');
+    return {
+      ...DEFAULT_PREFERENCES,
+      ...saved,
+      theme: saved.theme || legacyTheme || DEFAULT_PREFERENCES.theme,
+      accentTheme: ['violet', 'blue', 'teal', 'green', 'rose', 'amber'].includes(saved.accentTheme) ? saved.accentTheme : DEFAULT_PREFERENCES.accentTheme,
+      fontScale: ['standard', 'large', 'xlarge'].includes(saved.fontScale) ? saved.fontScale : DEFAULT_PREFERENCES.fontScale,
+      density: ['comfortable', 'compact'].includes(saved.density) ? saved.density : DEFAULT_PREFERENCES.density,
+      highContrast: Boolean(saved.highContrast),
+      reduceMotion: Boolean(saved.reduceMotion),
+      confirmDelete: saved.confirmDelete !== false,
+      showInspector: saved.showInspector !== false,
+      defaultImageFormat: saved.defaultImageFormat === 'jpeg' ? 'jpeg' : 'png',
+      defaultImageQuality: Math.min(100, Math.max(40, Number(saved.defaultImageQuality) || 92)),
+    };
+  } catch {
+    return { ...DEFAULT_PREFERENCES };
+  }
+}
+
+function SettingToggle({ title, description, checked, onChange }) {
+  return <label className="setting-toggle-row"><span className="setting-toggle-copy"><strong>{title}</strong><small>{description}</small></span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span className="setting-switch" aria-hidden="true" /></label>;
+}
+
 function IconButton({ icon: Icon, label, onClick, disabled = false, active = false, className = '', size = 16, variant = 'ghost' }) {
-  return <button type="button" title={label} aria-label={label} onClick={onClick} disabled={disabled} className={cx('icon-button', `icon-button-${variant}`, active && 'is-active', className)}><Icon size={size} strokeWidth={1.85} /></button>;
+  return <motion.button type="button" title={label} aria-label={label} onClick={onClick} disabled={disabled} className={cx('icon-button', `icon-button-${variant}`, active && 'is-active', className)} whileHover={disabled ? undefined : { scale: 1.045 }} whileTap={disabled ? undefined : { scale: 0.93 }} transition={interactiveSpring}><Icon size={size} strokeWidth={1.85} /></motion.button>;
 }
 function ActionButton({ icon: Icon, children, onClick, disabled = false, variant = 'secondary', className = '' }) {
-  return <button type="button" disabled={disabled} onClick={onClick} className={cx('action-button', `action-${variant}`, className)}>{Icon && <Icon size={16} strokeWidth={1.9} />}<span>{children}</span></button>;
+  return <motion.button type="button" disabled={disabled} onClick={onClick} className={cx('action-button', `action-${variant}`, className)} whileHover={disabled ? undefined : { y: -1, scale: 1.012 }} whileTap={disabled ? undefined : { y: 0, scale: 0.985 }} transition={interactiveSpring}>{Icon && <Icon size={16} strokeWidth={1.9} />}<span>{children}</span></motion.button>;
 }
 function SectionLabel({ children, trailing }) { return <div className="section-label"><span>{children}</span>{trailing}</div>; }
+
+const ACCENT_PRESETS = [
+  { id: 'violet', label: 'Violet', color: '#6757d9', soft: '#f0edff' },
+  { id: 'blue', label: 'Ocean blue', color: '#2469c7', soft: '#eaf3ff' },
+  { id: 'teal', label: 'Teal', color: '#087f8c', soft: '#e4f7f7' },
+  { id: 'green', label: 'Emerald', color: '#17845b', soft: '#e7f7ee' },
+  { id: 'rose', label: 'Rose', color: '#c13e69', soft: '#fff0f4' },
+  { id: 'amber', label: 'Amber', color: '#a85d09', soft: '#fff4e3' },
+];
+
+function ShortcutKeys({ platform, keys = [] }) {
+  const isMac = platform === 'darwin';
+  const pieces = [];
+  pieces.push(isMac ? <kbd className="shortcut-mod-key shortcut-mod-symbol" key="modifier" aria-label="Command"><Command size={12} strokeWidth={2.2}/></kbd> : <kbd className="shortcut-mod-key" key="modifier">Ctrl</kbd>);
+  keys.forEach((key, index) => {
+    pieces.push(<span className="shortcut-plus" key={`plus-${index}`} aria-hidden="true">+</span>);
+    pieces.push(<kbd key={`key-${index}`}>{key}</kbd>);
+  });
+  const readable = `${isMac ? 'Command' : 'Control'} + ${keys.join(' + ')}`;
+  return <span className="shortcut-keys" aria-label={readable}>{pieces}</span>;
+}
 
 function PagePreview({ page, sources, onAddText, onAddBlock, zoom = 1 }) {
   const holderRef = useRef(null);
@@ -79,13 +160,13 @@ function Modal({ title, eyebrow, children, onClose, footer, wide = false }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className={cx('modal-card', wide && 'modal-wide')} role="dialog" aria-modal="true" aria-label={title}>
+  return <motion.div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }}>
+    <motion.div className={cx('modal-card', wide && 'modal-wide')} role="dialog" aria-modal="true" aria-label={title} initial={{ opacity: 0, y: 14, scale: 0.975 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 8, scale: 0.985 }} transition={{ type: 'spring', stiffness: 420, damping: 32, mass: 0.7 }}>
       <div className="modal-head"><div>{eyebrow && <div className="eyebrow">{eyebrow}</div>}<h2>{title}</h2></div><IconButton icon={X} label="Close dialog" onClick={onClose} /></div>
       <div className="modal-content">{children}</div>
       {footer && <div className="modal-footer">{footer}</div>}
-    </div>
-  </div>;
+    </motion.div>
+  </motion.div>;
 }
 
 function App() {
@@ -100,7 +181,13 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [loadingLabel, setLoadingLabel] = useState('Preparing your workspace');
   const [search, setSearch] = useState('');
-  const [dark, setDark] = useState(() => { try { return localStorage.getItem('pdfstudio-theme') === 'dark'; } catch { return false; } });
+  const [preferences, setPreferences] = useState(readPreferences);
+  const [settingsTab, setSettingsTab] = useState('appearance');
+  const [dark, setDark] = useState(() => preferences.theme === 'dark');
+  const [platform, setPlatform] = useState('win32');
+  const [updateState, setUpdateState] = useState({ status: 'idle', message: 'Automatic updates are enabled.' });
+  const [readyUpdate, setReadyUpdate] = useState(null);
+  const [applyingUpdate, setApplyingUpdate] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [toast, setToast] = useState(null);
   const [modal, setModal] = useState(null);
@@ -115,28 +202,67 @@ function App() {
   const [splitMode, setSplitMode] = useState('each');
   const [splitEvery, setSplitEvery] = useState('2');
   const [splitRanges, setSplitRanges] = useState('1-3, 4-6');
-  const [imageFormat, setImageFormat] = useState('png');
-  const [imageQuality, setImageQuality] = useState('92');
-  const [showInspector, setShowInspector] = useState(true);
+  const [imageFormat, setImageFormat] = useState(() => preferences.defaultImageFormat);
+  const [imageQuality, setImageQuality] = useState(() => String(preferences.defaultImageQuality));
+  const [showInspector, setShowInspector] = useState(() => preferences.showInspector);
   const [draggingPageId, setDraggingPageId] = useState(null);
   const [dropCue, setDropCue] = useState(null);
   const [previewZoom, setPreviewZoom] = useState(1);
-  const [appVersion, setAppVersion] = useState('3.0.0');
+  const [appVersion, setAppVersion] = useState('3.0.1');
   const fileInputRef = useRef(null);
   const suppressPageClickUntil = useRef(0);
   const historyRef = useRef([]);
   const redoRef = useRef([]);
 
   useEffect(() => { pagesRef.current = pages; }, [pages]);
+  const setPreference = useCallback((key, value) => {
+    setPreferences((current) => ({ ...current, [key]: value }));
+  }, []);
+
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
-    try { localStorage.setItem('pdfstudio-theme', dark ? 'dark' : 'light'); } catch { /* local storage is optional */ }
-  }, [dark]);
+    document.documentElement.classList.toggle('font-scale-large', preferences.fontScale === 'large');
+    document.documentElement.classList.toggle('font-scale-xlarge', preferences.fontScale === 'xlarge');
+    document.documentElement.classList.toggle('density-compact', preferences.density === 'compact');
+    document.documentElement.classList.toggle('high-contrast', Boolean(preferences.highContrast));
+    document.documentElement.classList.toggle('reduce-motion', Boolean(preferences.reduceMotion));
+    document.documentElement.dataset.accent = preferences.accentTheme || 'violet';
+    try {
+      const savedPreferences = {
+        ...preferences,
+        theme: dark ? 'dark' : 'light',
+        showInspector,
+        defaultImageFormat: imageFormat,
+        defaultImageQuality: Number(imageQuality),
+      };
+      localStorage.setItem('pdfstudio-theme', savedPreferences.theme);
+      localStorage.setItem('pdfstudio-settings', JSON.stringify(savedPreferences));
+    } catch { /* Preferences remain usable for this session when storage is unavailable. */ }
+  }, [dark, preferences, showInspector, imageFormat, imageQuality]);
   useEffect(() => {
     window.pdfStudio?.version?.().then((version) => setAppVersion(version)).catch(() => {});
+    window.pdfStudio?.platform?.().then((value) => setPlatform(value)).catch(() => {});
     window.pdfStudio?.isMaximized?.().then(setMaximized).catch(() => {});
     const unsubscribe = window.pdfStudio?.onMaximizedChanged?.(setMaximized);
-    return () => unsubscribe?.();
+    const unsubscribeUpdater = window.pdfStudio?.onUpdaterState?.((state) => {
+      setUpdateState((current) => ({ ...current, ...state }));
+    });
+    const unsubscribeReady = window.pdfStudio?.onUpdateReady?.((update) => {
+      setReadyUpdate(update);
+      setUpdateState((current) => ({ ...current, status: 'ready', latestVersion: update.version, message: `Version ${update.version} is downloaded and ready to install.` }));
+      void window.pdfStudio?.markUpdatePromptShown?.(update.version);
+    });
+    const unsubscribeDownload = window.pdfStudio?.onUpdateDownloadProgress?.((progress) => {
+      setUpdateState((current) => ({ ...current, status: 'downloading', percent: progress.percent, downloadedBytes: progress.downloadedBytes, totalBytes: progress.totalBytes, message: progress.message || 'Downloading update in the background…' }));
+    });
+    window.pdfStudio?.getUpdaterState?.().then((snapshot) => {
+      if (snapshot?.state) setUpdateState((current) => ({ ...snapshot.state, ...(['downloading', 'ready', 'applying'].includes(current.status) ? current : {}) }));
+      if (snapshot?.pendingUpdate && snapshot.shouldPrompt) {
+        setReadyUpdate(snapshot.pendingUpdate);
+        void window.pdfStudio?.markUpdatePromptShown?.(snapshot.pendingUpdate.version);
+      }
+    }).catch(() => {});
+    return () => { unsubscribe?.(); unsubscribeUpdater?.(); unsubscribeReady?.(); unsubscribeDownload?.(); };
   }, []);
   useEffect(() => {
     if (!toast) return undefined;
@@ -313,6 +439,17 @@ function App() {
     commitPages(next);
     notify(`${ids.size} page${ids.size > 1 ? 's' : ''} removed.`, 'info');
   }, [activeId, commitPages, notify, selectedIds]);
+
+  const requestDeleteSelected = useCallback((explicitIds) => {
+    const ids = [...new Set(explicitIds || (selectedIds.length ? selectedIds : activeId ? [activeId] : []))];
+    if (!ids.length) return;
+    if (preferences.confirmDelete) {
+      setModal({ type: 'confirm-delete', ids });
+      return;
+    }
+    setModal(null);
+    deleteSelected(ids);
+  }, [activeId, deleteSelected, preferences.confirmDelete, selectedIds]);
 
   const rotateSelected = useCallback((angle, explicitIds) => {
     const ids = new Set(explicitIds || (selectedIds.length ? selectedIds : activeId ? [activeId] : []));
@@ -500,22 +637,23 @@ function App() {
       const target = event.target;
       const editing = target && (target.matches('input, textarea, select') || target.isContentEditable);
       if (event.key === 'Escape') { if (modal) setModal(null); return; }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'o') { event.preventDefault(); chooseFiles(); return; }
-      if ((event.ctrlKey || event.metaKey) && ['1', '2', '3', '4'].includes(event.key)) {
+      if (modal) return;
+      if (!editing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'o') { event.preventDefault(); chooseFiles(); return; }
+      if (!editing && (event.ctrlKey || event.metaKey) && ['1', '2', '3', '4'].includes(event.key)) {
         event.preventDefault();
         const destination = { '1': 'home', '2': 'workspace', '3': 'convert', '4': 'history' }[event.key];
         setMode(destination);
         return;
       }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); if (pagesRef.current.length) setModal({ type: 'export' }); return; }
+      if (!editing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); if (pagesRef.current.length) setModal({ type: 'export' }); return; }
       if (!editing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); if (event.shiftKey) redo(); else undo(); return; }
-      if (!editing && (event.key === 'Delete' || event.key === 'Backspace')) { if (selectedIds.length) { event.preventDefault(); deleteSelected(); } }
+      if (!editing && (event.key === 'Delete' || event.key === 'Backspace')) { if (selectedIds.length) { event.preventDefault(); requestDeleteSelected(); } }
       if (!editing && event.key === 'ArrowLeft' && activePage) { const i = pagesRef.current.findIndex((page) => page.id === activePage.id); if (i > 0) { setActiveId(pagesRef.current[i - 1].id); setSelectedIds([pagesRef.current[i - 1].id]); } }
       if (!editing && event.key === 'ArrowRight' && activePage) { const i = pagesRef.current.findIndex((page) => page.id === activePage.id); if (i < pagesRef.current.length - 1) { setActiveId(pagesRef.current[i + 1].id); setSelectedIds([pagesRef.current[i + 1].id]); } }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [activePage, chooseFiles, deleteSelected, modal, redo, selectedIds, undo]);
+  }, [activePage, chooseFiles, requestDeleteSelected, modal, redo, selectedIds, undo]);
 
   const handleDropFiles = async (event) => {
     event.preventDefault();
@@ -523,49 +661,95 @@ function App() {
     if (files.length) await handleBrowserFiles(files);
   };
 
+  const resetPreferences = () => {
+    setPreferences({ ...DEFAULT_PREFERENCES });
+    setDark(false);
+    setShowInspector(true);
+    setImageFormat('png');
+    setImageQuality('92');
+    setSettingsTab('appearance');
+    notify('Settings restored to their defaults.', 'success');
+  };
+
+  const checkForUpdates = useCallback(async () => {
+    setUpdateState({ status: 'checking', message: 'Checking for updates…' });
+    try {
+      const result = await window.pdfStudio?.checkForUpdates?.();
+      if (!result) throw new Error('Update checks are available in the desktop application.');
+      if (result.status && result.status !== 'checking') setUpdateState((current) => ({ ...current, ...result }));
+    } catch {
+      setUpdateState({ status: 'error', message: 'We couldn’t check for updates. PDF Studio will try again automatically later.' });
+    }
+  }, []);
+
+  const deferReadyUpdate = useCallback(async () => {
+    const version = readyUpdate?.version;
+    if (version) await window.pdfStudio?.deferUpdate?.(version).catch(() => {});
+    setReadyUpdate(null);
+    setUpdateState((current) => ({ ...current, status: 'ready', latestVersion: version || current.latestVersion, message: 'The update is saved. PDF Studio will offer it again the next time you open the app.' }));
+  }, [readyUpdate]);
+
+  const applyReadyUpdate = useCallback(async () => {
+    if (!readyUpdate || applyingUpdate) return;
+    setApplyingUpdate(true);
+    try {
+      const result = await window.pdfStudio?.applyUpdateNow?.();
+      if (!result?.started) throw new Error('PDF Studio could not start the update.');
+      setUpdateState((current) => ({ ...current, status: 'applying', message: 'Applying the update and restarting PDF Studio…' }));
+      setReadyUpdate(null);
+    } catch (error) {
+      setApplyingUpdate(false);
+      notify(error?.message || 'The update could not be applied. You can choose Update later and retry.', 'error');
+    }
+  }, [readyUpdate, applyingUpdate, notify]);
+
   const startTool = (tool) => {
     if (tool.action === 'word') { if (!pages.length) chooseFiles(); else setModal({ type: 'word' }); }
     else if (tool.action === 'images') { if (!pages.length) chooseFiles(); else setModal({ type: 'images' }); }
     else { setMode(tool.mode || 'workspace'); if (!pages.length) chooseFiles(); }
   };
 
-  return <div className={cx('app-shell', dark && 'theme-dark')} onDragOver={(event) => event.preventDefault()} onDrop={handleDropFiles}>
+  return <MotionConfig reducedMotion={preferences.reduceMotion ? 'always' : 'user'} transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}>
+  <motion.div data-accent={preferences.accentTheme || 'violet'} className={cx('app-shell', dark && 'theme-dark', preferences.fontScale === 'large' && 'font-scale-large', preferences.fontScale === 'xlarge' && 'font-scale-xlarge', preferences.density === 'compact' && 'density-compact', preferences.highContrast && 'high-contrast', preferences.reduceMotion && 'reduce-motion')} onDragOver={(event) => event.preventDefault()} onDrop={handleDropFiles} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: preferences.reduceMotion ? 0 : 0.24 }}>
     <input ref={fileInputRef} type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.docx" className="hidden-input" onChange={(event) => { if (event.target.files?.length) handleBrowserFiles(event.target.files); event.target.value = ''; }} />
 
-    <header className="titlebar">
-      <div className="titlebar-brand" onClick={() => setMode('home')} role="button" tabIndex={0}>
-        <div className="brand-mark"><FileStack size={19} strokeWidth={2.3} /><span className="brand-spark">✦</span></div>
-        <div className="brand-wordmark"><strong>PDF<span>Studio</span></strong><small>DESKTOP WORKSPACE</small></div>
-      </div>
-      <div className="titlebar-center"><span className="titlebar-dot" /> Local workspace <span className="titlebar-separator">/</span> {mode === 'home' ? 'Overview' : mode === 'workspace' ? 'Page workspace' : mode === 'settings' ? 'Preferences' : mode === 'convert' ? 'Conversion studio' : mode === 'history' ? 'Recent sources' : 'Workspace'}</div>
+    <motion.header className="titlebar" initial={{ opacity: 0, y: -7 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, delay: 0.035 }}>
+      <motion.button type="button" className="titlebar-brand" onClick={() => setMode('home')} aria-label="Go to PDF Studio overview" whileHover={{ scale: 1.012 }} whileTap={{ scale: 0.988 }} transition={interactiveSpring}>
+        <div className="brand-mark"><img src="./icons/pdf-studio.png" alt="" draggable="false" /></div>
+        <div className="brand-wordmark"><strong>PDF<span>Studio</span></strong><small>DOCUMENT WORKSPACE</small></div>
+      </motion.button>
+      <div className="titlebar-center"><span className="titlebar-dot" /> Local workspace <span className="titlebar-separator">/</span> {mode === 'home' ? 'Overview' : mode === 'workspace' ? 'Page workspace' : mode === 'settings' ? 'Settings' : mode === 'convert' ? 'Conversion studio' : mode === 'history' ? 'Recent sources' : 'Workspace'}</div>
       <div className="window-controls">
-        <button type="button" title="Minimize" onClick={() => window.pdfStudio?.minimize?.()}><Minus size={14} /></button>
-        <button type="button" title={maximized ? 'Restore' : 'Maximize'} onClick={() => window.pdfStudio?.toggleMaximize?.()}>{maximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
-        <button type="button" title="Close" className="window-close" onClick={() => window.pdfStudio?.close?.()}><X size={15} /></button>
+        <motion.button type="button" title="Minimize" onClick={() => window.pdfStudio?.minimize?.()} whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.92 }} transition={interactiveSpring}><Minus size={14} /></motion.button>
+        <motion.button type="button" title={maximized ? 'Restore' : 'Maximize'} onClick={() => window.pdfStudio?.toggleMaximize?.()} whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.92 }} transition={interactiveSpring}>{maximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</motion.button>
+        <motion.button type="button" title="Close" className="window-close" onClick={() => window.pdfStudio?.close?.()} whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.92 }} transition={interactiveSpring}><X size={15} /></motion.button>
       </div>
-    </header>
+    </motion.header>
 
-    <div className="app-body">
-      <aside className="sidebar">
+    <motion.div className="app-body" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.22, delay: 0.07 }}>
+      <motion.aside className="sidebar" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.25, delay: 0.06, ease: [0.22, 1, 0.36, 1] }}>
         <div className="sidebar-scroll">
           <SectionLabel>Workspace</SectionLabel>
-          <button title="Overview (Ctrl/Cmd+1)" aria-label="Overview" aria-current={mode === 'home' ? 'page' : undefined} className={cx('nav-item', mode === 'home' && 'nav-active')} onClick={() => setMode('home')}><LayoutDashboard size={17} /><span>Overview</span><span className="nav-key">⌘ 1</span></button>
-          <button title="Page workspace (Ctrl/Cmd+2)" aria-label="Page workspace" aria-current={mode === 'workspace' ? 'page' : undefined} className={cx('nav-item', mode === 'workspace' && 'nav-active')} onClick={() => setMode('workspace')}><Files size={17} /><span>Page workspace</span>{pages.length > 0 && <span className="nav-count">{pages.length}</span>}</button>
-          <button title="Conversion studio (Ctrl/Cmd+3)" aria-label="Conversion studio" aria-current={mode === 'convert' ? 'page' : undefined} className={cx('nav-item', mode === 'convert' && 'nav-active')} onClick={() => setMode('convert')}><WandSparkles size={17} /><span>Convert files</span><span className="nav-new">TOOLS</span></button>
-          <button title="Recent sources (Ctrl/Cmd+4)" aria-label="Recent sources" aria-current={mode === 'history' ? 'page' : undefined} className={cx('nav-item', mode === 'history' && 'nav-active')} onClick={() => setMode('history')}><History size={17} /><span>Recent sources</span></button>
+          <LayoutGroup id="primary-navigation">
+          <motion.button whileHover={{ x: 2 }} whileTap={{ scale: 0.995 }} transition={interactiveSpring} title={`Overview (${platform === 'darwin' ? '⌘' : 'Ctrl'}+1)`} aria-label="Overview" aria-current={mode === 'home' ? 'page' : undefined} className={cx('nav-item', mode === 'home' && 'nav-active')} onClick={() => setMode('home')}>{mode === 'home' && <motion.span layoutId="primary-nav-active" className="nav-active-indicator" transition={interactiveSpring} />}<LayoutDashboard size={17} /><span>Overview</span><span className="nav-key">{platform === 'darwin' ? '⌘ 1' : 'Ctrl 1'}</span></motion.button>
+          <motion.button whileHover={{ x: 2 }} whileTap={{ scale: 0.995 }} transition={interactiveSpring} title={`Page workspace (${platform === 'darwin' ? '⌘' : 'Ctrl'}+2)`} aria-label="Page workspace" aria-current={mode === 'workspace' ? 'page' : undefined} className={cx('nav-item', mode === 'workspace' && 'nav-active')} onClick={() => setMode('workspace')}>{mode === 'workspace' && <motion.span layoutId="primary-nav-active" className="nav-active-indicator" transition={interactiveSpring} />}<Files size={17} /><span>Page workspace</span>{pages.length > 0 && <span className="nav-count">{pages.length}</span>}</motion.button>
+          <motion.button whileHover={{ x: 2 }} whileTap={{ scale: 0.995 }} transition={interactiveSpring} title={`Conversion studio (${platform === 'darwin' ? '⌘' : 'Ctrl'}+3)`} aria-label="Conversion studio" aria-current={mode === 'convert' ? 'page' : undefined} className={cx('nav-item', mode === 'convert' && 'nav-active')} onClick={() => setMode('convert')}>{mode === 'convert' && <motion.span layoutId="primary-nav-active" className="nav-active-indicator" transition={interactiveSpring} />}<WandSparkles size={17} /><span>Convert files</span><span className="nav-new">TOOLS</span></motion.button>
+          <motion.button whileHover={{ x: 2 }} whileTap={{ scale: 0.995 }} transition={interactiveSpring} title={`Recent sources (${platform === 'darwin' ? '⌘' : 'Ctrl'}+4)`} aria-label="Recent sources" aria-current={mode === 'history' ? 'page' : undefined} className={cx('nav-item', mode === 'history' && 'nav-active')} onClick={() => setMode('history')}>{mode === 'history' && <motion.span layoutId="primary-nav-active" className="nav-active-indicator" transition={interactiveSpring} />}<History size={17} /><span>Recent sources</span></motion.button>
+          <motion.button whileHover={{ x: 2 }} whileTap={{ scale: 0.995 }} transition={interactiveSpring} title="Application settings" aria-label="Settings" aria-current={mode === 'settings' ? 'page' : undefined} className={cx('nav-item', mode === 'settings' && 'nav-active')} onClick={() => setMode('settings')}>{mode === 'settings' && <motion.span layoutId="primary-nav-active" className="nav-active-indicator" transition={interactiveSpring} />}<Settings2 size={17} /><span>Settings</span></motion.button>
+          </LayoutGroup>
 
           <div className="sidebar-divider" />
           <SectionLabel trailing={<IconButton icon={Plus} label="Add documents" size={15} onClick={chooseFiles} />} >Your documents</SectionLabel>
-          {documents.length === 0 ? <button className="empty-docs-link" onClick={chooseFiles}><FolderOpen size={17} /><span>Add your first file</span><ChevronRight size={14} /></button> : <div className="document-list">
-            {documents.map((document) => <div className={cx('document-list-item', currentDocument?.id === document.id && 'document-current')} key={document.id}>
+          {documents.length === 0 ? <button className="empty-docs-link" onClick={chooseFiles}><FolderOpen size={17} /><span>Add your first file</span><ChevronRight size={14} /></button> : <motion.div className="document-list" layout>
+            <AnimatePresence initial={false}>{documents.map((document) => <motion.div layout className={cx('document-list-item', currentDocument?.id === document.id && 'document-current')} key={document.id} initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -6 }} transition={{ duration: 0.16 }}>
               <div className={cx('file-type-mini', document.kind === 'pdf' ? 'file-pdf' : 'file-image')}>{document.kind === 'pdf' ? <FileText size={14} /> : <FileImage size={14} />}</div>
               <button className="document-label" title={document.name} onClick={() => {
                 const page = pages.find((item) => item.sourceId === document.id);
                 if (page) { setActiveId(page.id); setSelectedIds([page.id]); setMode('workspace'); }
               }}><span>{document.name}</span><small>{document.pageCount} {document.pageCount === 1 ? 'page' : 'pages'} · {formatBytes(document.size)}</small></button>
               <IconButton icon={X} label={`Remove ${document.name}`} size={13} className="document-remove" onClick={() => removeDocument(document.id)} />
-            </div>)}
-          </div>}
+            </motion.div>)}</AnimatePresence>
+          </motion.div>}
 
           <div className="sidebar-divider" />
           <SectionLabel>Quick tools</SectionLabel>
@@ -577,36 +761,37 @@ function App() {
           <div className="privacy-card"><div className="privacy-icon"><ShieldCheck size={17} /></div><div><strong>Your files stay yours</strong><p>Processed on this device. No uploads.</p></div><CheckCircle2 size={15} className="privacy-check" /></div>
           <button className="account-row" onClick={() => setMode('settings')}><div className="account-avatar">JA</div><div className="account-meta"><strong>PDF Studio</strong><small>Personal workspace · v{appVersion}</small></div><Settings2 size={16} className="account-settings" /></button>
         </div>
-      </aside>
+      </motion.aside>
 
-      <main className="main-panel">
+      <motion.main className="main-panel" initial={{ opacity: 0, x: 5 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.24, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}>
         <div className="topbar">
-          <div className="breadcrumbs"><span onClick={() => setMode('home')}>Studio</span><ChevronRight size={14} /><strong>{mode === 'home' ? 'Overview' : mode === 'workspace' ? 'Page workspace' : mode === 'convert' ? 'Conversion studio' : mode === 'history' ? 'Recent sources' : 'Preferences'}</strong>{activePage && mode === 'workspace' && <><ChevronRight size={14} /><span className="crumb-muted">{activePage.sourceName}</span></>}</div>
-          <div className="topbar-actions"><div className="local-badge"><span /> Saved locally</div><IconButton icon={dark ? Sun : Moon} label={dark ? 'Switch to light theme' : 'Switch to dark theme'} onClick={() => setDark((value) => !value)} /><IconButton icon={CircleHelp} label="About PDF Studio" onClick={() => setModal({ type: 'about' })} /></div>
+          <div className="breadcrumbs"><span onClick={() => setMode('home')}>Studio</span><ChevronRight size={14} /><strong>{mode === 'home' ? 'Overview' : mode === 'workspace' ? 'Page workspace' : mode === 'convert' ? 'Conversion studio' : mode === 'history' ? 'Recent sources' : 'Settings'}</strong>{activePage && mode === 'workspace' && <><ChevronRight size={14} /><span className="crumb-muted">{activePage.sourceName}</span></>}</div>
+          <div className="topbar-actions"><div className="local-badge" title="Files are processed on this device"><span /> On-device processing</div><IconButton icon={dark ? Sun : Moon} label={dark ? 'Switch to light theme' : 'Switch to dark theme'} onClick={() => setDark((value) => !value)} /><IconButton icon={CircleHelp} label="About PDF Studio" onClick={() => setModal({ type: 'about' })} /></div>
         </div>
 
-        {mode === 'home' && <section className="home-view animate-fade-up">
-          <div className="welcome-row"><div><div className="eyebrow welcome-eyebrow"><Sparkles size={13} /> YOUR DOCUMENT SPACE</div><h1>Your next document<br /><span>starts here.</span></h1><p>A thoughtful toolkit for organising, editing and transforming PDFs — without sending your files anywhere.</p><div className="welcome-actions"><ActionButton icon={Plus} variant="primary" onClick={chooseFiles}>Open documents <span className="shortcut-hint">Ctrl O</span></ActionButton><ActionButton icon={FolderOpen} onClick={() => setMode('workspace')}>Go to workspace</ActionButton></div></div><div className="hero-art" aria-hidden="true"><div className="hero-orbit orbit-one"/><div className="hero-orbit orbit-two"/><div className="hero-spark spark-a">✦</div><div className="hero-spark spark-b">✧</div><div className="hero-back-sheet sheet-a"/><div className="hero-back-sheet sheet-b"/><div className="hero-document"><div className="hero-doc-top"><span>PDF</span><FileText size={19} /></div><div className="hero-doc-line line-wide"/><div className="hero-doc-line"/><div className="hero-doc-line line-short"/><div className="hero-chart"><i/><i/><i/><i/><i/><i/></div><div className="hero-doc-foot"><span>DOCUMENT</span><span>01 / 12</span></div></div><div className="hero-float-badge"><span><Check size={15} /></span><div><strong>Ready to export</strong><small>Everything in one place</small></div></div><div className="hero-float-type"><FileStack size={17} /><span>PDF + Images</span></div></div></div>
+        <AnimatePresence mode="wait" initial={false}>
+        {mode === 'home' && <motion.section key="home" className="home-view" variants={pageVariants} initial="initial" animate="animate" exit="exit">
+          <div className="welcome-row"><div className="welcome-copy"><div className="eyebrow welcome-eyebrow">WORKSPACE OVERVIEW</div><h1>Manage your PDF documents.</h1><p>Open files to combine, reorder, and convert pages in one workspace. Your documents are processed locally on this device.</p><div className="welcome-actions"><ActionButton icon={Plus} variant="primary" onClick={chooseFiles}>Open documents <span className="shortcut-hint">{platform === 'darwin' ? '⌘ O' : 'Ctrl + O'}</span></ActionButton><ActionButton icon={FolderOpen} onClick={() => setMode('workspace')}>Go to workspace</ActionButton></div><div className="welcome-details"><span><LockKeyhole size={15} /> Local processing</span><span><FileText size={15} /> PDFs and images</span></div></div></div>
 
-          <div className="home-stats"><div className="stat-card"><span className="stat-icon stat-purple"><Files size={17} /></span><div><small>Pages in workspace</small><strong>{pages.length}</strong></div><span className="stat-foot">Current session</span></div><div className="stat-card"><span className="stat-icon stat-mint"><HardDrive size={17} /></span><div><small>Sources opened</small><strong>{documents.length}</strong></div><span className="stat-foot">Local files</span></div><div className="stat-card"><span className="stat-icon stat-orange"><Activity size={17} /></span><div><small>Workspace status</small><strong className="status-ready">Ready to work</strong></div><span className="stat-foot"><span className="online-dot" /> All systems ready</span></div></div>
+          <motion.div className="home-stats" variants={staggerVariants} initial="hidden" animate="show"><motion.div className="stat-card" variants={staggerItemVariants} whileHover={{ y: -2 }} transition={interactiveSpring}><span className="stat-icon stat-purple"><Files size={17} /></span><div><small>Pages in workspace</small><strong>{pages.length}</strong></div><span className="stat-foot">Current session</span></motion.div><motion.div className="stat-card" variants={staggerItemVariants} whileHover={{ y: -2 }} transition={interactiveSpring}><span className="stat-icon stat-mint"><HardDrive size={17} /></span><div><small>Sources opened</small><strong>{documents.length}</strong></div><span className="stat-foot">Local files</span></motion.div><motion.div className="stat-card" variants={staggerItemVariants} whileHover={{ y: -2 }} transition={interactiveSpring}><span className="stat-icon stat-orange"><ShieldCheck size={17} /></span><div><small>File processing</small><strong className="status-ready">On this device</strong></div><span className="stat-foot"><span className="online-dot" /> No cloud upload</span></motion.div></motion.div>
 
-          <div className="section-heading"><div><h2>What would you like to do?</h2><p>Start with a task or open a file to unlock the full workspace.</p></div><span className="section-heading-note"><Sparkles size={14} /> Built for focused work</span></div>
-          <div className="tool-card-grid">{initialTools.map((tool) => <button key={tool.label} className="tool-card" onClick={() => startTool(tool)}><div className={cx('tool-card-icon', `tone-${tool.tone}`)}><tool.icon size={21} strokeWidth={1.8} /></div><div className="tool-card-copy"><strong>{tool.label}</strong><span>{tool.description}</span></div><span className="tool-card-arrow"><ArrowUpRight size={17} /></span></button>)}</div>
-          <div className="bottom-callout"><div className="callout-glyph"><LockKeyhole size={19} /></div><div><strong>Private by design.</strong><span>Your documents are processed locally on your computer. PDF Studio does not upload them to a cloud service.</span></div><button onClick={() => setModal({ type: 'about' })}>Learn more <ArrowRight size={14} /></button></div>
-        </section>}
+          <div className="section-heading"><div><h2>Common tasks</h2><p>Choose a tool to get started.</p></div><span className="section-heading-note">{initialTools.length} available tools</span></div>
+          <motion.div className="tool-card-grid" variants={staggerVariants} initial="hidden" animate="show">{initialTools.map((tool) => <motion.button key={tool.label} variants={staggerItemVariants} whileHover={{ y: -3, scale: 1.006 }} whileTap={{ scale: 0.99 }} transition={interactiveSpring} className="tool-card" onClick={() => startTool(tool)}><div className={cx('tool-card-icon', `tone-${tool.tone}`)}><tool.icon size={21} strokeWidth={1.8} /></div><div className="tool-card-copy"><strong>{tool.label}</strong><span>{tool.description}</span></div><span className="tool-card-arrow"><ArrowUpRight size={17} /></span></motion.button>)}</motion.div>
+          <motion.div className="bottom-callout" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.12, duration: 0.22 }}><div className="callout-glyph"><LockKeyhole size={19} /></div><div><strong>Private by design.</strong><span>Your documents are processed locally on your computer. PDF Studio does not upload them to a cloud service.</span></div><button onClick={() => setModal({ type: 'about' })}>Learn more <ArrowRight size={14} /></button></motion.div>
+        </motion.section>}
 
-        {mode === 'workspace' && <section className="workspace-view animate-fade-up">
+        {mode === 'workspace' && <motion.section key="workspace" className="workspace-view" variants={pageVariants} initial="initial" animate="animate" exit="exit">
           <div className="workspace-heading"><div><div className="eyebrow"><span className="eyebrow-dot" /> PAGE MANAGEMENT</div><h1>Page workspace</h1><p>Arrange your pages exactly how you want them. Drag to reorder, select multiple pages, then export a clean PDF.</p></div><div className="workspace-heading-actions"><ActionButton icon={FolderOpen} onClick={chooseFiles}>Add files</ActionButton><ActionButton icon={Download} variant="primary" disabled={!pages.length} onClick={() => setModal({ type: 'export' })}>Export PDF <ChevronDown size={14} /></ActionButton></div></div>
-          {pages.length === 0 ? <div className="workspace-empty"><div className="empty-illustration"><div className="empty-sheet sheet-back"/><div className="empty-sheet sheet-middle"/><div className="empty-sheet sheet-front"><FilePlus2 size={32} /></div><span className="empty-plus"><Plus size={14} /></span></div><h2>Make room for your pages</h2><p>Bring PDFs and images into one workspace, reorder them, then export everything as a single PDF.</p><ActionButton icon={Upload} variant="primary" onClick={chooseFiles}>Choose files</ActionButton><span className="empty-or">or drop files anywhere in this window</span></div> : <>
-            <div className="workspace-toolbar"><div className="toolbar-group"><IconButton icon={Undo2} label="Undo (Ctrl+Z)" onClick={undo} disabled={!historyRef.current.length} /><IconButton icon={Redo2} label="Redo (Ctrl+Shift+Z)" onClick={redo} disabled={!redoRef.current.length} /><span className="toolbar-rule"/><IconButton icon={RotateCcw} label="Rotate left" onClick={() => rotateSelected(-90)} disabled={!selectedIds.length && !activePage} /><IconButton icon={RotateCw} label="Rotate right" onClick={() => rotateSelected(90)} disabled={!selectedIds.length && !activePage} /><IconButton icon={Copy} label="Duplicate selected pages" onClick={duplicateSelected} disabled={!pages.length} /><IconButton icon={Trash2} label="Delete selected pages" onClick={deleteSelected} disabled={!selectedIds.length} /></div><div className="toolbar-group"><span className="selection-indicator">{selectedIds.length || 0} selected</span><span className="toolbar-rule"/><IconButton icon={Type} label="Add text overlay" onClick={() => setModal({ type: 'text' })} disabled={!pages.length} /><IconButton icon={LockKeyhole} label="Add cover block" onClick={() => setModal({ type: 'cover' })} disabled={!pages.length} /><IconButton icon={Plus} label="Insert blank page" onClick={addBlankPage} /><span className="toolbar-rule"/><IconButton icon={PanelRightClose} label="Hide preview panel" active={showInspector} onClick={() => setShowInspector((value) => !value)} /></div></div>
+          {pages.length === 0 ? <motion.div className="workspace-empty" initial={{ opacity: 0, scale: 0.985 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.22 }}><div className="empty-illustration"><div className="empty-sheet sheet-back"/><div className="empty-sheet sheet-middle"/><div className="empty-sheet sheet-front"><FilePlus2 size={32} /></div><span className="empty-plus"><Plus size={14} /></span></div><h2>Make room for your pages</h2><p>Bring PDFs and images into one workspace, reorder them, then export everything as a single PDF.</p><ActionButton icon={Upload} variant="primary" onClick={chooseFiles}>Choose files</ActionButton><span className="empty-or">or drop files anywhere in this window</span></motion.div> : <>
+            <div className="workspace-toolbar"><div className="toolbar-group"><IconButton icon={Undo2} label="Undo (Ctrl+Z)" onClick={undo} disabled={!historyRef.current.length} /><IconButton icon={Redo2} label="Redo (Ctrl+Shift+Z)" onClick={redo} disabled={!redoRef.current.length} /><span className="toolbar-rule"/><IconButton icon={RotateCcw} label="Rotate left" onClick={() => rotateSelected(-90)} disabled={!selectedIds.length && !activePage} /><IconButton icon={RotateCw} label="Rotate right" onClick={() => rotateSelected(90)} disabled={!selectedIds.length && !activePage} /><IconButton icon={Copy} label="Duplicate selected pages" onClick={duplicateSelected} disabled={!pages.length} /><IconButton icon={Trash2} label="Delete selected pages" onClick={requestDeleteSelected} disabled={!selectedIds.length} /></div><div className="toolbar-group"><span className="selection-indicator">{selectedIds.length || 0} selected</span><span className="toolbar-rule"/><IconButton icon={Type} label="Add text overlay" onClick={() => setModal({ type: 'text' })} disabled={!pages.length} /><IconButton icon={LockKeyhole} label="Add cover block" onClick={() => setModal({ type: 'cover' })} disabled={!pages.length} /><IconButton icon={Plus} label="Insert blank page" onClick={addBlankPage} /><span className="toolbar-rule"/><IconButton icon={PanelRightClose} label="Hide preview panel" active={showInspector} onClick={() => setShowInspector((value) => !value)} /></div></div>
             <div className={cx('workspace-content', !showInspector && 'inspector-hidden')}>
               <div className="page-grid-panel"><div className="page-grid-toolbar"><div className="page-grid-title"><strong>Pages <span>{pages.length}</span></strong><small>{search.trim() ? 'Clear search to reorder pages' : 'Drag tiles to reorder · use arrows for precise moves'}</small></div><div className="page-grid-options"><div className="search-field"><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a page..." aria-label="Find a page" />{search && <button onClick={() => setSearch('')}><X size={12}/></button>}</div><IconButton icon={ListFilter} label="Reverse page order" onClick={() => commitPages([...pagesRef.current].reverse())} /></div></div>
-                <div className="page-grid-scroll"><div className="page-grid">{filteredPages.map((page) => {
+                <div className="page-grid-scroll"><div className="page-grid"><AnimatePresence initial={false}>{filteredPages.map((page) => {
                   const pageIndex = pages.findIndex((item) => item.id === page.id);
                   const selected = selectedIds.includes(page.id);
                   const cuePosition = dropCue?.id === page.id ? dropCue.position : null;
                   const pageNumber = String(pageIndex + 1).padStart(2, '0');
-                  return <div key={page.id}
+                  return <motion.div key={page.id} layout="position" initial={{ opacity: 0, y: 8, scale: 0.985 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, scale: 0.96 }} whileHover={{ y: -2 }} transition={interactiveSpring}
                     className={cx('page-card', selected && 'page-selected', activeId === page.id && 'page-active', draggingPageId === page.id && 'page-dragging', cuePosition === 'before' && 'drop-before', cuePosition === 'after' && 'drop-after')}
                     draggable={!search.trim()}
                     aria-label={`Page ${pageIndex + 1}. Drag to reorder. Click to select.`}
@@ -644,8 +829,8 @@ function App() {
                     <div className="page-card-top"><span className={cx('page-number-badge', selected && 'badge-selected')}>{pageNumber}</span><span className="page-drag-grip" aria-hidden="true"><GripVertical size={14} /></span><div className="page-card-hover-actions"><IconButton icon={ArrowLeft} label={`Move page ${pageIndex + 1} earlier`} size={12} disabled={pageIndex === 0 || !!search.trim()} onClick={(event) => { event.stopPropagation(); movePage(page.id, pages[pageIndex - 1]?.id, 'before'); }} /><IconButton icon={ArrowRight} label={`Move page ${pageIndex + 1} later`} size={12} disabled={pageIndex === pages.length - 1 || !!search.trim()} onClick={(event) => { event.stopPropagation(); movePage(page.id, pages[pageIndex + 1]?.id, 'after'); }} /><IconButton icon={RotateCw} label={`Rotate page ${pageIndex + 1}`} size={12} onClick={(event) => { event.stopPropagation(); rotateSelected(90, [page.id]); }} /><IconButton icon={MoreHorizontal} label={`More actions for page ${pageIndex + 1}`} size={12} onClick={(event) => { event.stopPropagation(); setActiveId(page.id); setSelectedIds([page.id]); setModal({ type: 'page-menu', pageId: page.id }); }} /></div></div>
                     <div className="page-thumb-zone">{page.thumbnail ? <img src={page.thumbnail} alt={`Page ${pageIndex + 1}`} draggable="false" /> : <div className="page-thumb-placeholder"><FileText size={27} /><span>Rendering…</span></div>}{!!page.overlays?.length && <span className="page-overlay-badge"><Type size={11} /> {page.overlays.length}</span>}</div>
                     <div className="page-card-footer"><div><strong>Page {pageNumber}</strong><small>{page.kind === 'image' ? extName(page.sourceName) + ' image' : page.kind === 'blank' ? 'Blank page' : `PDF page ${page.sourcePageIndex + 1}`}</small></div><span className={cx('page-check', selected && 'page-check-on')}>{selected && <Check size={12} />}</span></div>
-                  </div>;
-                })}
+                  </motion.div>;
+                })}</AnimatePresence>
                 <button type="button" className={cx('page-add-card', dropCue?.id === '__end__' && 'page-add-hover')} onClick={chooseFiles} onDragOver={(event) => {
                   const draggedId = event.dataTransfer?.getData('application/x-pdfstudio-page') || draggingPageId;
                   if (draggedId) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setDropCue((cue) => cue?.id === '__end__' ? cue : { id: '__end__', position: 'after' }); }
@@ -660,36 +845,113 @@ function App() {
                   <span className="page-add-icon"><Plus size={24} strokeWidth={1.8} /></span><strong>Add pages</strong><span>PDF or image</span><kbd>Browse files</kbd>
                 </button>
                 </div>{filteredPages.length === 0 && <div className="no-search-results"><Search size={22}/><strong>No pages match “{search}”</strong><button onClick={() => setSearch('')}>Clear search</button></div>}</div>
-                <div className="page-grid-bottom"><span><GripVertical size={13} /> {pages.length} pages total</span><span>Shift-click range <b>·</b> Ctrl/Cmd-click multiple <b>·</b> Drop at + to move to end</span></div>
+                <div className="page-grid-bottom"><span><GripVertical size={13} /> {pages.length} pages total</span><span>Shift-click range <b>·</b> {platform === 'darwin' ? '⌘-click multiple' : 'Ctrl-click multiple'} <b>·</b> Drop at + to move to end</span></div>
               </div>
-              {showInspector && <aside className="inspector-panel"><div className="inspector-head"><div><div className="eyebrow">LIVE PREVIEW</div><h3>Page details</h3></div><IconButton icon={PanelRightOpen} label="Hide preview" onClick={() => setShowInspector(false)} /></div>
+              {showInspector && <motion.aside className="inspector-panel" initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 12 }} transition={{ duration: 0.2 }}><div className="inspector-head"><div><div className="eyebrow">LIVE PREVIEW</div><h3>Page details</h3></div><IconButton icon={PanelRightOpen} label="Hide preview" onClick={() => setShowInspector(false)} /></div>
                 {activePage ? <><div className="inspector-page-meta"><div className="inspector-doc-icon"><FileText size={17} /></div><div className="inspector-doc-copy"><strong>Page {pages.findIndex((page) => page.id === activePage.id) + 1}</strong><span title={activePage.sourceName}>{activePage.sourceName}</span></div><span className="inspector-page-count">{pages.findIndex((page) => page.id === activePage.id) + 1} / {pages.length}</span></div>
                 <div className="inspector-preview-wrap"><PagePreview page={activePage} sources={sourcesRef.current} zoom={previewZoom} onAddText={() => setModal({ type: 'text' })} onAddBlock={() => setModal({ type: 'cover' })} /></div>
                 <div className="preview-zoom-row"><span><ZoomIn size={14} /> Preview scale</span><div><button onClick={() => setPreviewZoom((value) => Math.max(0.6, +(value - 0.1).toFixed(1)))} disabled={previewZoom <= 0.6}><ZoomOut size={13}/></button><span>{Math.round(previewZoom * 100)}%</span><button onClick={() => setPreviewZoom((value) => Math.min(1.4, +(value + 0.1).toFixed(1)))} disabled={previewZoom >= 1.4}><ZoomIn size={13}/></button></div></div>
                 <div className="inspector-properties"><SectionLabel>Page properties</SectionLabel><div className="property-row"><span>Position in document</span><strong>{String(pages.findIndex((page) => page.id === activePage.id) + 1).padStart(2, '0')} <span className="property-total">/ {pages.length}</span></strong></div><div className="property-row"><span>Source type</span><strong>{activePage.kind === 'pdf' ? 'PDF document' : activePage.kind === 'image' ? 'Image file' : 'Blank page'}</strong></div><div className="property-row"><span>Orientation</span><strong>{activePage.rotation % 180 === 0 ? 'Portrait' : 'Landscape'}</strong></div><div className="property-row"><span>Overlay objects</span><strong>{activePage.overlays?.length || 0}</strong></div></div>
                 <div className="inspector-actions"><ActionButton icon={RotateCcw} onClick={() => { setSelectedIds([activePage.id]); rotateSelected(-90); }}>Rotate left</ActionButton><ActionButton icon={Scissors} onClick={() => { setSelectedIds([activePage.id]); setModal({ type: 'export-selected' }); }}>Export page</ActionButton></div></> : <div className="inspector-empty"><FileText size={30}/><p>Select a page to preview it here.</p></div>}
-              </aside>}
+              </motion.aside>}
             </div>
           </>}
-        </section>}
+        </motion.section>}
 
-        {mode === 'convert' && <section className="conversion-view animate-fade-up"><div className="workspace-heading"><div><div className="eyebrow"><Sparkles size={13} /> CONVERSION STUDIO</div><h1>Make your files work harder.</h1><p>Convert your current workspace or open a file to get started. Conversion runs locally on your device.</p></div><ActionButton icon={FolderOpen} onClick={chooseFiles}>Add files</ActionButton></div><div className="conversion-grid">
-          <button className="conversion-card" onClick={() => pages.length ? setModal({ type: 'word' }) : chooseFiles()}><div className="conversion-card-art art-word"><FileText size={38}/><span>W</span></div><div className="conversion-card-body"><span className="conversion-tag">EDITABLE TEXT</span><h3>PDF to Word</h3><p>Extract selectable text into a DOCX document with page breaks. Complex layouts may need a little cleanup.</p><div className="conversion-card-action">Convert to .docx <ArrowRight size={15}/></div></div></button>
-          <button className="conversion-card" onClick={() => pages.length ? setModal({ type: 'images' }) : chooseFiles()}><div className="conversion-card-art art-image"><FileImage size={38}/><span>PNG</span></div><div className="conversion-card-body"><span className="conversion-tag">HIGH-QUALITY OUTPUT</span><h3>PDF to images</h3><p>Render each current page to PNG or JPG. Great for sharing a page or preparing a visual preview.</p><div className="conversion-card-action">Export images <ArrowRight size={15}/></div></div></button>
-          <button className="conversion-card" onClick={chooseFiles}><div className="conversion-card-art art-doc"><ImagePlus size={38}/><span>JPG</span></div><div className="conversion-card-body"><span className="conversion-tag">IMAGE WORKFLOW</span><h3>Images to PDF</h3><p>Open PNG, JPG, WEBP, BMP or GIF files. Image pages join the same sortable workspace.</p><div className="conversion-card-action">Choose images <ArrowRight size={15}/></div></div></button>
-          <button className="conversion-card" onClick={() => pages.length ? setModal({ type: 'split' }) : chooseFiles()}><div className="conversion-card-art art-split"><Split size={38}/><span>01 / 02</span></div><div className="conversion-card-body"><span className="conversion-tag">PAGE CONTROL</span><h3>Split PDF</h3><p>Split the current workspace into individual pages, fixed page groups, or custom page ranges.</p><div className="conversion-card-action">Configure split <ArrowRight size={15}/></div></div></button>
-        </div><div className="conversion-footnote"><ShieldCheck size={17}/><span><strong>Local-first processing.</strong> Files are opened and transformed on this computer. No cloud upload or account is required.</span></div></section>}
+        {mode === 'convert' && <motion.section key="convert" className="conversion-view" variants={pageVariants} initial="initial" animate="animate" exit="exit"><div className="workspace-heading"><div><div className="eyebrow"><Sparkles size={13} /> CONVERSION STUDIO</div><h1>Make your files work harder.</h1><p>Convert your current workspace or open a file to get started. Conversion runs locally on your device.</p></div><ActionButton icon={FolderOpen} onClick={chooseFiles}>Add files</ActionButton></div><motion.div className="conversion-grid" variants={staggerVariants} initial="hidden" animate="show">
+          <motion.button variants={staggerItemVariants} whileHover={{ y: -3 }} whileTap={{ scale: 0.99 }} transition={interactiveSpring} className="conversion-card" onClick={() => pages.length ? setModal({ type: 'word' }) : chooseFiles()}><div className="conversion-card-art art-word"><FileText size={38}/><span>W</span></div><div className="conversion-card-body"><span className="conversion-tag">EDITABLE TEXT</span><h3>PDF to Word</h3><p>Extract selectable text into a DOCX document with page breaks. Complex layouts may need a little cleanup.</p><div className="conversion-card-action">Convert to .docx <ArrowRight size={15}/></div></div></motion.button>
+          <motion.button variants={staggerItemVariants} whileHover={{ y: -3 }} whileTap={{ scale: 0.99 }} transition={interactiveSpring} className="conversion-card" onClick={() => pages.length ? setModal({ type: 'images' }) : chooseFiles()}><div className="conversion-card-art art-image"><FileImage size={38}/><span>PNG</span></div><div className="conversion-card-body"><span className="conversion-tag">HIGH-QUALITY OUTPUT</span><h3>PDF to images</h3><p>Render each current page to PNG or JPG. Great for sharing a page or preparing a visual preview.</p><div className="conversion-card-action">Export images <ArrowRight size={15}/></div></div></motion.button>
+          <motion.button variants={staggerItemVariants} whileHover={{ y: -3 }} whileTap={{ scale: 0.99 }} transition={interactiveSpring} className="conversion-card" onClick={chooseFiles}><div className="conversion-card-art art-doc"><ImagePlus size={38}/><span>JPG</span></div><div className="conversion-card-body"><span className="conversion-tag">IMAGE WORKFLOW</span><h3>Images to PDF</h3><p>Open PNG, JPG, WEBP, BMP or GIF files. Image pages join the same sortable workspace.</p><div className="conversion-card-action">Choose images <ArrowRight size={15}/></div></div></motion.button>
+          <motion.button variants={staggerItemVariants} whileHover={{ y: -3 }} whileTap={{ scale: 0.99 }} transition={interactiveSpring} className="conversion-card" onClick={() => pages.length ? setModal({ type: 'split' }) : chooseFiles()}><div className="conversion-card-art art-split"><Split size={38}/><span>01 / 02</span></div><div className="conversion-card-body"><span className="conversion-tag">PAGE CONTROL</span><h3>Split PDF</h3><p>Split the current workspace into individual pages, fixed page groups, or custom page ranges.</p><div className="conversion-card-action">Configure split <ArrowRight size={15}/></div></div></motion.button>
+        </motion.div><div className="conversion-footnote"><ShieldCheck size={17}/><span><strong>Local-first processing.</strong> Files are opened and transformed on this computer. No cloud upload or account is required.</span></div></motion.section>}
 
-        {mode === 'history' && <section className="history-view animate-fade-up"><div className="workspace-heading"><div><div className="eyebrow">YOUR LOCAL SESSION</div><h1>Recent sources</h1><p>Files currently loaded into this workspace.</p></div><ActionButton icon={FolderOpen} onClick={chooseFiles}>Add files</ActionButton></div>{documents.length ? <div className="history-table"><div className="history-table-head"><span>DOCUMENT</span><span>TYPE</span><span>SIZE</span><span>PAGES</span><span /></div>{documents.map((document) => <div className="history-table-row" key={document.id}><div className="history-file"><div className={cx('file-type-mini', document.kind === 'pdf' ? 'file-pdf' : 'file-image')}>{document.kind === 'pdf' ? <FileText size={15}/> : <FileImage size={15}/>}</div><div><strong>{document.name}</strong><small>{document.path || 'Added to current session'}</small></div></div><span>{extName(document.name)}</span><span>{formatBytes(document.size)}</span><span>{document.pageCount}</span><ActionButton icon={ArrowRight} onClick={() => { const p = pages.find((page) => page.sourceId === document.id); if (p) { setActiveId(p.id); setSelectedIds([p.id]); setMode('workspace'); } }}>Open</ActionButton></div>)}</div> : <div className="history-empty"><Clock3 size={30}/><h3>No sources yet</h3><p>Files that you open in PDF Studio will appear here for this session.</p><ActionButton icon={FolderOpen} variant="primary" onClick={chooseFiles}>Open files</ActionButton></div>}</section>}
+        {mode === 'history' && <motion.section key="history" className="history-view" variants={pageVariants} initial="initial" animate="animate" exit="exit"><div className="workspace-heading"><div><div className="eyebrow">YOUR LOCAL SESSION</div><h1>Recent sources</h1><p>Files currently loaded into this workspace.</p></div><ActionButton icon={FolderOpen} onClick={chooseFiles}>Add files</ActionButton></div>{documents.length ? <div className="history-table"><div className="history-table-head"><span>DOCUMENT</span><span>TYPE</span><span>SIZE</span><span>PAGES</span><span /></div>{documents.map((document, index) => <motion.div className="history-table-row" key={document.id} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.18, delay: Math.min(index * 0.035, 0.2) }}><div className="history-file"><div className={cx('file-type-mini', document.kind === 'pdf' ? 'file-pdf' : 'file-image')}>{document.kind === 'pdf' ? <FileText size={15}/> : <FileImage size={15}/>}</div><div><strong>{document.name}</strong><small>{document.path || 'Added to current session'}</small></div></div><span>{extName(document.name)}</span><span>{formatBytes(document.size)}</span><span>{document.pageCount}</span><ActionButton icon={ArrowRight} onClick={() => { const p = pages.find((page) => page.sourceId === document.id); if (p) { setActiveId(p.id); setSelectedIds([p.id]); setMode('workspace'); } }}>Open</ActionButton></motion.div>)}</div> : <motion.div className="history-empty" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}><Clock3 size={30}/><h3>No sources yet</h3><p>Files that you open in PDF Studio will appear here for this session.</p><ActionButton icon={FolderOpen} variant="primary" onClick={chooseFiles}>Open files</ActionButton></motion.div>}</motion.section>}
 
-        {mode === 'settings' && <section className="settings-view animate-fade-up"><div className="workspace-heading"><div><div className="eyebrow">PERSONALIZE YOUR WORKSPACE</div><h1>Preferences</h1><p>Make PDF Studio feel right for the way you work.</p></div></div><div className="settings-card"><div className="settings-card-heading"><span className="settings-symbol"><Sun size={18}/></span><div><h3>Appearance</h3><p>Choose a comfortable theme for your workspace.</p></div></div><div className="theme-choice-row"><button className={cx('theme-choice', !dark && 'theme-choice-active')} onClick={() => setDark(false)}><span className="theme-preview theme-preview-light"><i/><i/><i/></span><span><strong>Light</strong><small>Clear, bright surfaces</small></span>{!dark && <CheckCircle2 size={17}/>}</button><button className={cx('theme-choice', dark && 'theme-choice-active')} onClick={() => setDark(true)}><span className="theme-preview theme-preview-dark"><i/><i/><i/></span><span><strong>Dark</strong><small>Low-light workspace</small></span>{dark && <CheckCircle2 size={17}/>}</button></div><div className="settings-card-heading settings-security"><span className="settings-symbol settings-symbol-green"><ShieldCheck size={18}/></span><div><h3>Privacy and files</h3><p>All file work stays on your device. There is no sign-in and no cloud upload in this build.</p></div></div><div className="settings-version"><span>PDF Studio Cross-platform</span><strong>Version {appVersion}</strong></div></div></section>}
-      </main>
-    </div>
+        {mode === 'settings' && <motion.section key="settings" className="settings-view" variants={pageVariants} initial="initial" animate="animate" exit="exit">
+          <div className="settings-page-heading">
+            <div><div className="eyebrow"><Settings2 size={14} /> APPLICATION PREFERENCES</div><h1>Settings</h1><p>Configure the way PDF Studio looks and behaves. Your preferences are saved on this computer.</p></div>
+            <ActionButton icon={RotateCcw} onClick={resetPreferences}>Reset to defaults</ActionButton>
+          </div>
+          <div className="settings-layout">
+            <nav className="settings-nav" aria-label="Settings categories">
+              <motion.button whileHover={{ x: 2 }} whileTap={{ scale: 0.99 }} transition={interactiveSpring} className={cx('settings-nav-item', settingsTab === 'appearance' && 'settings-nav-active')} onClick={() => setSettingsTab('appearance')}><Sun size={18}/><span><strong>Appearance</strong><small>Theme and readability</small></span>{settingsTab === 'appearance' && <ChevronRight size={16}/>}</motion.button>
+              <motion.button whileHover={{ x: 2 }} whileTap={{ scale: 0.99 }} transition={interactiveSpring} className={cx('settings-nav-item', settingsTab === 'workspace' && 'settings-nav-active')} onClick={() => setSettingsTab('workspace')}><SlidersHorizontal size={18}/><span><strong>Workspace</strong><small>Page tools and safeguards</small></span>{settingsTab === 'workspace' && <ChevronRight size={16}/>}</motion.button>
+              <motion.button whileHover={{ x: 2 }} whileTap={{ scale: 0.99 }} transition={interactiveSpring} className={cx('settings-nav-item', settingsTab === 'export' && 'settings-nav-active')} onClick={() => setSettingsTab('export')}><FileOutput size={18}/><span><strong>Files & export</strong><small>Default image output</small></span>{settingsTab === 'export' && <ChevronRight size={16}/>}</motion.button>
+              <motion.button whileHover={{ x: 2 }} whileTap={{ scale: 0.99 }} transition={interactiveSpring} className={cx('settings-nav-item', settingsTab === 'privacy' && 'settings-nav-active')} onClick={() => setSettingsTab('privacy')}><ShieldCheck size={18}/><span><strong>Privacy & about</strong><small>Local processing and shortcuts</small></span>{settingsTab === 'privacy' && <ChevronRight size={16}/>}</motion.button>
+              <motion.button whileHover={{ x: 2 }} whileTap={{ scale: 0.99 }} transition={interactiveSpring} className={cx('settings-nav-item', settingsTab === 'updates' && 'settings-nav-active')} onClick={() => setSettingsTab('updates')}><MonitorDown size={18}/><span><strong>Updates & downloads</strong><small>Automatic checks and verified updates</small></span>{settingsTab === 'updates' && <ChevronRight size={16}/>}</motion.button>
+            </nav>
 
-    {isLoading && <div className="loading-overlay"><div className="loading-card"><div className="loading-spinner"><span/><span/><span/></div><strong>{loadingLabel}</strong><span>Keeping everything on this device</span></div></div>}
-    {toast && <div className={cx('toast-message', `toast-${toast.kind}`)}><span className="toast-icon">{toast.kind === 'error' ? <X size={15}/> : toast.kind === 'info' ? <Activity size={15}/> : <Check size={15}/>}</span><span>{toast.message}</span><button onClick={() => setToast(null)}><X size={13}/></button></div>}
+            <div className="settings-content">
+              <AnimatePresence mode="wait" initial={false}>
+              <motion.div key={settingsTab} className="settings-content-motion" variants={pageVariants} initial="initial" animate="animate" exit="exit">
+              {settingsTab === 'appearance' && <>
+                <div className="settings-panel">
+                  <div className="settings-panel-title"><span className="settings-symbol"><Sun size={18}/></span><div><h2>Appearance</h2><p>Use a theme and interface scale that are comfortable to read.</p></div></div>
+                  <div className="settings-field"><div className="settings-field-heading"><strong>Color mode</strong><small>Choose the surface style for your workspace.</small></div><div className="theme-choice-row settings-theme-options"><button className={cx('theme-choice', !dark && 'theme-choice-active')} onClick={() => setDark(false)}><span className="theme-preview theme-preview-light"><i/><i/><i/></span><span><strong>Light</strong><small>Bright, high-clarity surfaces</small></span>{!dark && <CheckCircle2 size={18}/>}</button><button className={cx('theme-choice', dark && 'theme-choice-active')} onClick={() => setDark(true)}><span className="theme-preview theme-preview-dark"><i/><i/><i/></span><span><strong>Dark</strong><small>Comfortable in low light</small></span>{dark && <CheckCircle2 size={18}/>}</button></div></div>
+                  <div className="settings-divider"/>
+                  <div className="settings-field"><div className="settings-field-heading"><strong>Accent color</strong><small>Personalize selected navigation, primary buttons, focus rings, and active controls.</small></div><div className="accent-preset-grid" role="group" aria-label="Accent color presets">{ACCENT_PRESETS.map((preset) => <button type="button" key={preset.id} className={cx('accent-preset', preferences.accentTheme === preset.id && 'accent-preset-active')} onClick={() => setPreference('accentTheme', preset.id)} aria-pressed={preferences.accentTheme === preset.id}><span className="accent-preset-swatch" style={{ '--swatch-color': preset.color, '--swatch-soft': preset.soft }}><span>{preferences.accentTheme === preset.id ? <Check size={15}/> : null}</span></span><strong>{preset.label}</strong>{preferences.accentTheme === preset.id && <CheckCircle2 size={15} className="accent-preset-check"/>}</button>)}</div></div>
+                  <div className="settings-divider"/>
+                  <div className="settings-field"><div className="settings-field-heading"><strong>Interface text size</strong><small>Scale menus, settings, labels, and controls across the app.</small></div><div className="settings-segment text-scale-options"><button className={cx(preferences.fontScale === 'standard' && 'segment-selected')} onClick={() => setPreference('fontScale', 'standard')}><span className="segment-demo-small">Aa</span><span>Standard</span><small>100%</small></button><button className={cx(preferences.fontScale === 'large' && 'segment-selected')} onClick={() => setPreference('fontScale', 'large')}><span className="segment-demo-large">Aa</span><span>Large</span><small>115%</small></button><button className={cx(preferences.fontScale === 'xlarge' && 'segment-selected')} onClick={() => setPreference('fontScale', 'xlarge')}><span className="segment-demo-xlarge">Aa</span><span>Extra large</span><small>130%</small></button></div></div>
+                  <div className="settings-divider"/>
+                  <div className="settings-field"><div className="settings-field-heading"><strong>Workspace density</strong><small>Choose more breathing room or fit more page cards on screen.</small></div><div className="settings-segment"><button className={cx(preferences.density === 'comfortable' && 'segment-selected')} onClick={() => setPreference('density', 'comfortable')}><span>Comfortable</span><small>More spacing</small></button><button className={cx(preferences.density === 'compact' && 'segment-selected')} onClick={() => setPreference('density', 'compact')}><span>Compact</span><small>More content</small></button></div></div>
+                  <div className="settings-divider"/>
+                  <SettingToggle title="Increase contrast" description="Strengthen boundaries, text contrast, and focus indicators for easier scanning." checked={preferences.highContrast} onChange={(value) => setPreference('highContrast', value)}/>
+                  <div className="settings-divider"/>
+                  <SettingToggle title="Reduce motion" description="Reduce transitions and movement effects for a calmer interface." checked={preferences.reduceMotion} onChange={(value) => setPreference('reduceMotion', value)}/>
+                </div>
+              </>}
 
-    {modal?.type === 'export' && <Modal title="Export PDF" eyebrow="FINALIZE YOUR DOCUMENT" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={Download} onClick={() => doExportPdf(false)}>Export {pages.length} pages</ActionButton></>}>
+              {settingsTab === 'workspace' && <div className="settings-panel">
+                <div className="settings-panel-title"><span className="settings-symbol settings-symbol-blue"><SlidersHorizontal size={18}/></span><div><h2>Workspace behavior</h2><p>Control page tools and protect against accidental changes.</p></div></div>
+                <SettingToggle title="Show page preview panel" description="Keep the selected-page preview and page properties visible on the right side of the workspace." checked={showInspector} onChange={setShowInspector}/>
+                <div className="settings-divider"/>
+                <SettingToggle title="Confirm before deleting pages" description="Ask you to review the number of pages before removing them. Recommended for most users." checked={preferences.confirmDelete} onChange={(value) => setPreference('confirmDelete', value)}/>
+                <div className="settings-divider"/>
+                <div className="settings-shortcut-list"><div className="settings-field-heading"><strong>Keyboard shortcuts</strong><small>Shortcuts use {platform === 'darwin' ? 'Command (⌘)' : 'Control (Ctrl)'} on this computer and work when focus is not in a text field.</small></div><div className="shortcut-row"><span>Open documents</span><ShortcutKeys platform={platform} keys={['O']}/></div><div className="shortcut-row"><span>Export current workspace</span><ShortcutKeys platform={platform} keys={['S']}/></div><div className="shortcut-row"><span>Undo</span><ShortcutKeys platform={platform} keys={['Z']}/></div><div className="shortcut-row"><span>Redo</span><ShortcutKeys platform={platform} keys={['Shift', 'Z']}/></div><div className="shortcut-row"><span>Delete selected pages</span><span className="shortcut-keys"><kbd>Delete</kbd><span className="shortcut-or">or</span><kbd>Backspace</kbd></span></div><div className="shortcut-row"><span>Navigate sections</span><ShortcutKeys platform={platform} keys={['1–4']}/></div></div>
+              </div>}
+
+              {settingsTab === 'export' && <div className="settings-panel">
+                <div className="settings-panel-title"><span className="settings-symbol settings-symbol-blue"><FileOutput size={18}/></span><div><h2>Files & export</h2><p>Set defaults for page-image exports. PDF export continues to ask where to save each file.</p></div></div>
+                <div className="settings-field"><div className="settings-field-heading"><strong>Default image format</strong><small>Used whenever you open the “Export pages as images” tool.</small></div><div className="settings-segment"><button className={cx(imageFormat === 'png' && 'segment-selected')} onClick={() => setImageFormat('png')}><span>PNG</span><small>Lossless · ideal for text</small></button><button className={cx(imageFormat === 'jpeg' && 'segment-selected')} onClick={() => setImageFormat('jpeg')}><span>JPEG</span><small>Smaller · ideal for photos</small></button></div></div>
+                {imageFormat === 'jpeg' && <><div className="settings-divider"/><div className="settings-field"><div className="settings-field-heading"><strong>JPEG image quality</strong><small>Higher quality preserves detail but creates larger files.</small></div><div className="settings-range"><input aria-label="Default JPEG quality" type="range" min="40" max="100" value={imageQuality} onChange={(event) => setImageQuality(event.target.value)}/><strong>{imageQuality}%</strong></div><div className="range-ends"><span>Smaller files</span><span>Better quality</span></div></div></>}
+                <div className="settings-note"><HardDrive size={18}/><div><strong>Save location</strong><p>PDF Studio opens a save dialog or folder chooser for exports. It does not silently overwrite your files.</p></div></div>
+              </div>}
+
+              {settingsTab === 'privacy' && <>
+                <div className="settings-panel">
+                  <div className="settings-panel-title"><span className="settings-symbol settings-symbol-green"><ShieldCheck size={18}/></span><div><h2>Privacy & file handling</h2><p>Your documents are processed locally by this desktop build.</p></div></div>
+                  <div className="privacy-detail-row"><span className="privacy-detail-icon"><CheckCircle2 size={18}/></span><div><strong>Local-first processing</strong><p>Imported document bytes stay in the current application session; this build has no document upload or account sign-in workflow.</p></div></div>
+                  <div className="privacy-detail-row"><span className="privacy-detail-icon"><HardDrive size={18}/></span><div><strong>Preferences stored on this computer</strong><p>Theme, readability, workspace behavior and export defaults are saved in the app's local settings storage.</p></div></div>
+                  <div className="privacy-detail-row"><span className="privacy-detail-icon"><Activity size={18}/></span><div><strong>App session reporting</strong><p>For usage and update management, PDF Studio sends its version, a random installation and session ID, operating system, computer hostname, local network IP address, session start time and elapsed time. Document contents, file names and PDF data are not sent.</p></div></div>
+                  <div className="settings-note"><CircleHelp size={18}/><div><strong>About PDF Studio</strong><p>Version {appVersion} · Electron, React and Tailwind CSS. PDF-to-Word extracts selectable text; scanned pages may require OCR, which is not included in this build.</p><button className="inline-link-button" onClick={() => setModal({ type: 'about' })}>View application details <ArrowUpRight size={14}/></button></div></div>
+                </div>
+              </>}
+
+              {settingsTab === 'updates' && <div className="settings-panel updater-panel">
+                <div className="settings-panel-title"><span className="settings-symbol settings-symbol-blue"><MonitorDown size={18}/></span><div><h2>Updates & downloads</h2><p>PDF Studio checks when it opens and quietly prepares verified updates while you keep working.</p></div></div>
+                <div className="update-current-version"><div className="update-version-icon"><PackageCheck size={20}/></div><div><span>Installed version</span><strong>PDF Studio {appVersion}</strong><small>{platform === 'darwin' ? 'macOS' : platform === 'win32' ? 'Windows' : platform === 'linux' ? 'Linux' : platform} · {platform === 'win32' ? 'portable EXE' : platform === 'darwin' ? 'ZIP package' : platform === 'linux' ? 'AppImage' : 'desktop package'}</small></div><span className="update-local-label"><span/> Local app</span></div>
+                <div className="settings-divider"/>
+                <div className="update-actions"><ActionButton icon={updateState.status === 'checking' ? LoaderCircle : Search} variant="primary" disabled={updateState.status === 'checking' || updateState.status === 'downloading' || updateState.status === 'applying'} onClick={checkForUpdates}>{updateState.status === 'checking' ? 'Checking for updates…' : 'Check for updates'}</ActionButton>{updateState.status === 'downloading' && <span className="update-background-note"><LoaderCircle size={14}/> Downloading securely in the background. You can keep working.</span>}</div>
+                <motion.div layout className={cx('update-status-card', `update-status-${updateState.status}`)} role="status" aria-live="polite" initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.18 }}><span className="update-status-icon">{updateState.status === 'checking' || updateState.status === 'downloading' || updateState.status === 'applying' ? <LoaderCircle className="update-status-spinner" size={18}/> : updateState.status === 'error' ? <CircleAlert size={18}/> : updateState.status === 'ready' || updateState.status === 'up-to-date' ? <CheckCircle size={18}/> : <MonitorDown size={18}/>}</span><div className="update-status-copy"><strong>{updateState.status === 'checking' ? 'Checking for updates' : updateState.status === 'downloading' ? `Downloading version ${updateState.latestVersion || ''}`.trim() : updateState.status === 'ready' ? `Version ${updateState.latestVersion || readyUpdate?.version || ''} is ready` : updateState.status === 'applying' ? 'Applying update' : updateState.status === 'up-to-date' ? 'You’re up to date' : updateState.status === 'error' ? 'Could not check for updates' : 'Automatic updates enabled'}</strong><p>{updateState.message || 'PDF Studio checks for verified updates when the application opens.'}</p></div></motion.div>
+                <AnimatePresence initial={false}>{updateState.status === 'downloading' && <motion.div className="update-progress-wrap" key="update-progress" initial={{ opacity: 0, height: 0, y: -4 }} animate={{ opacity: 1, height: 'auto', y: 0 }} exit={{ opacity: 0, height: 0, y: -4 }} transition={{ duration: 0.2 }}><div className="update-progress-meta"><span>{updateState.percent == null ? 'Downloading…' : `${Math.round(updateState.percent)}%`}</span><span>{updateState.downloadedBytes != null ? `${formatBytes(updateState.downloadedBytes)}${updateState.totalBytes ? ` of ${formatBytes(updateState.totalBytes)}` : ''}` : 'Preparing update package'}</span></div><div className="update-progress-track"><motion.div className={cx('update-progress-value', updateState.percent == null && 'update-progress-indeterminate')} animate={{ width: updateState.percent == null ? '34%' : `${Math.min(100, Math.max(0, updateState.percent))}%` }} transition={{ duration: 0.18, ease: 'easeOut' }}/></div></motion.div>}</AnimatePresence>
+                <div className="settings-note update-safety-note"><ShieldCheck size={18}/><div><strong>Verified before installing</strong><p>Update files are checked for integrity before they are staged. When an update is ready, PDF Studio asks whether to restart and apply it now or wait until later.</p></div></div>
+              </div>}
+              </motion.div>
+              </AnimatePresence>
+            </div>
+          </div>
+        </motion.section>}
+        </AnimatePresence>
+      </motion.main>
+    </motion.div>
+
+    <AnimatePresence>{isLoading && <motion.div className="loading-overlay" key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><motion.div className="loading-card" initial={{ opacity: 0, y: 8, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 4, scale: 0.99 }} transition={{ type: 'spring', stiffness: 420, damping: 32 }}><div className="loading-spinner"><span/><span/><span/></div><strong>{loadingLabel}</strong><span>Keeping everything on this device</span></motion.div></motion.div>}
+    {toast && <motion.div key={`${toast.kind}:${toast.message}`} className={cx('toast-message', `toast-${toast.kind}`)} initial={{ opacity: 0, y: 14, scale: 0.97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 8, scale: 0.985 }} transition={{ type: 'spring', stiffness: 440, damping: 30 }}><span className="toast-icon">{toast.kind === 'error' ? <X size={15}/> : toast.kind === 'info' ? <Activity size={15}/> : <Check size={15}/>}</span><span>{toast.message}</span><button onClick={() => setToast(null)}><X size={13}/></button></motion.div>}</AnimatePresence>
+
+    <AnimatePresence mode="sync" initial={false}>
+    {modal?.type === 'confirm-delete' && <Modal key={modal.type} title={`Delete ${modal.ids.length} page${modal.ids.length === 1 ? '' : 's'}?`} eyebrow="CONFIRM PAGE REMOVAL" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Keep pages</ActionButton><ActionButton variant="danger" icon={Trash2} onClick={() => { deleteSelected(modal.ids); setModal(null); }}>Delete {modal.ids.length} page{modal.ids.length === 1 ? '' : 's'}</ActionButton></>}><div className="delete-confirm-content"><span className="delete-confirm-icon"><Trash2 size={22}/></span><div><strong>This removes the selected pages from the current workspace.</strong><p>Your original source files on disk are not deleted. This change can be undone with Undo.</p></div></div></Modal>}
+
+    {modal?.type === 'export' && <Modal key={modal.type} title="Export PDF" eyebrow="FINALIZE YOUR DOCUMENT" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={Download} onClick={() => doExportPdf(false)}>Export {pages.length} pages</ActionButton></>}>
       <div className="modal-intro"><div className="modal-hero-icon modal-hero-purple"><FileCheck2 size={22}/></div><div><strong>Ready for its next destination.</strong><p>Your page order, rotations and current overlays will be included in the exported PDF.</p></div></div>
       <label className="form-label">Document title<input className="form-input" value={exportTitle} onChange={(event) => setExportTitle(event.target.value)} placeholder="My final document" /></label>
       <label className="form-label">Author<input className="form-input" value={exportAuthor} onChange={(event) => setExportAuthor(event.target.value)} placeholder="PDF Studio" /></label>
@@ -697,22 +959,32 @@ function App() {
       <div className="modal-note"><ShieldCheck size={15}/><span>PDF export runs locally. Password encryption and guaranteed file-size reduction are not included in this rebuild yet.</span></div>
     </Modal>}
 
-    {modal?.type === 'export-selected' && <Modal title="Export selected page" eyebrow="QUICK EXPORT" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={Download} onClick={() => doExportPdf(true)}>Save selected PDF</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-blue"><FileText size={22}/></div><div><strong>{selectedPages.length || 1} page{(selectedPages.length || 1) === 1 ? '' : 's'} selected</strong><p>Export the selected page(s) as a separate PDF, retaining their current order.</p></div></div></Modal>}
+    {modal?.type === 'export-selected' && <Modal key={modal.type} title="Export selected page" eyebrow="QUICK EXPORT" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={Download} onClick={() => doExportPdf(true)}>Save selected PDF</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-blue"><FileText size={22}/></div><div><strong>{selectedPages.length || 1} page{(selectedPages.length || 1) === 1 ? '' : 's'} selected</strong><p>Export the selected page(s) as a separate PDF, retaining their current order.</p></div></div></Modal>}
 
-    {modal?.type === 'word' && <Modal title="Convert PDF to Word" eyebrow="EDITABLE DOCUMENT" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={FileText} onClick={convertToWord}>Create DOCX</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-blue"><FileText size={22}/></div><div><strong>Create an editable Word document</strong><p>PDF Studio extracts selectable text and arranges it into editable paragraphs with page breaks.</p></div></div><div className="conversion-summary"><div><span>Pages to convert</span><strong>{pages.length}</strong></div><div><span>Output format</span><strong>.DOCX</strong></div><div><span>Processing</span><strong>On this device</strong></div></div><div className="modal-note"><Activity size={15}/><span>Text extraction is best for digital PDFs. Scanned pages without an OCR text layer and complex tables/images may not convert accurately.</span></div></Modal>}
+    {modal?.type === 'word' && <Modal key={modal.type} title="Convert PDF to Word" eyebrow="EDITABLE DOCUMENT" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={FileText} onClick={convertToWord}>Create DOCX</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-blue"><FileText size={22}/></div><div><strong>Create an editable Word document</strong><p>PDF Studio extracts selectable text and arranges it into editable paragraphs with page breaks.</p></div></div><div className="conversion-summary"><div><span>Pages to convert</span><strong>{pages.length}</strong></div><div><span>Output format</span><strong>.DOCX</strong></div><div><span>Processing</span><strong>On this device</strong></div></div><div className="modal-note"><Activity size={15}/><span>Text extraction is best for digital PDFs. Scanned pages without an OCR text layer and complex tables/images may not convert accurately.</span></div></Modal>}
 
-    {modal?.type === 'images' && <Modal title="Export pages as images" eyebrow="IMAGE EXPORT" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={Download} onClick={convertToImages}>Export {selectedPages.length ? selectedPages.length : pages.length} pages</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-orange"><FileImage size={22}/></div><div><strong>Make each page a shareable image</strong><p>{selectedPages.length ? 'Only your selected pages will be exported.' : 'No page selection found, so all pages in the workspace will be exported.'}</p></div></div><label className="form-label">Image format<div className="segmented-choice"><button className={cx(imageFormat === 'png' && 'segment-active')} onClick={() => setImageFormat('png')}><span>PNG</span><small>Sharper text</small></button><button className={cx(imageFormat === 'jpeg' && 'segment-active')} onClick={() => setImageFormat('jpeg')}><span>JPEG</span><small>Smaller photos</small></button></div></label>{imageFormat === 'jpeg' && <label className="form-label">JPEG quality <div className="range-row"><input type="range" min="40" max="100" value={imageQuality} onChange={(event) => setImageQuality(event.target.value)}/><strong>{imageQuality}%</strong></div></label>}<div className="modal-note"><HardDrive size={15}/><span>Choose an output folder in the next step. Each page will be rendered at high resolution.</span></div></Modal>}
+    {modal?.type === 'images' && <Modal key={modal.type} title="Export pages as images" eyebrow="IMAGE EXPORT" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={Download} onClick={convertToImages}>Export {selectedPages.length ? selectedPages.length : pages.length} pages</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-orange"><FileImage size={22}/></div><div><strong>Make each page a shareable image</strong><p>{selectedPages.length ? 'Only your selected pages will be exported.' : 'No page selection found, so all pages in the workspace will be exported.'}</p></div></div><label className="form-label">Image format<div className="segmented-choice"><button className={cx(imageFormat === 'png' && 'segment-active')} onClick={() => setImageFormat('png')}><span>PNG</span><small>Sharper text</small></button><button className={cx(imageFormat === 'jpeg' && 'segment-active')} onClick={() => setImageFormat('jpeg')}><span>JPEG</span><small>Smaller photos</small></button></div></label>{imageFormat === 'jpeg' && <label className="form-label">JPEG quality <div className="range-row"><input type="range" min="40" max="100" value={imageQuality} onChange={(event) => setImageQuality(event.target.value)}/><strong>{imageQuality}%</strong></div></label>}<div className="modal-note"><HardDrive size={15}/><span>Choose an output folder in the next step. Each page will be rendered at high resolution.</span></div></Modal>}
 
-    {modal?.type === 'split' && <Modal title="Split workspace" eyebrow="CREATE SEPARATE PDFS" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={Split} onClick={splitPdf}>Split into files</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-purple"><Split size={22}/></div><div><strong>Choose how to split your {pages.length}-page workspace</strong><p>Each output will be saved as a separate PDF in the folder you choose.</p></div></div><div className="split-options"><label className={cx('split-option', splitMode === 'each' && 'split-option-active')}><input type="radio" checked={splitMode === 'each'} onChange={() => setSplitMode('each')}/><span><strong>Every page</strong><small>{pages.length} separate PDF files</small></span><Files size={17}/></label><label className={cx('split-option', splitMode === 'every' && 'split-option-active')}><input type="radio" checked={splitMode === 'every'} onChange={() => setSplitMode('every')}/><span><strong>Group pages</strong><small>Create a new PDF after every N pages</small></span><input className="compact-number" type="number" min="1" max="500" value={splitEvery} onChange={(event) => { setSplitEvery(event.target.value); setSplitMode('every'); }}/></label><label className={cx('split-option', splitMode === 'ranges' && 'split-option-active')}><input type="radio" checked={splitMode === 'ranges'} onChange={() => setSplitMode('ranges')}/><span><strong>Custom ranges</strong><small>For example: 1-3, 4, 6-8</small></span><ChevronRight size={16}/></label>{splitMode === 'ranges' && <label className="form-label range-input-label">Page ranges<input className="form-input" value={splitRanges} onChange={(event) => setSplitRanges(event.target.value)} placeholder="1-3, 4, 6-8" /></label>}</div></Modal>}
+    {modal?.type === 'split' && <Modal key={modal.type} title="Split workspace" eyebrow="CREATE SEPARATE PDFS" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={Split} onClick={splitPdf}>Split into files</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-purple"><Split size={22}/></div><div><strong>Choose how to split your {pages.length}-page workspace</strong><p>Each output will be saved as a separate PDF in the folder you choose.</p></div></div><div className="split-options"><label className={cx('split-option', splitMode === 'each' && 'split-option-active')}><input type="radio" checked={splitMode === 'each'} onChange={() => setSplitMode('each')}/><span><strong>Every page</strong><small>{pages.length} separate PDF files</small></span><Files size={17}/></label><label className={cx('split-option', splitMode === 'every' && 'split-option-active')}><input type="radio" checked={splitMode === 'every'} onChange={() => setSplitMode('every')}/><span><strong>Group pages</strong><small>Create a new PDF after every N pages</small></span><input className="compact-number" type="number" min="1" max="500" value={splitEvery} onChange={(event) => { setSplitEvery(event.target.value); setSplitMode('every'); }}/></label><label className={cx('split-option', splitMode === 'ranges' && 'split-option-active')}><input type="radio" checked={splitMode === 'ranges'} onChange={() => setSplitMode('ranges')}/><span><strong>Custom ranges</strong><small>For example: 1-3, 4, 6-8</small></span><ChevronRight size={16}/></label>{splitMode === 'ranges' && <label className="form-label range-input-label">Page ranges<input className="form-input" value={splitRanges} onChange={(event) => setSplitRanges(event.target.value)} placeholder="1-3, 4, 6-8" /></label>}</div></Modal>}
 
-    {modal?.type === 'text' && <Modal title="Add text overlay" eyebrow="ANNOTATE PAGE" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={Type} onClick={addTextOverlay}>Apply text</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-purple"><Type size={22}/></div><div><strong>Add a text overlay to the selected page</strong><p>Text is embedded in the PDF when exported. It is an overlay and does not modify existing PDF text objects.</p></div></div><label className="form-label">Text to add<input className="form-input" value={textValue} onChange={(event) => setTextValue(event.target.value)} placeholder="Type something..." autoFocus /></label><div className="form-two-col"><label className="form-label">Text size<select className="form-input" value={textSize} onChange={(event) => setTextSize(event.target.value)}><option value="12">12 pt — small</option><option value="18">18 pt — medium</option><option value="24">24 pt — large</option><option value="36">36 pt — heading</option></select></label><label className="form-label">Text color<div className="color-picker-row"><input type="color" value={textColor} onChange={(event) => setTextColor(event.target.value)}/><span>{textColor.toUpperCase()}</span></div></label></div><div className="modal-note"><AlignLeft size={15}/><span>New text appears near the upper-left area of the page. Select multiple pages to apply it to all of them.</span></div></Modal>}
+    {modal?.type === 'text' && <Modal key={modal.type} title="Add text overlay" eyebrow="ANNOTATE PAGE" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={Type} onClick={addTextOverlay}>Apply text</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-purple"><Type size={22}/></div><div><strong>Add a text overlay to the selected page</strong><p>Text is embedded in the PDF when exported. It is an overlay and does not modify existing PDF text objects.</p></div></div><label className="form-label">Text to add<input className="form-input" value={textValue} onChange={(event) => setTextValue(event.target.value)} placeholder="Type something..." autoFocus /></label><div className="form-two-col"><label className="form-label">Text size<select className="form-input" value={textSize} onChange={(event) => setTextSize(event.target.value)}><option value="12">12 pt — small</option><option value="18">18 pt — medium</option><option value="24">24 pt — large</option><option value="36">36 pt — heading</option></select></label><label className="form-label">Text color<div className="color-picker-row"><input type="color" value={textColor} onChange={(event) => setTextColor(event.target.value)}/><span>{textColor.toUpperCase()}</span></div></label></div><div className="modal-note"><AlignLeft size={15}/><span>New text appears near the upper-left area of the page. Select multiple pages to apply it to all of them.</span></div></Modal>}
 
-    {modal?.type === 'cover' && <Modal title="Add a cover block" eyebrow="ANNOTATE PAGE" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={LockKeyhole} onClick={addCoverOverlay}>Add cover block</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-dark"><LockKeyhole size={22}/></div><div><strong>Cover a visible area</strong><p>This places a solid shape over part of the page. It is not a certified redaction and may not remove underlying text from the PDF structure.</p></div></div><label className="form-label">Cover color<div className="color-picker-row"><input type="color" value={coverColor} onChange={(event) => setCoverColor(event.target.value)}/><span>{coverColor.toUpperCase()}</span></div></label><div className="modal-note modal-note-warning"><ShieldCheck size={15}/><span>For sensitive information, use a dedicated redaction workflow that permanently removes content and verify the exported file before sharing.</span></div></Modal>}
+    {modal?.type === 'cover' && <Modal key={modal.type} title="Add a cover block" eyebrow="ANNOTATE PAGE" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={LockKeyhole} onClick={addCoverOverlay}>Add cover block</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-dark"><LockKeyhole size={22}/></div><div><strong>Cover a visible area</strong><p>This places a solid shape over part of the page. It is not a certified redaction and may not remove underlying text from the PDF structure.</p></div></div><label className="form-label">Cover color<div className="color-picker-row"><input type="color" value={coverColor} onChange={(event) => setCoverColor(event.target.value)}/><span>{coverColor.toUpperCase()}</span></div></label><div className="modal-note modal-note-warning"><ShieldCheck size={15}/><span>For sensitive information, use a dedicated redaction workflow that permanently removes content and verify the exported file before sharing.</span></div></Modal>}
 
-    {modal?.type === 'page-menu' && <Modal title="Page actions" eyebrow="PAGE OPTIONS" onClose={() => setModal(null)} footer={<ActionButton onClick={() => setModal(null)}>Done</ActionButton>}><div className="page-menu-list"><button onClick={() => { rotateSelected(-90, [modal.pageId]); setActiveId(modal.pageId); setSelectedIds([modal.pageId]); setModal(null); }}><RotateCcw size={17}/><span><strong>Rotate left</strong><small>Turn the page 90° counter-clockwise.</small></span></button><button onClick={() => { rotateSelected(90, [modal.pageId]); setActiveId(modal.pageId); setSelectedIds([modal.pageId]); setModal(null); }}><RotateCw size={17}/><span><strong>Rotate right</strong><small>Turn the page 90° clockwise.</small></span></button><button onClick={() => { duplicateSelected([modal.pageId]); setModal(null); }}><Copy size={17}/><span><strong>Duplicate page</strong><small>Insert a copy after this page.</small></span></button><button className="page-menu-danger" onClick={() => { deleteSelected([modal.pageId]); setModal(null); }}><Trash2 size={17}/><span><strong>Delete page</strong><small>Remove this page from the workspace.</small></span></button></div></Modal>}
+    {modal?.type === 'page-menu' && <Modal key={modal.type} title="Page actions" eyebrow="PAGE OPTIONS" onClose={() => setModal(null)} footer={<ActionButton onClick={() => setModal(null)}>Done</ActionButton>}><div className="page-menu-list"><button onClick={() => { rotateSelected(-90, [modal.pageId]); setActiveId(modal.pageId); setSelectedIds([modal.pageId]); setModal(null); }}><RotateCcw size={17}/><span><strong>Rotate left</strong><small>Turn the page 90° counter-clockwise.</small></span></button><button onClick={() => { rotateSelected(90, [modal.pageId]); setActiveId(modal.pageId); setSelectedIds([modal.pageId]); setModal(null); }}><RotateCw size={17}/><span><strong>Rotate right</strong><small>Turn the page 90° clockwise.</small></span></button><button onClick={() => { duplicateSelected([modal.pageId]); setModal(null); }}><Copy size={17}/><span><strong>Duplicate page</strong><small>Insert a copy after this page.</small></span></button><button className="page-menu-danger" onClick={() => requestDeleteSelected([modal.pageId])}><Trash2 size={17}/><span><strong>Delete page</strong><small>Remove this page from the workspace.</small></span></button></div></Modal>}
 
-    {modal?.type === 'about' && <Modal title="PDF Studio" eyebrow="A BETTER WAY TO WORK WITH PDFS" onClose={() => setModal(null)} footer={<ActionButton variant="primary" onClick={() => setModal(null)}>Back to workspace</ActionButton>}><div className="about-brand"><div className="about-brand-icon"><FileStack size={26}/><span>✦</span></div><div><h3>PDF Studio <span>Cross-platform</span></h3><p>Version {appVersion} · Electron + React + Tailwind CSS</p></div></div><p className="about-copy">A modern desktop workspace for organizing pages, combining PDFs and images, adding simple overlays, and exporting common document formats. Designed to run locally on Windows, macOS and Linux.</p><div className="about-capabilities"><div><CheckCircle2 size={16}/><span>Local-first file workflow</span></div><div><CheckCircle2 size={16}/><span>Sortable pages and PDF export</span></div><div><CheckCircle2 size={16}/><span>PNG/JPEG and editable DOCX output</span></div></div><div className="modal-note"><BookOpen size={15}/><span>Developer: Jessie Albert Regualos. The original Windows .NET source is retained in the project’s legacy-windows folder for reference.</span></div></Modal>}
-  </div>;
+    {modal?.type === 'about' && <Modal key={modal.type} title="About PDF Studio" eyebrow="BUILT FOR YOUR DOCUMENT WORKFLOW" wide onClose={() => setModal(null)} footer={<><ActionButton onClick={() => { setModal(null); setMode('settings'); setSettingsTab('updates'); }}>Updates & downloads <MonitorDown size={15}/></ActionButton><ActionButton variant="primary" onClick={() => setModal(null)}>Done</ActionButton></>}><div className="about-hero"><div className="about-brand-icon"><img src="./icons/pdf-studio.png" alt="PDF Studio app icon" draggable="false" /></div><div className="about-hero-copy"><div className="about-product-line"><h3>PDF Studio</h3><span className="about-version-pill">Version {appVersion}</span></div><p>Everyday PDF tools, in one desktop workspace.</p><div className="about-platform-line"><Laptop size={14}/><span>{platform === 'darwin' ? 'macOS' : platform === 'win32' ? 'Windows' : platform === 'linux' ? 'Linux' : platform} desktop</span><span className="about-meta-dot"/><span>Local-first processing</span></div></div></div><p className="about-copy">Open, combine, reorder, rotate, and export PDF pages alongside common image formats. PDF Studio is designed to keep document work on your computer, with simple tools and clear controls instead of a cloud-based workflow.</p><div className="about-feature-grid"><div className="about-feature"><span className="about-feature-icon about-feature-purple"><Layers3 size={18}/></span><strong>Organize pages</strong><p>Combine files, reorder pages, rotate, duplicate, and export selections.</p></div><div className="about-feature"><span className="about-feature-icon about-feature-blue"><FileOutput size={18}/></span><strong>Convert & export</strong><p>Export PDF pages as images or create an editable DOCX from selectable text.</p></div><div className="about-feature"><span className="about-feature-icon about-feature-green"><ShieldCheck size={18}/></span><strong>Work locally</strong><p>Your opened documents stay in the current local session; no cloud upload is used.</p></div></div><div className="developer-signature-card"><div className="developer-monogram" aria-hidden="true">JAR</div><div className="developer-copy"><span className="developer-eyebrow">CREATED BY</span><strong className="developer-name"><span>Jessie</span> Albert <em>Regualos</em></strong><p>Developer · PDF Studio</p></div><div className="developer-signature-mark">JAR<span> / </span>PDF STUDIO</div></div><div className="about-footnote"><BookOpen size={15}/><span>PDF Studio {appVersion} · Electron desktop app · Preferences are saved on this computer.</span></div></Modal>}
+    </AnimatePresence>
+
+    <AnimatePresence>
+      {readyUpdate && <Modal key={`update-ready-${readyUpdate.version}`} title={`PDF Studio ${readyUpdate.version} is ready`} eyebrow="UPDATE READY TO INSTALL" onClose={deferReadyUpdate} footer={<><ActionButton onClick={deferReadyUpdate} disabled={applyingUpdate}>Update later</ActionButton><ActionButton variant="primary" icon={applyingUpdate ? LoaderCircle : Download} onClick={applyReadyUpdate} disabled={applyingUpdate}>{applyingUpdate ? 'Preparing restart…' : 'Update now'}</ActionButton></>}>
+        <div className="update-ready-content"><div className="update-ready-icon"><PackageCheck size={25}/></div><div className="update-ready-copy"><strong>A verified update has been downloaded.</strong><p>PDF Studio {readyUpdate.version} is ready. Choose Update now to apply it and restart the application, or Update later to keep working. PDF Studio will offer this update again the next time you open the app.</p></div></div>
+        {readyUpdate.notes && <div className="update-ready-notes"><strong>What’s new</strong><p>{readyUpdate.notes}</p></div>}
+        <div className="modal-note"><ShieldCheck size={16}/><span>Save any open work before updating. Your local documents and workspace files are not sent with the update.</span></div>
+      </Modal>}
+    </AnimatePresence>
+  </motion.div>
+  </MotionConfig>;
 }
 
 export default App;
