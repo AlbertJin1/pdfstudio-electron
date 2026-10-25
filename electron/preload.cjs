@@ -4,6 +4,13 @@ contextBridge.exposeInMainWorld('pdfStudio', Object.freeze({
   openFiles: () => ipcRenderer.invoke('files:open'),
   saveFile: (payload) => ipcRenderer.invoke('files:save', payload),
   saveBatch: (files) => ipcRenderer.invoke('files:save-batch', files),
+  getAccessState: () => ipcRenderer.invoke('access:get-state'),
+  recheckAccess: () => ipcRenderer.invoke('access:recheck'),
+  onAccessState: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('access:state', listener);
+    return () => ipcRenderer.removeListener('access:state', listener);
+  },
   minimize: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:maximize-toggle'),
   close: () => ipcRenderer.invoke('window:close'),
@@ -32,6 +39,16 @@ contextBridge.exposeInMainWorld('pdfStudio', Object.freeze({
     const listener = (_event, progress) => callback(progress);
     ipcRenderer.on('updater:download-progress', listener);
     return () => ipcRenderer.removeListener('updater:download-progress', listener);
+  },
+  onFullScreenChanged: (callback) => {
+    const listener = (_event, fullScreen) => callback(Boolean(fullScreen));
+    ipcRenderer.on('window:fullscreen', listener);
+    return () => ipcRenderer.removeListener('window:fullscreen', listener);
+  },
+  onShowAbout: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('app:show-about', listener);
+    return () => ipcRenderer.removeListener('app:show-about', listener);
   },
   onMaximizedChanged: (callback) => {
     const listener = (_event, maximized) => callback(Boolean(maximized));

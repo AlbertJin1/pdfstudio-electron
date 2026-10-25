@@ -1,20 +1,17 @@
-# PDF Studio 3 portable migration verification
+# PDF Studio 3 portable verification
 
 ## Checks completed in this workspace
 
-- `package.json` parses; `npm start` now builds the Vite frontend before launching Electron, fixing the reported `ERR_FILE_NOT_FOUND` for `dist/index.html`. Release targets remain Windows `portable`, macOS `zip`, and Linux `AppImage` only.
+- `package.json` parses; `npm start` now builds the Vite frontend before launching Electron, fixing the reported `ERR_FILE_NOT_FOUND` for `dist/index.html`. The only release target is the Windows `portable` EXE.
 - Electron checks that the frontend HTML exists and displays an actionable startup diagnostics page instead of an empty white window if the page is missing or cannot load.
 - The renderer includes a startup watchdog for frontend script/load failures that prevent React from mounting.
 - `node --check electron/main.cjs`, `package.json` parsing, and the inline startup-watchdog JavaScript syntax check passed.
 - Build and publish scripts point to the Windows portable artifact and do not publish an NSIS setup executable.
-- Legacy updater migration path is written to use a raw Version 3 portable EXE, verify size/SHA-256, replace the current EXE when writable, and use a LocalAppData fallback otherwise.
-- Legacy startup has a redirect hook for the fallback portable copy so existing shortcuts remain useful.
-- Monitor publisher continues to use the existing release API and wraps the portable launcher under its required `PdfStudio.exe` ZIP entry.
 - Electron main process stores user data beside portable artifacts when writable, with a user-profile fallback.
 
 ## Required on-machine validation
 
-Static source validation was performed for this startup fix, but this environment has not verified a real Electron bundle build or compiled the C# project because this checkout does not include `node_modules`. On the target Windows machine, run `npm install`, then `npm start`; `npm start` now builds the frontend automatically. Verify that `dist/index.html` is generated before Electron opens. Also run `npm run check`. Before production release, build on Windows with Node.js/npm and .NET 8 SDK; verify the portable EXE reports `ProductName=PDF Studio` and `FileVersion=3.0.0.x`; compile/publish the legacy 2.8.15 bridge; test upgrade from an older C# copy in a writable folder and from a protected folder; confirm no installer/UAC appears; and upload the actual portable EXE to the monitor. Also build on native macOS/Linux hosts and test portable launch and data persistence.
+Static source validation was performed for this startup fix, but this environment has not verified a real Electron bundle build because this checkout does not include `node_modules`. On the target Windows machine, run `npm install`, then `npm start`; `npm start` now builds the frontend automatically. Verify that `dist/index.html` is generated before Electron opens. Also run `npm run check`. Before production release, build on Windows with Node.js/npm; verify `publish\PdfStudio.exe` (built by `build_publish.bat`) reports `ProductName=PDF Studio` and `FileVersion=3.0.0.x`; confirm no installer/UAC appears; and upload the actual portable EXE to the monitor.
 ## UI/UX and settings update
 
 - JSX syntax verified with the TypeScript TSX parser; no syntax diagnostics.
@@ -37,7 +34,7 @@ Static checks completed for the UI update:
 
 A fresh Vite production build was **not verified in this environment**: npm dependency installation could not complete because the npm registry request timed out, leaving `vite` unavailable. On a machine with registry access, run `npm ci` followed by `npm run check`; `npm start` and the packaging scripts rebuild the frontend from the updated React/CSS sources.
 
-Before publishing, manually verify six accent presets and all text-size options in Settings; dark mode, high contrast, reduced motion, responsive About layout, platform-specific shortcut keycaps; then test Monitor no-update and new-update cases on each supported platform, a successful authenticated download, cancellation, invalid/mismatched checksum, and unreachable/unauthorized Monitor responses. The staged updater applies only after the user chooses Update now. Windows portable launcher replacement and macOS/Linux package replacement still require native packaging checks on their target operating systems.
+Before publishing, manually verify six accent presets and all text-size options in Settings; dark mode, high contrast, reduced motion, responsive About layout, platform-specific shortcut keycaps; then test Monitor no-update and new-update cases on Windows, a successful authenticated download, cancellation, invalid/mismatched checksum, and unreachable/unauthorized Monitor responses. The staged updater applies only after the user chooses Update now. Windows portable launcher replacement still requires a native packaging check on Windows.
 
 
 ## Motion and application animation pass
@@ -53,12 +50,12 @@ Before publishing, manually verify six accent presets and all text-size options 
 
 - The Electron update base URL is fixed to `https://pdfstudio.shares.zrok.io/pdfstudio-monitor/api`, matching the legacy C# `UsageTracker.DefaultBaseUrl` exactly.
 - The request shape matches `Services/UpdateService.cs`: `GET update.php?action=latest&version=<app version>` with `X-Api-Key` and `ngrok-skip-browser-warning: 1`.
-- Windows packages use the Monitor's backward-compatible `action=download` URL; macOS/Linux use `action=latest&platform=...&architecture=...` and `action=platform-download`.
-- The download handler accepts only HTTPS URLs from the PDF Studio Monitor API and only the Monitor `download` / `platform-download` actions.
+- Windows packages use the Monitor's backward-compatible `action=latest` / `action=download` URLs.
+- The download handler accepts only HTTPS URLs from the PDF Studio Monitor API and only the Monitor `download` action.
 - Main-process requests verify any Monitor SHA-256 value before committing the downloaded file and delete partial files on failures/cancellation.
 - Static JavaScript syntax and archive integrity must be checked on the target build environment; a live remote check and full package build require reachable zrok Monitor service and npm dependencies.
 
-Targeted mocked updater integration tests passed for Windows (legacy `action=latest` / `action=download`), macOS ARM64 and Linux x64 (platform-aware routes). Tests verified the zrok host/path, release query parameters, `X-Api-Key` and tunnel-warning headers, successful SHA-256 validation, and rejection of non-Monitor download URLs. A live zrok request could not be verified in this environment because DNS resolution for `pdfstudio.shares.zrok.io` failed; recheck against the deployed Monitor before publishing.
+Targeted mocked updater integration tests passed for Windows (legacy `action=latest` / `action=download`). Tests verified the zrok host/path, release query parameters, `X-Api-Key` and tunnel-warning headers, successful SHA-256 validation, and rejection of non-Monitor download URLs. A live zrok request could not be verified in this environment because DNS resolution for `pdfstudio.shares.zrok.io` failed; recheck against the deployed Monitor before publishing.
 
 
 ## Production chunk warning remediation (2026-10-25)
@@ -90,3 +87,12 @@ Targeted mocked updater integration tests passed for Windows (legacy `action=lat
 - A telemetry event is considered delivered only when the Monitor returns valid JSON with `ok: true`. Transient failures are queued; permanent API rejections are logged instead of being falsely reported as successful.
 - Desktop diagnostics are written to `monitor-usage.log` under the app's user-data folder. Monitor-side accepted/rejected events are logged to `logs/desktop-telemetry.log` with size-capped rotation.
 - Regression checks: `node --check electron/main.cjs`, `node --check electron/monitor-api.cjs`, `node scripts/test-monitor-telemetry.cjs`, and PHP syntax validation passed. The live Monitor endpoint could not be tested from this environment because its DNS host was not resolvable here; a fresh GUI package build also requires the project dependencies to be installed.
+
+
+## Device access control: Monitor enable / disable (3.0.2, 2026-10-25)
+
+- The Monitor administrator can now disable a single PC from the dashboard's Installs table, and the Electron app honours it exactly like the legacy Windows client: `electron/access-policy.cjs` polls `api/access.php` with the shared API key (about every 30 seconds, and again when the window regains focus), using the same canonical/`public/api` route fallback as telemetry.
+- New and unknown devices are enabled by default and PDF Studio never waits for the network to start. A "disabled" answer locks the app immediately; an "enabled" answer unlocks a running copy on the next successful check. The Monitor's canonical install id is adopted so the policy follows the PC after a reinstall.
+- The last answer is cached in `monitor-access.json` (user-data folder) and loaded synchronously before the first window is created, so a disabled device stays locked after a restart or while the Monitor is unreachable. Network errors, 401/404/5xx and tunnel HTML pages never change the current decision; only a valid policy can lock or unlock.
+- Enforcement is in the main process: `files:open`, `files:save` and `files:save-batch` refuse while locked. The renderer shows a full-screen lock screen (administrator's reason, computer name, device id, who/when, offline note, "Check again", "Quit PDF Studio"), makes the application shell inert, and also guards the picker, drag-and-drop and shortcuts. Telemetry continues while locked so the administrator still sees the device.
+- Tests: `npm run test:access` (policy parsing, cache, back-off, fail-safe transitions, route fallback, wiring checks). Also verified end to end against the real Monitor code on PostgreSQL (new device enabled -> admin disables -> reinstall with a new id stays disabled -> admin enables), and the main process was exercised with a stubbed Electron (cached lock at startup, IPC refusals, live lock/unlock, monitor-down behaviour). A full GUI run requires building and launching the Electron package.

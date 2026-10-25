@@ -1,19 +1,34 @@
-# Build PDF Studio 3 on Windows (portable only)
+# Build and release PDF Studio on Windows (single portable EXE)
 
-Requirements: Node.js LTS and npm. The Windows release is a **single no-install portable EXE**; this project no longer produces NSIS setup installers.
+PDF Studio is a **Windows-only** app. The build produces **one file**: a no-install portable EXE, `publish\PdfStudio.exe`. There is no setup installer, no MSI, and no extra folders to ship.
 
-Double-click `build-windows.bat`, or run:
+Requirements: Windows 10/11 x64, Node.js LTS and npm.
 
-```powershell
-npm install
-npm run dev
-npm run build:win
-```
+## Build — `build_publish.bat`
 
-Expected output:
+Double-click `build_publish.bat`, or run `npm install` then `npm run build`.
 
-- `release\PDF-Studio-3.0.0-Portable-x64.exe` — standalone Electron portable launcher. Copy it to any writable folder or USB drive and run it directly. No installation or administrator permission is required.
+It closes a running `PdfStudio.exe`, cleans `dist\` and `publish\`, installs dependencies, builds the app, signs the exe (via `signing\sign.ps1`, when present) and leaves exactly:
 
-The portable build stores `PDF Studio Data` next to the portable launcher when that folder is writable; otherwise it falls back to the standard per-user app data location. For distribution through PDF Studio Monitor, run `publish-v3-portable-to-monitor.bat` after a successful build. The publisher requires the executable to identify itself as product `PDF Studio` and carry a file version of 3.0.0 or later.
+- `publish\PdfStudio.exe` — copy it to any folder or USB drive and run it. No installation or administrator permission is required.
 
-`build-and-publish-v3.bat` performs both operations. Do not use the retired `publish-v3-installer-to-monitor.bat` helper; it intentionally exits with a message because Version 3 is portable-only.
+How "only one file" is guaranteed: `npm run build:win` first empties `publish\`, runs `electron-builder --win portable --x64`, then `scripts/release-tool.cjs finalize` deletes electron-builder's intermediate files (`win-unpacked\`, `builder-debug.yml`, `builder-effective-config.yaml`) and fails the build if anything other than `PdfStudio.exe` remains.
+
+## Release — `release.bat`
+
+Run `release.bat` to build and upload the build as the latest release:
+
+- builds with `build_publish.bat`, then shows the version inside the exe (the monitor reads it from there) next to `package.json`;
+- uploads `publish\PdfStudio.exe` with the version's `CHANGELOG.md` notes through `publish_to_monitor.ps1`. New version = uploaded; same version but a changed exe = overwritten; identical = skipped.
+- `release.bat noupload` builds only; `release.bat -Force` uploads even if the monitor has the identical exe.
+
+The monitor requires the exe to identify itself as product `PDF Studio`.
+
+## Notes
+
+- On first launch the portable EXE unpacks itself to a temporary folder, so the first start takes a moment longer than a normal app.
+- User data is stored in `PDF Studio Data` beside the EXE when that folder is writable; otherwise it falls back to the per-user app data location.
+- If the build stops with a "Cannot create symbolic link" / "required privilege is not held" error, enable Windows Developer Mode (Settings > System > For developers) or run the build once from an Administrator terminal.
+- `run-dev.bat` / `npm run dev` starts the app in development mode.
+
+`release.bat` expects `publish_to_monitor.ps1` and `CHANGELOG.md` in this folder (next to `release.bat`).

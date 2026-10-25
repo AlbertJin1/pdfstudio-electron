@@ -1701,3 +1701,31 @@ body { font-size: 14px; }
   .update-ready-icon { width: 46px; height: 46px; flex-basis: 46px; border-radius: 13px; }
   .update-background-note { width: 100%; }
 }
+
+/* ───────── Device access lock (Monitor disabled this PC) ───────── */
+.access-lock { position: fixed; inset: 0; z-index: 400; display: flex; align-items: center; justify-content: center; padding: 56px 24px 24px; overflow-y: auto; background: var(--app-bg, #f6f7fb); color: var(--ink, #23263a); }
+.access-lock-drag { position: fixed; top: 0; left: 0; right: 0; height: 38px; -webkit-app-region: drag; }
+.access-lock-card { position: relative; width: min(520px, 100%); margin: auto; padding: 30px 30px 22px; border: 1px solid var(--line, #e5e7ef); border-radius: 16px; background: var(--surface, #fff); box-shadow: 0 18px 60px rgba(30, 32, 52, .14); -webkit-app-region: no-drag; }
+.access-lock-icon { display: grid; place-items: center; width: 52px; height: 52px; margin-bottom: 14px; border-radius: 14px; background: #fdecec; color: #d64545; }
+.access-lock-eyebrow { display: block; color: #d64545; font-size: 10px; font-weight: 800; letter-spacing: .12em; }
+.access-lock-card h1 { margin: 6px 0 8px; font-size: 22px; line-height: 1.2; font-weight: 800; letter-spacing: -.01em; color: var(--ink, #23263a); }
+.access-lock-card > p { margin: 0 0 16px; color: var(--ink-soft, #555b73); font-size: 13px; line-height: 1.55; }
+.access-lock-reason { margin: 0 0 16px; padding: 12px 14px; border-left: 3px solid #d64545; border-radius: 0 10px 10px 0; background: var(--surface-soft, #f3f4f9); }
+.access-lock-reason span { display: block; margin-bottom: 4px; color: var(--muted, #7b8096); font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.access-lock-reason p { margin: 0; color: var(--ink, #23263a); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.access-lock-details { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; margin: 0 0 16px; padding: 14px; border: 1px solid var(--line, #e5e7ef); border-radius: 12px; }
+.access-lock-details div { min-width: 0; }
+.access-lock-details dt { color: var(--muted, #7b8096); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.access-lock-details dd { margin: 2px 0 0; color: var(--ink, #23263a); font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.access-lock-details dd.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.access-lock-note { display: flex; gap: 9px; align-items: flex-start; margin: 0 0 16px; padding: 10px 12px; border-radius: 10px; background: var(--accent-soft, #f0edff); color: var(--ink-soft, #555b73); font-size: 12px; line-height: 1.5; }
+.access-lock-note svg { flex: none; margin-top: 2px; }
+.access-lock-note-warn { background: #fff6e5; color: #8a5a00; }
+.access-lock-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.access-lock-actions .action-button { height: 38px; padding: 0 16px; font-size: 12px; }
+.access-lock-foot { display: block; margin-top: 14px; color: var(--muted, #7b8096); font-size: 11px; }
+:root.dark .access-lock-icon { background: #3a2327; color: #ff7b7b; }
+:root.dark .access-lock-eyebrow { color: #ff7b7b; }
+:root.dark .access-lock-reason { border-left-color: #ff7b7b; }
+:root.dark .access-lock-note-warn { background: #3a3120; color: #f2c46d; }
+.reduce-motion .access-lock, .reduce-motion .access-lock-card { animation: none; transition: none; }

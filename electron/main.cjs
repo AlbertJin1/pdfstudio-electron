@@ -4,17 +4,16 @@ const fsSync = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const os = require('node:os');
-const { spawn, execFileSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const mammoth = require('mammoth');
 const { isPdfStudioMonitorApiUrl, monitorApiUrlCandidates } = require('./monitor-api.cjs');
+const accessPolicy = require('./access-policy.cjs');
 
-// Keep data beside the executable for true portable builds (Windows portable EXE and Linux AppImage).
+// Keep data beside the executable for a true portable build (Windows portable EXE).
 // If the portable folder is read-only (for example, a USB drive mounted read-only), gracefully use the
 // normal per-user application-data folder rather than failing to start.
 function configurePortableUserData() {
-  const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
-  const appImagePath = process.env.APPIMAGE;
-  const candidateDir = portableDir || (appImagePath ? path.dirname(appImagePath) : null);
+  const candidateDir = process.env.PORTABLE_EXECUTABLE_DIR;
   if (!candidateDir) return;
   const candidate = path.join(candidateDir, 'PDF Studio Data');
   try {
@@ -29,16 +28,16 @@ function configurePortableUserData() {
 }
 configurePortableUserData();
 
-// Use the same hand-authored app icon for the native taskbar/dock, auxiliary windows,
+// Use the same hand-authored app icon for the Windows taskbar, auxiliary windows,
 // and packaged application. extraResources copies these files to resources/icons.
 function getAppIconPath() {
-  const iconName = process.platform === 'win32' ? 'pdf-studio.ico' : 'pdf-studio.png';
+  const iconName = 'pdf-studio.ico';
   const packagedPath = path.join(process.resourcesPath, 'icons', iconName);
   const developmentPath = path.join(__dirname, '..', 'public', 'icons', iconName);
   return app.isPackaged ? packagedPath : developmentPath;
 }
 
-if (process.platform === 'win32') app.setAppUserModelId('com.regualos.pdfstudio');
+app.setAppUserModelId('com.regualos.pdfstudio');
 
 let mainWindow;
 let activeUpdateDownload = null;
@@ -181,13 +180,6 @@ function compareVersions(left, right) {
 }
 
 function monitorTarget() {
-  const platform = process.platform === 'win32'
-    ? 'windows'
-    : process.platform === 'darwin'
-      ? 'macos'
-      : process.platform === 'linux'
-        ? 'linux'
-        : null;
   const architecture = process.arch === 'arm64'
     ? 'arm64'
     : process.arch === 'ia32'
@@ -195,16 +187,10 @@ function monitorTarget() {
       : process.arch === 'x64'
         ? 'x64'
         : null;
-  if (!platform || !architecture) {
-    throw new Error(`The PDF Studio Monitor update channel does not support this platform (${process.platform}/${process.arch}).`);
+  if (process.platform !== 'win32' || !architecture) {
+    throw new Error(`PDF Studio supports Windows only (detected ${process.platform}/${process.arch}).`);
   }
-  if (platform === 'windows' && !['x64', 'x86', 'arm64'].includes(architecture)) {
-    throw new Error('The PDF Studio Monitor does not have a compatible Windows package for this architecture.');
-  }
-  if (platform === 'linux' && !['x64', 'arm64'].includes(architecture)) {
-    throw new Error('The PDF Studio Monitor currently publishes Linux updates for x64 and ARM64 only.');
-  }
-  return { platform, architecture };
+  return { platform: 'windows', architecture };
 }
 
 function monitorEndpoint(params = {}) {
@@ -223,7 +209,7 @@ function assertMonitorDownloadUrl(value) {
   ].includes(url.pathname.toLowerCase());
   if (!isPdfStudioMonitorApiUrl(url)
       || !allowedPath
-      || !['download', 'platform-download'].includes(url.searchParams.get('action') || '')) {
+      || !['download'].includes(url.searchParams.get('action') || '')) {
     throw new Error('The update package URL is not a valid PDF Studio Monitor download endpoint.');
   }
   return url;
@@ -241,12 +227,7 @@ async function readMonitorReleaseMetadata() {
     hostname: getUsageHostname(),
     local_ip: getUsageLocalIp(),
   };
-  // Windows intentionally uses the original C#-compatible release channel. macOS/Linux use
-  // the same Monitor API's platform-aware catalogue, as implemented in update.php.
-  if (target.platform !== 'windows') {
-    query.platform = target.platform;
-    query.architecture = target.architecture;
-  }
+  // Windows uses the original C#-compatible release channel (action=latest / action=download).
   const endpoint = monitorEndpoint(query);
   const response = await fetchHttpsResponse(endpoint.toString(), { accept: 'application/json' });
   const declaredLength = Number(response.headers.get('content-length') || 0);
@@ -293,15 +274,8 @@ async function readMonitorReleaseMetadata() {
 
   let download = null;
   if (updateAvailable) {
-    let downloadUrl;
-    if (target.platform === 'windows') {
-      // Match legacy C# UpdateService.Endpoint("action=download&version=...").
-      downloadUrl = monitorEndpoint({ action: 'download', app: 'pdfstudio', version: latestVersion }).toString();
-    } else {
-      const serverUrl = latest.download_url || data.download_url;
-      if (!serverUrl) throw new Error('The Monitor release metadata does not include a platform download URL.');
-      downloadUrl = assertPublicHttps(new URL(serverUrl, response.url || endpoint.toString()).toString()).toString();
-    }
+    // Match legacy C# UpdateService.Endpoint("action=download&version=...").
+    const downloadUrl = monitorEndpoint({ action: 'download', app: 'pdfstudio', version: latestVersion }).toString();
     const safeDownloadUrl = assertMonitorDownloadUrl(downloadUrl).toString();
     const declaredHash = String(latest.sha256 || '').trim().replace(/^sha256[:=]/i, '').toLowerCase();
     if (!declaredHash) {
@@ -310,9 +284,7 @@ async function readMonitorReleaseMetadata() {
     if (!/^[a-f0-9]{64}$/.test(declaredHash)) {
       throw new Error('The PDF Studio Monitor returned an invalid SHA-256 checksum for this release.');
     }
-    const name = target.platform === 'windows'
-      ? `PDF-Studio-${latestVersion}-Portable-${target.architecture}.exe`
-      : safeName(latest.artifact_name || data.download_name || path.basename(new URL(safeDownloadUrl).pathname), `PDF-Studio-${latestVersion}-${target.platform}-${target.architecture}`);
+    const name = `PDF-Studio-${latestVersion}-Portable-${target.architecture}.exe`;
     download = { url: safeDownloadUrl, name, sha256: declaredHash, size: Number(latest.size || data.size || 0) };
   }
 
@@ -464,8 +436,7 @@ function getUsageOsLabel() {
     else version = `Windows ${release}`;
     return `${version} (${architecture})`.slice(0, 120);
   }
-  const displaySystem = system === 'Darwin' ? 'macOS' : system || 'Unknown OS';
-  return `${displaySystem} ${release} (${architecture})`.trim().slice(0, 120);
+  return `${system || 'Windows'} ${release} (${architecture})`.trim().slice(0, 120);
 }
 function getUsageLocalIp() {
   try {
@@ -708,6 +679,152 @@ async function stopUsageMonitoring() {
   return usageStopPromise;
 }
 
+// ───────────────────────── Device access control (Monitor enable / disable) ─────────────────────────
+//
+// The Monitor administrator can disable a single PC from the dashboard's Installs table. This client:
+//   * starts normally and never waits for the network (new/unknown devices are enabled by default);
+//   * polls api/access.php with the shared API key (about every 30 seconds, and again when the window regains focus);
+//   * locks immediately when the answer is "disabled", and unlocks on the next answer that says "enabled";
+//   * caches the last answer on disk, so a disabled device stays locked after a restart or while offline;
+//   * enforces the lock in THIS (main) process: file dialogs, reading and saving are refused while locked,
+//     the renderer only draws the lock screen. Network errors never change the current decision.
+
+let accessState = {
+  status: 'enabled', reason: '', updatedAt: 0, updatedBy: '', checkedAt: 0, offline: false, source: 'default', message: '',
+};
+let accessTimer = null;
+let accessFailures = 0;
+let accessCheckPromise = null;
+let accessStopped = false;
+let accessLastCheckAt = 0;
+
+function getAccessCachePath() {
+  return path.join(app.getPath('userData'), 'monitor-access.json');
+}
+function isAccessLocked() {
+  return accessState.status === 'disabled';
+}
+function publicAccessState() {
+  return {
+    status: accessState.status,
+    locked: isAccessLocked(),
+    reason: accessState.reason,
+    updatedAt: accessState.updatedAt,
+    updatedBy: accessState.updatedBy,
+    checkedAt: accessState.checkedAt,
+    offline: Boolean(accessState.offline),
+    source: accessState.source,
+    hostname: getUsageHostname(),
+    installId: usageIdentity?.installId || '',
+  };
+}
+function assertAccessAllowed() {
+  if (!isAccessLocked()) return;
+  const error = new Error('PDF Studio is disabled on this device by the administrator. Contact your administrator to restore access.');
+  error.code = 'ACCESS_DISABLED';
+  throw error;
+}
+function broadcastAccessState() {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('access:state', publicAccessState());
+  } catch { /* the window may be closing */ }
+}
+function setAccessState(next) {
+  const before = JSON.stringify([accessState.status, accessState.reason, accessState.updatedAt, accessState.updatedBy, accessState.offline, accessState.source]);
+  accessState = next;
+  const after = JSON.stringify([accessState.status, accessState.reason, accessState.updatedAt, accessState.updatedBy, accessState.offline, accessState.source]);
+  if (before !== after) broadcastAccessState();
+}
+/** Synchronous on purpose: a cached "disabled" must already be in force before the first window is created. */
+function loadAccessCacheSync() {
+  try {
+    const cached = accessPolicy.parseCache(fsSync.readFileSync(getAccessCachePath(), 'utf8'));
+    if (!cached) return;
+    accessState = {
+      status: cached.enabled ? 'enabled' : 'disabled',
+      reason: cached.enabled ? '' : (cached.reason || 'Access to PDF Studio was disabled on this device by an administrator.'),
+      updatedAt: cached.updatedAt,
+      updatedBy: cached.updatedBy,
+      checkedAt: cached.checkedAt,
+      offline: false,
+      source: 'cache',
+      message: '',
+    };
+  } catch { /* no cache yet: enabled by default */ }
+}
+async function persistAccessCache(policy) {
+  try {
+    const file = getAccessCachePath();
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const temp = `${file}.tmp`;
+    await fs.writeFile(temp, accessPolicy.serializeCache(policy, { installId: usageIdentity?.installId || policy.installId, hostname: getUsageHostname() }), 'utf8');
+    await fs.rm(file, { force: true }).catch(() => {});
+    await fs.rename(temp, file);
+  } catch (error) {
+    await logUsageDiagnostic(`Could not cache the access policy: ${error?.message || error}`);
+  }
+}
+async function checkAccessPolicy() {
+  if (accessCheckPromise) return accessCheckPromise;
+  accessCheckPromise = (async () => {
+    try {
+      const identity = await ensureUsageIdentity();
+      const outcome = await accessPolicy.fetchAccessPolicy({
+        baseUrl: PDF_STUDIO_MONITOR_BASE_URL,
+        candidatesFor: monitorApiUrlCandidates,
+        apiKey: PDF_STUDIO_MONITOR_API_KEY,
+        userAgent: `PdfStudio/${app.getVersion()}`,
+        identity: { installId: identity.installId, version: app.getVersion(), hostname: getUsageHostname(), localIp: getUsageLocalIp() },
+      });
+      accessLastCheckAt = Date.now();
+      if (outcome.ok) {
+        accessFailures = 0;
+        // The monitor folds every install of one PC into a single canonical id: keep using it.
+        if (outcome.policy.installId) adoptInstallId(outcome.policy.installId);
+        await persistAccessCache(outcome.policy);
+        setAccessState(accessPolicy.applyOutcome(accessState, outcome));
+        accessPollAfterSeconds = outcome.policy.pollAfterSeconds;
+      } else {
+        accessFailures += 1;
+        await logUsageDiagnostic(`Access policy check failed (keeping the current state): ${outcome.message}`);
+        setAccessState(accessPolicy.applyOutcome(accessState, outcome));
+      }
+    } catch (error) {
+      accessFailures += 1;
+      await logUsageDiagnostic(`Access policy check error: ${error?.message || error}`);
+    } finally {
+      accessCheckPromise = null;
+    }
+    return publicAccessState();
+  })();
+  return accessCheckPromise;
+}
+let accessPollAfterSeconds = accessPolicy.DEFAULT_POLL_SECONDS;
+function scheduleAccessCheck(delayMs) {
+  if (accessStopped) return;
+  if (accessTimer) clearTimeout(accessTimer);
+  accessTimer = setTimeout(async () => {
+    await checkAccessPolicy();
+    scheduleAccessCheck(accessPolicy.nextPollDelayMs(accessPollAfterSeconds, accessFailures));
+  }, delayMs);
+  accessTimer.unref?.();
+}
+function startAccessControl() {
+  accessStopped = false;
+  scheduleAccessCheck(0);
+}
+function stopAccessControl() {
+  accessStopped = true;
+  if (accessTimer) clearTimeout(accessTimer);
+  accessTimer = null;
+}
+/** Re-check when the user comes back to the window (also covers wake-from-sleep, when timers can be late). */
+function recheckAccessSoon() {
+  if (accessStopped || accessCheckPromise) return;
+  if (Date.now() - accessLastCheckAt < 8000) return;
+  scheduleAccessCheck(0);
+}
+
 // ───────────────────────── Automatic, staged updates ─────────────────────────
 
 function isPathInside(parent, candidate) {
@@ -939,26 +1056,6 @@ function markUpdatePromptShown(version) {
 }
 
 function psQuote(value) { return `'${String(value).replace(/'/g, "''")}'`; }
-function shellQuote(value) { return `'${String(value).replace(/'/g, "'\\''")}'`; }
-function findMacAppBundle(startPath) {
-  let cursor = path.resolve(startPath);
-  while (cursor && cursor !== path.dirname(cursor)) {
-    if (cursor.toLowerCase().endsWith('.app') && fsSync.existsSync(cursor) && fsSync.statSync(cursor).isDirectory()) return cursor;
-    cursor = path.dirname(cursor);
-  }
-  return null;
-}
-function findAppBundleInDirectory(root, depth = 0) {
-  if (depth > 5) return null;
-  try {
-    for (const entry of fsSync.readdirSync(root, { withFileTypes: true })) {
-      const candidate = path.join(root, entry.name);
-      if (entry.isDirectory() && entry.name.toLowerCase().endsWith('.app')) return candidate;
-      if (entry.isDirectory()) { const found = findAppBundleInDirectory(candidate, depth + 1); if (found) return found; }
-    }
-  } catch {}
-  return null;
-}
 async function scheduleWindowsUpdate(update) {
   const launcher = process.env.PORTABLE_EXECUTABLE_FILE;
   if (!launcher || !fsSync.existsSync(launcher)) {
@@ -977,43 +1074,6 @@ async function scheduleWindowsUpdate(update) {
   const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath], { detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
 }
-async function scheduleMacUpdate(update) {
-  if (!app.isPackaged) throw new Error('Self-updating is available in the packaged PDF Studio application, not the development workspace.');
-  const installedBundle = findMacAppBundle(process.execPath);
-  if (!installedBundle) throw new Error('Could not locate the installed PDF Studio application bundle. Replace it manually using the downloaded update.');
-  const extraction = path.join(getUpdatesDirectory(), `extract-${update.version}-${process.pid}`);
-  await fs.rm(extraction, { recursive: true, force: true });
-  await fs.mkdir(extraction, { recursive: true });
-  execFileSync('ditto', ['-x', '-k', update.path, extraction], { stdio: 'ignore' });
-  const newBundle = findAppBundleInDirectory(extraction);
-  if (!newBundle) throw new Error('The downloaded macOS update did not contain a PDF Studio application bundle.');
-  const parent = path.dirname(installedBundle);
-  const stagedBundle = path.join(parent, `.${path.basename(installedBundle, '.app')}.update-${update.version}.app`);
-  const backupBundle = path.join(parent, `.${path.basename(installedBundle, '.app')}.previous.app`);
-  await fs.rm(stagedBundle, { recursive: true, force: true });
-  execFileSync('ditto', [newBundle, stagedBundle], { stdio: 'ignore' });
-  const scriptPath = path.join(getUpdatesDirectory(), `apply-update-${process.pid}.sh`);
-  const script = `#!/bin/sh\nset -eu\nTARGET=${shellQuote(installedBundle)}\nSTAGED=${shellQuote(stagedBundle)}\nBACKUP=${shellQuote(backupBundle)}\nWAIT_PID=${process.pid}\nLOG=${shellQuote(path.join(getUpdatesDirectory(), 'apply-update.log'))}\nwhile kill -0 "$WAIT_PID" 2>/dev/null; do sleep 0.4; done\nrm -rf "$BACKUP"\nif [ -d "$TARGET" ]; then mv "$TARGET" "$BACKUP"; fi\nif mv "$STAGED" "$TARGET"; then open "$TARGET"; echo 'Update applied' >> "$LOG"; else [ ! -d "$BACKUP" ] || mv "$BACKUP" "$TARGET"; echo 'Update failed' >> "$LOG"; fi\n`;
-  await fs.writeFile(scriptPath, script, { mode: 0o700 });
-  const child = spawn('/bin/sh', [scriptPath], { detached: true, stdio: 'ignore' });
-  child.unref();
-}
-async function scheduleLinuxUpdate(update) {
-  if (!app.isPackaged) throw new Error('Self-updating is available in the packaged PDF Studio application, not the development workspace.');
-  const appImage = process.env.APPIMAGE;
-  if (!appImage || !fsSync.existsSync(appImage)) throw new Error('Could not locate the running AppImage. Reopen PDF Studio from its AppImage file and try again.');
-  const target = path.resolve(appImage);
-  const dir = path.dirname(target);
-  const replacement = path.join(dir, `.pdfstudio-update-${update.version}-${process.pid}.AppImage`);
-  const backup = `${target}.previous`;
-  await fs.copyFile(update.path, replacement);
-  await fs.chmod(replacement, 0o755);
-  const scriptPath = path.join(getUpdatesDirectory(), `apply-update-${process.pid}.sh`);
-  const script = `#!/bin/sh\nset -eu\nTARGET=${shellQuote(target)}\nSTAGED=${shellQuote(replacement)}\nBACKUP=${shellQuote(backup)}\nWAIT_PID=${process.pid}\nLOG=${shellQuote(path.join(getUpdatesDirectory(), 'apply-update.log'))}\nwhile kill -0 "$WAIT_PID" 2>/dev/null; do sleep 0.4; done\nrm -f "$BACKUP"\nif [ -f "$TARGET" ]; then mv "$TARGET" "$BACKUP"; fi\nif mv "$STAGED" "$TARGET"; then chmod +x "$TARGET"; nohup "$TARGET" >/dev/null 2>&1 & echo 'Update applied' >> "$LOG"; else [ ! -f "$BACKUP" ] || mv "$BACKUP" "$TARGET"; echo 'Update failed' >> "$LOG"; fi\n`;
-  await fs.writeFile(scriptPath, script, { mode: 0o700 });
-  const child = spawn('/bin/sh', [scriptPath], { detached: true, stdio: 'ignore' });
-  child.unref();
-}
 async function applyPendingUpdateNow() {
   if (!pendingUpdate) throw new Error('No verified update is ready to install.');
   const digest = await sha256File(pendingUpdate.path);
@@ -1021,10 +1081,7 @@ async function applyPendingUpdateNow() {
     await removePendingUpdate({ removePayload: true });
     throw new Error('The update package did not pass its integrity check. Please check for updates again.');
   }
-  if (process.platform === 'win32') await scheduleWindowsUpdate(pendingUpdate);
-  else if (process.platform === 'darwin') await scheduleMacUpdate(pendingUpdate);
-  else if (process.platform === 'linux') await scheduleLinuxUpdate(pendingUpdate);
-  else throw new Error('This platform does not support automatic update installation.');
+  await scheduleWindowsUpdate(pendingUpdate);
   publishUpdaterState({ status: 'applying', latestVersion: pendingUpdate.version, message: 'Applying the update and restarting PDF Studio…' });
   setTimeout(() => app.quit(), 250);
   return { started: true };
@@ -1130,11 +1187,13 @@ function createWindow() {
   startupFailureShown = false;
   mainWindow = new BrowserWindow({
     icon: getAppIconPath(),
-    width: 1520,
-    height: 960,
-    minWidth: 900,
-    minHeight: 650,
+    width: 1360,
+    height: 880,
+    // Small enough for half-screen snapping and small laptops; the renderer adapts down to this size.
+    minWidth: 520,
+    minHeight: 480,
     show: false,
+    // Windows draws its own window buttons in the app title bar.
     frame: false,
     backgroundColor: '#f6f7fb',
     autoHideMenuBar: true,
@@ -1150,8 +1209,11 @@ function createWindow() {
     mainWindow.show();
     void startUsageMonitoring();
   });
+  mainWindow.on('focus', recheckAccessSoon);
   mainWindow.on('maximize', () => mainWindow.webContents.send('window:maximized', true));
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('window:maximized', false));
+  mainWindow.on('enter-full-screen', () => mainWindow.webContents.send('window:fullscreen', true));
+  mainWindow.on('leave-full-screen', () => mainWindow.webContents.send('window:fullscreen', false));
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) shell.openExternal(url);
     return { action: 'deny' };
@@ -1170,10 +1232,9 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  if (process.platform === 'darwin' && app.dock) {
-    try { app.dock.setIcon(getAppIconPath()); } catch (error) { console.warn('[PDF Studio] Could not set dock icon:', error?.message || error); }
-  }
+  loadAccessCacheSync();
   createWindow();
+  startAccessControl();
   // Begin telemetry as soon as Electron is ready. ready-to-show may be delayed or
   // suppressed by display/rendering issues even while the app process is running.
   void startUsageMonitoring();
@@ -1190,14 +1251,14 @@ app.whenReady().then(() => {
     autoUpdateInterval = setInterval(() => { void checkAndStageUpdate({ manual: false }); }, 6 * 60 * 60 * 1000);
     autoUpdateInterval.unref?.();
   });
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('window-all-closed', () => { app.quit(); });
 app.on('before-quit', (event) => {
   if (usageShutdownComplete) return;
   if (usageShutdownInProgress) { event.preventDefault(); return; }
   usageShutdownInProgress = true;
   event.preventDefault();
+  stopAccessControl();
   if (autoUpdateTimer) clearTimeout(autoUpdateTimer);
   if (autoUpdateInterval) clearInterval(autoUpdateInterval);
   clearAutoUpdateRetry();
@@ -1208,6 +1269,11 @@ app.on('before-quit', (event) => {
   });
 });
 
+ipcMain.handle('access:get-state', () => publicAccessState());
+ipcMain.handle('access:recheck', async () => {
+  if (accessCheckPromise) return accessCheckPromise;
+  return checkAccessPolicy();
+});
 ipcMain.handle('window:minimize', () => mainWindow?.minimize());
 ipcMain.handle('window:maximize-toggle', () => {
   if (!mainWindow) return false;
@@ -1239,6 +1305,7 @@ ipcMain.handle('updater:cancel', () => {
 ipcMain.handle('updater:open-downloads', async () => shell.openPath(app.getPath('downloads')));
 
 ipcMain.handle('files:open', async () => {
+  assertAccessAllowed();
   const picked = await dialog.showOpenDialog(mainWindow, {
     title: 'Add documents to PDF Studio',
     properties: ['openFile', 'multiSelections'],
@@ -1264,6 +1331,7 @@ ipcMain.handle('files:open', async () => {
 });
 
 ipcMain.handle('files:save', async (_event, { name, data, filters }) => {
+  assertAccessAllowed();
   const safeFile = safeName(name, 'PDF-Studio-export.pdf');
   const defaultExt = path.extname(safeFile).replace('.', '') || 'pdf';
   const result = await dialog.showSaveDialog(mainWindow, {
@@ -1276,6 +1344,7 @@ ipcMain.handle('files:save', async (_event, { name, data, filters }) => {
 });
 
 ipcMain.handle('files:save-batch', async (_event, files) => {
+  assertAccessAllowed();
   if (!Array.isArray(files) || files.length === 0) return { canceled: true, count: 0 };
   const result = await dialog.showOpenDialog(mainWindow, { title: 'Choose an export folder', properties: ['openDirectory', 'createDirectory'] });
   if (result.canceled || !result.filePaths[0]) return { canceled: true, count: 0 };
