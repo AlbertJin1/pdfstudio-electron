@@ -9,24 +9,23 @@ const mammoth = require('mammoth');
 const { isPdfStudioMonitorApiUrl, monitorApiUrlCandidates } = require('./monitor-api.cjs');
 const accessPolicy = require('./access-policy.cjs');
 
-// Keep data beside the executable for a true portable build (Windows portable EXE).
-// If the portable folder is read-only (for example, a USB drive mounted read-only), gracefully use the
-// normal per-user application-data folder rather than failing to start.
-function configurePortableUserData() {
-  const candidateDir = process.env.PORTABLE_EXECUTABLE_DIR;
-  if (!candidateDir) return;
-  const candidate = path.join(candidateDir, 'PDF Studio Data');
+// All settings, caches and staged updates live in the per-user app-data folder (%AppData%\PDF Studio), so the
+// portable EXE never creates any folder next to itself. The folder name is set explicitly because the package name
+// is not the product name.
+function configureUserData() {
+  const userDataDir = path.join(app.getPath('appData'), 'PDF Studio');
+  app.setPath('userData', userDataDir);
+  // One-time carry-over from earlier builds that stored data in "PDF Studio Data" beside the EXE (copy only, never deleted).
   try {
-    fsSync.mkdirSync(candidate, { recursive: true });
-    const probe = path.join(candidate, `.write-test-${process.pid}`);
-    fsSync.writeFileSync(probe, 'ok');
-    fsSync.unlinkSync(probe);
-    app.setPath('userData', candidate);
+    const oldDir = process.env.PORTABLE_EXECUTABLE_DIR && path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'PDF Studio Data');
+    if (oldDir && fsSync.existsSync(oldDir) && !fsSync.existsSync(userDataDir)) {
+      fsSync.cpSync(oldDir, userDataDir, { recursive: true });
+    }
   } catch {
-    // Electron's default userData location remains the safe fallback.
+    // Starting with fresh settings is acceptable if the old folder cannot be read.
   }
 }
-configurePortableUserData();
+configureUserData();
 
 // Use the same hand-authored app icon for the Windows taskbar, auxiliary windows,
 // and packaged application. extraResources copies these files to resources/icons.

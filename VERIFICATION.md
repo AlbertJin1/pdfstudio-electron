@@ -7,7 +7,7 @@
 - The renderer includes a startup watchdog for frontend script/load failures that prevent React from mounting.
 - `node --check electron/main.cjs`, `package.json` parsing, and the inline startup-watchdog JavaScript syntax check passed.
 - Build and publish scripts point to the Windows portable artifact and do not publish an NSIS setup executable.
-- Electron main process stores user data beside portable artifacts when writable, with a user-profile fallback.
+- Electron main process stores user data in `%AppData%\PDF Studio` and never creates a folder beside the portable EXE.
 
 ## Required on-machine validation
 

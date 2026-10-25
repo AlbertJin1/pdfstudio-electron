@@ -27,7 +27,7 @@ The monitor requires the exe to identify itself as product `PDF Studio`.
 ## Notes
 
 - On first launch the portable EXE unpacks itself to a temporary folder, so the first start takes a moment longer than a normal app.
-- User data is stored in `PDF Studio Data` beside the EXE when that folder is writable; otherwise it falls back to the per-user app data location.
+- The app never creates a folder beside the EXE. Settings and caches are stored in `%AppData%\PDF Studio`; a `PDF Studio Data` folder left by an earlier build is copied there once and then ignored.
 - If the build stops with a "Cannot create symbolic link" / "required privilege is not held" error, enable Windows Developer Mode (Settings > System > For developers) or run the build once from an Administrator terminal.
 - `run-dev.bat` / `npm run dev` starts the app in development mode.
 
