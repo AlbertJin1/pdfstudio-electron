@@ -1181,6 +1181,127 @@ async function loadRenderer(window) {
   }
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// Edit PDF lives in its own window. Each window receives its document once through editor:init.
+// ---------------------------------------------------------------------------------------------
+const editorWindows = new Set();
+const editorInitPayloads = new Map();
+
+function createEditorWindow(initial) {
+  const win = new BrowserWindow({
+    icon: getAppIconPath(),
+    width: 1400,
+    height: 900,
+    minWidth: 960,
+    minHeight: 620,
+    show: false,
+    title: 'PDF Studio - Edit PDF',
+    backgroundColor: '#f5f6fa',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  const contentsId = win.webContents.id;
+  // Without the default menu, Ctrl+Plus / Ctrl+Minus / Ctrl+0 / Ctrl+R no longer zoom or reload the whole
+  // page. The editor handles those shortcuts itself, and pinch/ctrl+wheel zoom is left to the editor too.
+  win.removeMenu();
+  win.setMenuBarVisibility(false);
+  win.webContents.setVisualZoomLevelLimits(1, 1);
+  editorInitPayloads.set(contentsId, initial || null);
+  editorWindows.add(win);
+  win.once('ready-to-show', () => { win.show(); win.focus(); });
+  win.on('closed', () => { editorWindows.delete(win); editorInitPayloads.delete(contentsId); });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('https://')) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  // The renderer sets a beforeunload guard while there are unsaved edits; ask the user instead of silently blocking.
+  win.webContents.on('will-prevent-unload', (event) => {
+    const choice = dialog.showMessageBoxSync(win, {
+      type: 'question', buttons: ['Discard changes', 'Keep editing'], defaultId: 1, cancelId: 1,
+      title: 'Unsaved edits', message: 'This PDF has edits that have not been saved.', detail: 'Closing the window discards them.',
+    });
+    if (choice === 0) event.preventDefault();
+  });
+  const devUrl = process.env.VITE_DEV_SERVER_URL;
+  if (devUrl) void win.loadURL(`${devUrl}${devUrl.includes('?') ? '&' : '?'}window=edit`);
+  else void win.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'), { query: { window: 'edit' } });
+  return win;
+}
+
+// ---- Installed font lookup, so edited PDF text can be saved in the document's real font --------
+let fontIndexPromise = null;
+const fontNorm = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const WINDOWS_FONT_FILES = {
+  arial: ['arial', 'arialbd', 'ariali', 'arialbi'], arialnarrow: ['arialn', 'arialnb', 'arialni', 'arialnbi'],
+  timesnewroman: ['times', 'timesbd', 'timesi', 'timesbi'], couriernew: ['cour', 'courbd', 'couri', 'courbi'],
+  calibri: ['calibri', 'calibrib', 'calibrii', 'calibriz'], calibrilight: ['calibril', 'calibrib', 'calibrili', 'calibriz'],
+  cambria: ['cambria', 'cambriab', 'cambriai', 'cambriaz'], candara: ['candara', 'candarab', 'candarai', 'candaraz'],
+  verdana: ['verdana', 'verdanab', 'verdanai', 'verdanaz'], tahoma: ['tahoma', 'tahomabd', 'tahoma', 'tahomabd'],
+  georgia: ['georgia', 'georgiab', 'georgiai', 'georgiaz'], segoeui: ['segoeui', 'segoeuib', 'segoeuii', 'segoeuiz'],
+  trebuchetms: ['trebuc', 'trebucbd', 'trebucit', 'trebucbi'], consolas: ['consola', 'consolab', 'consolai', 'consolaz'],
+  comicsansms: ['comic', 'comicbd', 'comici', 'comicz'], impact: ['impact', 'impact', 'impact', 'impact'],
+  palatinolinotype: ['pala', 'palab', 'palai', 'palabi'], centurygothic: ['gothic', 'gothicb', 'gothici', 'gothicbi'],
+  lucidaconsole: ['lucon', 'lucon', 'lucon', 'lucon'], sylfaen: ['sylfaen', 'sylfaen', 'sylfaen', 'sylfaen'],
+  franklingothicmedium: ['framd', 'framd', 'framdit', 'framdit'], bookantiqua: ['bkant', 'bkant', 'bkant', 'bkant'],
+};
+
+function fontDirectories() {
+  const home = os.homedir();
+  if (process.platform === 'win32') return [path.join(process.env.WINDIR || 'C:\\Windows', 'Fonts'), path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Microsoft', 'Windows', 'Fonts')];
+  if (process.platform === 'darwin') return ['/System/Library/Fonts', '/System/Library/Fonts/Supplemental', '/Library/Fonts', path.join(home, 'Library', 'Fonts')];
+  return ['/usr/share/fonts', '/usr/local/share/fonts', path.join(home, '.fonts'), path.join(home, '.local', 'share', 'fonts')];
+}
+
+async function walkFonts(dir, depth, out) {
+  let entries;
+  try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) { if (depth > 0) await walkFonts(full, depth - 1, out); continue; }
+    const ext = path.extname(entry.name).toLowerCase();
+    if (ext === '.ttf' || ext === '.otf') out.set(fontNorm(path.basename(entry.name, ext)), full);
+  }
+}
+
+function getFontIndex() {
+  if (!fontIndexPromise) {
+    fontIndexPromise = (async () => {
+      const index = new Map();
+      for (const dir of fontDirectories()) await walkFonts(dir, 3, index);
+      return index;
+    })();
+  }
+  return fontIndexPromise;
+}
+
+async function findInstalledFont({ family, bold, italic }) {
+  const index = await getFontIndex();
+  const key = fontNorm(family);
+  if (!key) return null;
+  const style = (bold ? 1 : 0) + (italic ? 2 : 0);
+  const candidates = [];
+  if (WINDOWS_FONT_FILES[key]) candidates.push(WINDOWS_FONT_FILES[key][style]);
+  const suffixes = [['', 'regular', 'roman', 'book'], ['bold', 'b', 'bd'], ['italic', 'it', 'i', 'oblique'], ['bolditalic', 'boldit', 'bi', 'z', 'boldoblique']][style];
+  for (const suffix of suffixes) candidates.push(key + suffix);
+  for (const candidate of candidates) {
+    const file = index.get(candidate);
+    if (!file) continue;
+    try {
+      const stat = await fs.stat(file);
+      if (stat.size > 30 * 1024 * 1024) continue;
+      return new Uint8Array(await fs.readFile(file));
+    } catch { /* try the next candidate */ }
+  }
+  return null;
+}
+
 function createWindow() {
   // Each newly created window gets its own chance to display a startup diagnostic.
   startupFailureShown = false;
@@ -1303,12 +1424,14 @@ ipcMain.handle('updater:cancel', () => {
 });
 ipcMain.handle('updater:open-downloads', async () => shell.openPath(app.getPath('downloads')));
 
-ipcMain.handle('files:open', async () => {
+ipcMain.handle('files:open', async (event, options) => {
   assertAccessAllowed();
-  const picked = await dialog.showOpenDialog(mainWindow, {
-    title: 'Add documents to PDF Studio',
-    properties: ['openFile', 'multiSelections'],
-    filters: [{ name: 'Supported documents', extensions: ['pdf', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff', 'docx'] }],
+  const parent = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+  const pdfOnly = Boolean(options && options.pdfOnly);
+  const picked = await dialog.showOpenDialog(parent, {
+    title: pdfOnly ? 'Open a PDF to edit' : 'Add documents to PDF Studio',
+    properties: pdfOnly ? ['openFile'] : ['openFile', 'multiSelections'],
+    filters: pdfOnly ? [{ name: 'PDF document', extensions: ['pdf'] }] : [{ name: 'Supported documents', extensions: ['pdf', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff', 'docx'] }],
   });
   if (picked.canceled) return [];
   const output = [];
@@ -1329,11 +1452,11 @@ ipcMain.handle('files:open', async () => {
   return output;
 });
 
-ipcMain.handle('files:save', async (_event, { name, data, filters }) => {
+ipcMain.handle('files:save', async (event, { name, data, filters }) => {
   assertAccessAllowed();
   const safeFile = safeName(name, 'PDF-Studio-export.pdf');
   const defaultExt = path.extname(safeFile).replace('.', '') || 'pdf';
-  const result = await dialog.showSaveDialog(mainWindow, {
+  const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender) || mainWindow, {
     title: 'Save export', defaultPath: safeFile,
     filters: Array.isArray(filters) && filters.length ? filters : [{ name: defaultExt.toUpperCase(), extensions: [defaultExt] }],
   });
@@ -1342,10 +1465,10 @@ ipcMain.handle('files:save', async (_event, { name, data, filters }) => {
   return { canceled: false, filePath: result.filePath };
 });
 
-ipcMain.handle('files:save-batch', async (_event, files) => {
+ipcMain.handle('files:save-batch', async (event, files) => {
   assertAccessAllowed();
   if (!Array.isArray(files) || files.length === 0) return { canceled: true, count: 0 };
-  const result = await dialog.showOpenDialog(mainWindow, { title: 'Choose an export folder', properties: ['openDirectory', 'createDirectory'] });
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender) || mainWindow, { title: 'Choose an export folder', properties: ['openDirectory', 'createDirectory'] });
   if (result.canceled || !result.filePaths[0]) return { canceled: true, count: 0 };
   const folder = result.filePaths[0];
   const used = new Set();
@@ -1364,3 +1487,20 @@ ipcMain.handle('files:save-batch', async (_event, files) => {
   return { canceled: false, count, folder };
 });
 
+
+ipcMain.handle('editor:open', async (_event, payload) => {
+  assertAccessAllowed();
+  const bytes = payload && payload.bytes ? new Uint8Array(payload.bytes) : null;
+  createEditorWindow(bytes ? { name: safeName(payload.name, 'document.pdf'), bytes } : null);
+  return true;
+});
+ipcMain.handle('editor:init', (event) => {
+  const payload = editorInitPayloads.get(event.sender.id) || null;
+  editorInitPayloads.set(event.sender.id, null);
+  return payload;
+});
+ipcMain.handle('editor:close', (event) => { BrowserWindow.fromWebContents(event.sender)?.close(); return true; });
+ipcMain.handle('editor:set-title', (event, title) => { BrowserWindow.fromWebContents(event.sender)?.setTitle(String(title || 'PDF Studio - Edit PDF').slice(0, 200)); return true; });
+ipcMain.handle('fonts:find', async (_event, query) => {
+  try { return await findInstalledFont({ family: String(query?.family || ''), bold: Boolean(query?.bold), italic: Boolean(query?.italic) }); } catch { return null; }
+});

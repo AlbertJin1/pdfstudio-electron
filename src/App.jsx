@@ -25,7 +25,13 @@ import WorkspaceView from './views/WorkspaceView.jsx';
 import SettingsView from './views/settings/SettingsView.jsx';
 
 function App() {
-  const [mode, setMode] = useState('home');
+  const [mode, setModeRaw] = useState('home');
+  const openEditorRef = useRef(null);
+  // Edit PDF opens in its own window when running in the desktop app.
+  const setMode = useCallback((next) => {
+    if (next === 'edit' && window.pdfStudio?.openEditor) { openEditorRef.current?.(); return; }
+    setModeRaw(next);
+  }, []);
   const [modal, setModal] = useState(null);
   const [settingsTab, setSettingsTab] = useState('appearance');
   const [guideStep, setGuideStep] = useState(0);
@@ -180,6 +186,12 @@ function App() {
   else { setMode(tool.mode || 'workspace'); if (!pages.length && tool.mode !== 'edit') chooseFiles(); }
   };
 
+  openEditorRef.current = async () => {
+    const source = currentDocument?.kind === 'pdf' ? sourcesRef.current?.get(currentDocument.id) : null;
+    try { await window.pdfStudio.openEditor(source?.bytes ? { name: source.name, bytes: source.bytes } : null); }
+    catch (error) { notify(error?.message || 'Could not open the Edit PDF window.', 'error'); }
+  };
+
   return (
     <MotionConfig reducedMotion={preferences.reduceMotion ? 'always' : 'user'} transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}>
     <motion.div data-accent={preferences.accentTheme || 'violet'} className={cx('app-shell', 'platform-win32', fullScreen && 'is-fullscreen', maximized && 'is-maximized', dark && 'theme-dark', preferences.fontScale === 'large' && 'font-scale-large', preferences.fontScale === 'xlarge' && 'font-scale-xlarge', preferences.density === 'compact' && 'density-compact', preferences.highContrast && 'high-contrast', preferences.reduceMotion && 'reduce-motion')} onDragOver={(event) => event.preventDefault()} onDrop={handleDropFiles} inert={access.locked ? true : undefined} aria-hidden={access.locked ? true : undefined} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: preferences.reduceMotion ? 0 : 0.24 }}>
@@ -189,7 +201,7 @@ function App() {
     <Sidebar pages={pages} documents={documents} mode={mode} appVersion={appVersion} currentDocument={currentDocument} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setMode={setMode} setModal={setModal} chooseFiles={chooseFiles} removeDocument={removeDocument} />
     <motion.main className="main-panel" initial={{ opacity: 0, x: 5 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.24, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}>
     <Topbar mode={mode} dark={dark} activePage={activePage} setMode={setMode} setDark={setDark} setModal={setModal} />
-    <div className="persistent-edit-pdf" style={{ display: mode === 'edit' ? 'flex' : 'none' }}><EditPdfView active={mode === 'edit'} documents={documents} sourcesRef={sourcesRef} initialDocument={currentDocument} notify={notify} /></div>
+    {!window.pdfStudio?.openEditor && <div className="persistent-edit-pdf" style={{ display: mode === 'edit' ? 'flex' : 'none' }}><EditPdfView active={mode === 'edit'} documents={documents} sourcesRef={sourcesRef} initialDocument={currentDocument} notify={notify} /></div>}
     <AnimatePresence mode="wait" initial={false}>
     {mode === 'home' && <HomeView key="home" pages={pages} documents={documents} setMode={setMode} setModal={setModal} chooseFiles={chooseFiles} startTool={startTool} />}
     {mode === 'workspace' && <WorkspaceView key="workspace" pages={pages} pagesRef={pagesRef} sourcesRef={sourcesRef} selectedIds={selectedIds} activeId={activeId} search={search} showInspector={showInspector} draggingPageId={draggingPageId} landedId={landedId} dropCue={dropCue} previewZoom={previewZoom} suppressPageClickUntil={suppressPageClickUntil} historyRef={historyRef} redoRef={redoRef} activePage={activePage} filteredPages={filteredPages} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setSearch={setSearch} setModal={setModal} setShowInspector={setShowInspector} setDraggingPageId={setDraggingPageId} setDropCue={setDropCue} setPreviewZoom={setPreviewZoom} commitPages={commitPages} undo={undo} redo={redo} chooseFiles={chooseFiles} handleBrowserFiles={handleBrowserFiles} selectPage={selectPage} requestDeleteSelected={requestDeleteSelected} rotateSelected={rotateSelected} duplicateSelected={duplicateSelected} addBlankPage={addBlankPage} movePage={movePage} duplicateSelected={duplicateSelected} requestDeleteSelected={requestDeleteSelected} />}

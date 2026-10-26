@@ -1,143 +1,277 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlignLeft, ArrowDownToLine, Bold, Check, ChevronLeft, ChevronRight, Circle,
-  Eraser, FilePenLine, FileText, FolderOpen, Highlighter, ImagePlus, Italic, StickyNote,
-  Minus, MousePointer2, Move, Pencil, PenLine, Redo2, RotateCcw, Save,
-  ShieldCheck, Signature, Square, Stamp, Trash2, Type, Underline as UnderlineIcon,
-  Undo2, X, ZoomIn, ZoomOut,
-} from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { FilePenLine, FolderOpen, Save, ShieldCheck, X } from 'lucide-react';
 import { loadPdfSource } from '../services/pdf/pdfjs.js';
 import { exportEditedPdf } from '../services/pdf/edit.js';
+import { detectUnderline, extractPageContent, renderRegionToDataUrl, sampleColors } from '../services/pdf/pageContent.js';
+import { AUTO_SIZE_TYPES, COMMON_FONTS, TEXT_TYPES, baselineOf, fitTextPatch, layoutItem, resolveText } from '../services/pdf/textMetrics.js';
 import { saveInBrowser } from '../utils/download.js';
-import { normalizeBytes } from '../utils/files.js';
+import { normalizeBytes, uid } from '../utils/files.js';
 import { cx } from '../utils/cx.js';
+import ObjectView from './edit/ObjectView.jsx';
+import Ruler, { RULER_SIZE } from './edit/Rulers.jsx';
+import PageThumb from './edit/PageThumb.jsx';
+import SignatureDialog from './edit/SignatureDialog.jsx';
+import { ALL_TOOLS, DocBar, FormatBar, SidePanel, ToolRail } from './edit/panels.jsx';
+import { alignItems, boundsOf, clamp, distributeItems, rectContains, rectsIntersect, transformItem, translateItem } from './edit/geometry.js';
+import { buildSnapLines, snapMove, snapPoint, snapResize, snapThreshold } from './edit/snap.js';
+import { formatUnit } from './edit/units.js';
 
-const TOOLS = [
-  { id: 'select', label: 'Select', icon: MousePointer2, hint: 'Select, move, resize, or edit placed items' },
-  { id: 'text', label: 'Add text', icon: Type, hint: 'Click the page to add editable text' },
-  { id: 'signature', label: 'Signature', icon: Signature, hint: 'Draw or type a signature, then click the page' },
-  { id: 'highlight', label: 'Highlight', icon: Highlighter, hint: 'Drag across content to highlight' },
-  { id: 'underline', label: 'Underline', icon: UnderlineIcon, hint: 'Drag under content to add a line' },
-  { id: 'strike', label: 'Strikeout', icon: Minus, hint: 'Drag across content to strike it through' },
-  { id: 'draw', label: 'Freehand', icon: Pencil, hint: 'Draw on the page with your pointer' },
-  { id: 'rect', label: 'Rectangle', icon: Square, hint: 'Drag to draw a rectangle' },
-  { id: 'ellipse', label: 'Oval', icon: Circle, hint: 'Drag to draw an oval' },
-  { id: 'line', label: 'Line', icon: PenLine, hint: 'Drag to draw a line' },
-  { id: 'whiteout', label: 'Whiteout', icon: Eraser, hint: 'Cover visible content with a white shape; this is not secure redaction' },
-  { id: 'stamp', label: 'Stamp', icon: Stamp, hint: 'Place a reusable status stamp' },
-  { id: 'note', label: 'Note', icon: StickyNote, hint: 'Place a yellow comment note' },
-  { id: 'image', label: 'Add image', icon: ImagePlus, hint: 'Place an image or scanned signature' },
-];
-
-const STAMPS = ['APPROVED', 'DRAFT', 'CONFIDENTIAL', 'RECEIVED', 'PAID', 'REVIEWED'];
-const DEFAULT_COLOR = '#313b50';
-const idFor = () => globalThis.crypto?.randomUUID?.() || `edit-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const CSS_PT = 96 / 72;
+const PREFS_KEY = 'pdfstudio.editor.view.v1';
+const DEFAULT_VIEW = {
+  unit: 'in', rulers: true, grid: false, gridSize: 18, showGuides: true, guidesLocked: false, showMargins: false, marginLink: false,
+  snap: true, snapObjects: true, snapPage: true, snapGuides: true, snapMargins: true, snapGrid: true, lockAspect: true,
+  margins: { top: 36, right: 36, bottom: 36, left: 36 },
+};
+const loadView = () => { try { return { ...DEFAULT_VIEW, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch { return DEFAULT_VIEW; } };
 const cleanName = (value) => String(value || 'document.pdf').replace(/\.pdf$/i, '');
+const LAYOUT_KEYS = ['text', 'size', 'font', 'fontName', 'fontRef', 'bold', 'italic', 'lineHeight', 'align', 'reflow', 'w'];
+const PRISTINE_KEYS = ['x', 'y', 'text', 'size', 'font', 'fontName', 'bold', 'italic', 'underline', 'strike', 'color', 'align', 'lineHeight'];
+const EMPTY_GUIDES = { v: [], h: [] };
+const EMPTY_LIST = [];
+const FONT_IDS = new Set(['helvetica', 'times', 'courier']);
 
-export default function EditPdfView({ active = true, documents = [], sourcesRef, initialDocument, notify }) {
+const isPristine = (item) => {
+  if (!item.orig || item.deleted || item.replaced) return false;
+  const keys = item.type === 'imageedit' ? ['x', 'y', 'w', 'h'] : PRISTINE_KEYS;
+  return keys.every((k) => (typeof item[k] === 'number' ? Math.abs(item[k] - item.orig[k]) < 0.01 : (item[k] || false) === (item.orig[k] || false)));
+};
+
+function refit(next) {
+  if (!AUTO_SIZE_TYPES.has(next.type)) return next;
+  const before = next.__prev;
+  const patch = fitTextPatch(next);
+  if (!patch) return next;
+  const out = { ...next, ...patch };
+  const r = resolveText(next);
+  if (!r.reflow && patch.w != null && before) {
+    if (r.align === 'center') out.x = next.x + (before.w - patch.w) / 2;
+    else if (r.align === 'right') out.x = next.x + (before.w - patch.w);
+  }
+  delete out.__prev;
+  return out;
+}
+
+function applyPatch(item, patch) {
+  const next = { ...item, ...patch };
+  if (Object.keys(patch).some((key) => LAYOUT_KEYS.includes(key)) && AUTO_SIZE_TYPES.has(item.type)) {
+    next.__prev = item;
+    if ('w' in patch) next.reflow = true;
+    return refit(next);
+  }
+  return next;
+}
+
+const detach = (item) => {
+  const copy = { ...item, id: uid() };
+  if (copy.type === 'textedit') copy.type = 'text';
+  if (copy.type === 'imageedit') copy.type = 'image';
+  delete copy.blockId; delete copy.src; delete copy.cover; delete copy.orig; delete copy.replaced; delete copy.deleted;
+  return copy;
+};
+
+async function readImageFile(file) {
+  const data = new Uint8Array(await file.arrayBuffer());
+  const url = URL.createObjectURL(new Blob([data], { type: file.type }));
+  try {
+    const image = new Image(); image.src = url; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+    const context = canvas.getContext('2d'); if (!context) throw new Error('Image conversion is not available.');
+    context.drawImage(image, 0, 0);
+    return { data: canvas.toDataURL('image/png'), mime: 'image/png', width: image.naturalWidth, height: image.naturalHeight, name: file.name };
+  } finally { URL.revokeObjectURL(url); }
+}
+
+function resizeRect(o, handle, dx, dy, minW, minH, aspect) {
+  let w = o.w; let h = o.h;
+  if (handle.includes('e')) w = o.w + dx;
+  if (handle.includes('w')) w = o.w - dx;
+  if (handle.includes('s')) h = o.h + dy;
+  if (handle.includes('n')) h = o.h - dy;
+  w = Math.max(minW, w); h = Math.max(minH, h);
+  if (aspect) {
+    if (handle.length === 2) { const f = Math.max(w / o.w, h / o.h); w = o.w * f; h = o.h * f; }
+    else if (handle === 'e' || handle === 'w') h = w / aspect;
+    else w = h * aspect;
+  }
+  return { x: handle.includes('w') ? o.x + o.w - w : o.x, y: handle.includes('n') ? o.y + o.h - h : o.y, w, h };
+}
+
+/** Rulers + cursor readout subscribe to a tiny bus so pointer moves don't re-render the whole editor. */
+function useCursor(bus) {
+  const [point, setPoint] = useState(null);
+  useEffect(() => { bus.current.add(setPoint); return () => bus.current.delete(setPoint); }, [bus]);
+  return point;
+}
+function RulersLayer({ bus, view, unit, scale, base, band, onGuideStart }) {
+  const cursor = useCursor(bus);
+  return (
+    <>
+      <div className="ep-ruler-corner" aria-hidden="true">{unit}</div>
+      <Ruler orientation="h" length={view.w} origin={view.ox} scale={scale} pageLength={base.w} unit={unit} band={band?.x} cursor={cursor?.x} onGuideStart={onGuideStart} />
+      <Ruler orientation="v" length={view.h} origin={view.oy} scale={scale} pageLength={base.h} unit={unit} band={band?.y} cursor={cursor?.y} onGuideStart={onGuideStart} />
+    </>
+  );
+}
+function Coords({ bus, unit }) {
+  const p = useCursor(bus);
+  return <span className="ep-coords">{p ? `${formatUnit(p.x, unit)}, ${formatUnit(p.y, unit)} ${unit}` : '–'}</span>;
+}
+
+export default function EditPdfView({ active = true, documents = [], sourcesRef, initialDocument, initialFile, standalone = false, notify }) {
   const [pdfDoc, setPdfDoc] = useState(null);
   const [sourceBytes, setSourceBytes] = useState(null);
   const [fileName, setFileName] = useState('');
   const [loadedSourceId, setLoadedSourceId] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
-  const [activeTool, setActiveTool] = useState('select');
-  const [annotationsByPage, setAnnotationsByPage] = useState({});
-  const [selectedId, setSelectedId] = useState(null);
-  const [editingId, setEditingId] = useState(null);
-  const [color, setColor] = useState(DEFAULT_COLOR);
-  const [highlightColor, setHighlightColor] = useState('#f6d64a');
-  const [fontSize, setFontSize] = useState(16);
-  const [fontStyle, setFontStyle] = useState('regular');
-  const [lineWidth, setLineWidth] = useState(2.2);
-  const [stampText, setStampText] = useState('APPROVED');
-  const [zoom, setZoom] = useState(1);
-  const [dimensions, setDimensions] = useState(null);
-  const [stageSize, setStageSize] = useState({ width: 900, height: 700 });
-  const [draftAnnotation, setDraftAnnotation] = useState(null);
-  const [busy, setBusy] = useState(false);
+  const [base, setBase] = useState(null);
+  const [tool, setToolState] = useState('select');
+  const [ann, setAnn] = useState({});
+  const [historyVersion, setHistoryVersion] = useState(0);
   const [dirty, setDirty] = useState(false);
-  const [signatureOpen, setSignatureOpen] = useState(false);
-  const [signatureMode, setSignatureMode] = useState('draw');
-  const [signatureText, setSignatureText] = useState('Your signature');
-  const [signatureColor, setSignatureColor] = useState('#172033');
-  const [hasSignatureInk, setHasSignatureInk] = useState(false);
-  const [pendingImage, setPendingImage] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [editingId, setEditingId] = useState(null);
+  const [defaults, setDefaultsState] = useState({ color: '#000000', highlight: '#f6d64a', lineWidth: 2 });
+  const [textDefaults, setTextDefaults] = useState({ font: 'helvetica', size: 12, bold: false, italic: false, color: '#000000', align: 'left', lineHeight: 1.2 });
+  const [stampText, setStampText] = useState('APPROVED');
+  const [view, setViewState] = useState(loadView);
+  const [zoom, setZoom] = useState({ mode: 'page', value: CSS_PT });
+  const [stageSize, setStageSize] = useState({ width: 900, height: 700 });
+  const [measure, setMeasure] = useState({ ox: 0, oy: 0, w: 0, h: 0 });
+  const [content, setContent] = useState({ key: '', blocks: [], images: [] });
+  const [guidesByPage, setGuidesByPage] = useState({});
+  const [draftGuide, setDraftGuide] = useState(null);
+  const [snapHits, setSnapHits] = useState([]);
+  const [marquee, setMarquee] = useState(null);
+  const [draft, setDraft] = useState(null);
+  const [alignTo, setAlignTo] = useState('page');
+  const [tab, setTab] = useState('format');
+  const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [signatureOpen, setSignatureOpen] = useState(false);
+  const [pendingImage, setPendingImage] = useState(null);
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const [panning, setPanning] = useState(false);
+
+  const annRef = useRef({});
+  const undoRef = useRef([]);
+  const redoRef = useRef([]);
+  const ixRef = useRef(null);
+  const editStartRef = useRef(null);
+  const nudgeRef = useRef(0);
+  const clipboardRef = useRef([]);
   const canvasRef = useRef(null);
+  const kRef = useRef(1);
   const stageRef = useRef(null);
   const surfaceRef = useRef(null);
-  const signatureCanvasRef = useRef(null);
   const fileInputRef = useRef(null);
   const imageInputRef = useRef(null);
-  const interactionRef = useRef(null);
+  const replaceInputRef = useRef(null);
+  const cursorBus = useRef(new Set());
   const hasAutoLoadedRef = useRef(false);
-  const annotationMapRef = useRef({});
-  const undoStackRef = useRef([]);
-  const redoStackRef = useRef([]);
-  const editStartRef = useRef(null);
+  const contentKeyRef = useRef('');
+  const docKeyRef = useRef(0);
+  const spaceRef = useRef(false);
+  const panRef = useRef(null);
 
   const pageCount = pdfDoc?.numPages || 0;
-  const currentKey = String(pageNumber - 1);
-  const annotations = annotationsByPage[currentKey] || [];
-  const selectedAnnotation = annotations.find((item) => item.id === selectedId) || null;
-  const activeToolInfo = TOOLS.find((tool) => tool.id === activeTool) || TOOLS[0];
+  const pageKey = String(pageNumber - 1);
+  const items = ann[pageKey] || EMPTY_LIST;
+  const pageGuides = guidesByPage[pageKey] || EMPTY_GUIDES;
+  const toolInfo = ALL_TOOLS.find((t) => t.id === tool) || ALL_TOOLS[0];
+  const margins = view.margins;
 
-  const assignMap = useCallback((next, markDirty = true) => {
-    annotationMapRef.current = next;
-    setAnnotationsByPage(next);
-    if (markDirty) setDirty(true);
+  const setView = useCallback((patch) => setViewState((prev) => { const next = { ...prev, ...patch }; try { localStorage.setItem(PREFS_KEY, JSON.stringify(next)); } catch { /* storage unavailable */ } return next; }), []);
+  const setMargins = useCallback((value) => setView({ margins: value }), [setView]);
+
+  // ---- zoom ---------------------------------------------------------------------------------
+  const scale = useMemo(() => {
+    if (!base) return 1;
+    const availW = Math.max(200, stageSize.width - 72); const availH = Math.max(200, stageSize.height - 72);
+    const raw = zoom.mode === 'width' ? availW / base.w : zoom.mode === 'page' ? Math.min(availW / base.w, availH / base.h, 3) : zoom.value;
+    return clamp(raw, 0.2, 12000 / Math.max(base.w, base.h));
+  }, [base, stageSize, zoom]);
+  const zoomPercent = Math.round(scale / CSS_PT * 100);
+  const zoomStep = useCallback((dir) => {
+    const list = [10, 25, 33, 50, 67, 75, 100, 125, 150, 200, 300, 400, 600, 800];
+    const next = dir > 0 ? list.find((p) => p > zoomPercent + 0.5) : [...list].reverse().find((p) => p < zoomPercent - 0.5);
+    if (next) setZoom({ mode: 'custom', value: next / 100 * CSS_PT });
+  }, [zoomPercent]);
+
+  // ---- model --------------------------------------------------------------------------------
+  const applyAnn = useCallback((next, markDirty = true) => { annRef.current = next; setAnn(next); if (markDirty) setDirty(true); }, []);
+  const pushHistory = useCallback((before) => {
+    undoRef.current.push(before); if (undoRef.current.length > 120) undoRef.current.shift();
+    redoRef.current = []; setHistoryVersion((v) => v + 1);
   }, []);
+  const commitAnn = useCallback((next, before = annRef.current) => { pushHistory(before); applyAnn(next, true); }, [applyAnn, pushHistory]);
+  const pageList = useCallback(() => annRef.current[pageKey] || [], [pageKey]);
+  const withList = useCallback((list, map = annRef.current) => ({ ...map, [pageKey]: list }), [pageKey]);
+  const itemsById = useCallback((ids) => pageList().filter((i) => ids.includes(i.id)), [pageList]);
 
-  const commitMap = useCallback((next) => {
-    undoStackRef.current.push(annotationMapRef.current);
-    if (undoStackRef.current.length > 100) undoStackRef.current.shift();
-    redoStackRef.current = [];
-    assignMap(next, true);
-  }, [assignMap]);
+  const prune = useCallback((keep) => {
+    const map = annRef.current; let changed = false; const next = {};
+    for (const [key, list] of Object.entries(map)) {
+      const filtered = list.filter((i) => keep.includes(i.id) || !isPristine(i));
+      if (filtered.length !== list.length) changed = true;
+      next[key] = filtered;
+    }
+    if (changed) applyAnn(next, false);
+  }, [applyAnn]);
 
-  const changeCurrent = useCallback((producer) => {
-    const before = annotationMapRef.current;
-    const key = String(pageNumber - 1);
-    const list = before[key] || [];
-    const nextList = typeof producer === 'function' ? producer(list) : producer;
-    if (nextList === list) return;
-    commitMap({ ...before, [key]: nextList });
-  }, [commitMap, pageNumber]);
+  const setSelection = useCallback((ids) => { setSelectedIds(ids); prune(ids); }, [prune]);
 
+  const finishEditing = useCallback(() => {
+    const id = editingId; if (!id) return;
+    const before = editStartRef.current;
+    const item = pageList().find((i) => i.id === id);
+    setEditingId(null); editStartRef.current = null;
+    if (item && item.type === 'text' && !(item.text || '').trim()) {
+      applyAnn(withList(pageList().filter((i) => i.id !== id)), false);
+      setSelectedIds([]); return;
+    }
+    if (before && before !== annRef.current && JSON.stringify(before) !== JSON.stringify(annRef.current)) { pushHistory(before); setDirty(true); }
+    prune(item ? [id] : []);
+  }, [applyAnn, editingId, pageList, prune, pushHistory, withList]);
+
+  const startEditing = useCallback((id) => { editStartRef.current = annRef.current; setSelectedIds([id]); setEditingId(id); }, []);
+
+  const patchItems = useCallback((ids, patch, record = true) => {
+    const before = annRef.current;
+    const list = pageList().map((i) => (ids.includes(i.id) ? applyPatch(i, typeof patch === 'function' ? patch(i) : patch) : i));
+    if (record && editingId && ids.includes(editingId)) applyAnn(withList(list), true);
+    else if (record) commitAnn(withList(list), before);
+    else applyAnn(withList(list), true);
+  }, [applyAnn, commitAnn, editingId, pageList, withList]);
+
+  const undo = useCallback(() => {
+    const previous = undoRef.current.pop();
+    if (!previous) { notify?.('Nothing to undo.', 'info'); return; }
+    redoRef.current.push(annRef.current); applyAnn(previous, true); setSelectedIds([]); setEditingId(null); setHistoryVersion((v) => v + 1);
+  }, [applyAnn, notify]);
+  const redo = useCallback(() => {
+    const next = redoRef.current.pop();
+    if (!next) { notify?.('Nothing to redo.', 'info'); return; }
+    undoRef.current.push(annRef.current); applyAnn(next, true); setSelectedIds([]); setEditingId(null); setHistoryVersion((v) => v + 1);
+  }, [applyAnn, notify]);
+
+  // ---- loading ------------------------------------------------------------------------------
   const loadDocument = useCallback(async ({ name, bytes, pdf, sourceId = null }) => {
     try {
-      setBusy(true);
-      setNotice('Opening PDF…');
+      setBusy(true); setNotice('Opening PDF…');
       const normalized = normalizeBytes(bytes).slice();
       const loaded = pdf || await loadPdfSource(normalized);
-      // Touch the first page early so invalid or encrypted files fail here with a useful message.
       await loaded.getPage(1);
-      setPdfDoc(loaded);
-      setSourceBytes(normalized);
-      setFileName(name || 'document.pdf');
-      setLoadedSourceId(sourceId || null);
-      setPageNumber(1);
-      setAnnotationsByPage({});
-      annotationMapRef.current = {};
-      undoStackRef.current = [];
-      redoStackRef.current = [];
-      setSelectedId(null);
-      setEditingId(null);
-      setDraftAnnotation(null);
-      setDirty(false);
-      setZoom(1);
-      setNotice('');
+      docKeyRef.current += 1; contentKeyRef.current = '';
+      setPdfDoc(loaded); setSourceBytes(normalized); setFileName(name || 'document.pdf'); setLoadedSourceId(sourceId || null);
+      setPageNumber(1); setBase(null); setContent({ key: '', blocks: [], images: [] });
+      annRef.current = {}; setAnn({}); undoRef.current = []; redoRef.current = []; setHistoryVersion((v) => v + 1);
+      setSelectedIds([]); setEditingId(null); setDraft(null); setGuidesByPage({}); setDirty(false); setZoom({ mode: 'page', value: CSS_PT }); setNotice('');
     } catch (error) {
       console.error('Unable to load PDF for editing', error);
-      const detail = /password|encrypted/i.test(error?.message || '')
-        ? 'This PDF is password-protected. Open an unlocked copy to edit and save it.'
-        : (error?.message || 'The selected file could not be opened as a PDF.');
-      setNotice(detail);
-      notify?.(detail, 'error');
-    } finally {
-      setBusy(false);
-    }
+      const detail = /password|encrypted/i.test(error?.message || '') ? 'This PDF is password-protected. Open an unlocked copy to edit and save it.' : (error?.message || 'The selected file could not be opened as a PDF.');
+      setNotice(detail); notify?.(detail, 'error');
+    } finally { setBusy(false); }
   }, [notify]);
 
   useEffect(() => {
@@ -146,22 +280,23 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
     if (!source?.bytes) return;
     hasAutoLoadedRef.current = true;
     loadDocument({ name: source.name, bytes: source.bytes, pdf: source.pdf, sourceId: source.id });
-  }, [active, initialDocument?.id, pdfDoc, loadDocument, sourcesRef]); // keep editor state when navigating between sections
+  }, [active, initialDocument?.id, pdfDoc, loadDocument, sourcesRef]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!initialFile?.bytes || hasAutoLoadedRef.current) return;
+    hasAutoLoadedRef.current = true;
+    loadDocument({ name: initialFile.name, bytes: initialFile.bytes });
+  }, [initialFile, loadDocument]);
 
   const openPdf = useCallback(async () => {
     if (dirty && !window.confirm('You have unsaved edits. Opening another PDF will discard those edits. Continue?')) return;
     if (window.pdfStudio?.openFiles) {
       try {
-        const items = await window.pdfStudio.openFiles();
-        const file = items?.find((item) => item.kind === 'pdf' || item.mime === 'application/pdf' || /\.pdf$/i.test(item.name || ''));
-        if (!file) {
-          if (items?.length) notify?.('Choose a PDF file to use the Edit PDF workspace.', 'error');
-          return;
-        }
+        const files = await window.pdfStudio.openFiles({ pdfOnly: true });
+        const file = files?.find((f) => f.kind === 'pdf' || f.mime === 'application/pdf' || /\.pdf$/i.test(f.name || ''));
+        if (!file) { if (files?.length) notify?.('Choose a PDF file to use the Edit PDF workspace.', 'error'); return; }
         await loadDocument({ name: file.name, bytes: file.bytes });
-      } catch (error) {
-        notify?.(error?.message || 'Could not open the selected PDF.', 'error');
-      }
+      } catch (error) { notify?.(error?.message || 'Could not open the selected PDF.', 'error'); }
       return;
     }
     fileInputRef.current?.click();
@@ -172,596 +307,684 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
     if (!sourceId || sourceId === loadedSourceId) return;
     if (dirty && !window.confirm('You have unsaved edits. Switching PDFs will discard those edits. Continue?')) return;
     const source = sourcesRef?.current?.get(sourceId);
-    if (!source?.bytes || source.kind !== 'pdf') {
-      notify?.('That PDF is no longer available in the current workspace.');
-      return;
-    }
+    if (!source?.bytes || source.kind !== 'pdf') { notify?.('That PDF is no longer available in the current workspace.'); return; }
     await loadDocument({ name: source.name, bytes: source.bytes, pdf: source.pdf, sourceId: source.id });
   }, [dirty, loadedSourceId, loadDocument, notify, sourcesRef]);
 
   const onPdfInputChange = useCallback(async (event) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
+    const file = event.target.files?.[0]; event.target.value = '';
     if (!file) return;
-    if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') {
-      notify?.('Please choose a PDF file.', 'error');
-      return;
-    }
+    if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') { notify?.('Please choose a PDF file.', 'error'); return; }
     await loadDocument({ name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) });
   }, [loadDocument, notify]);
 
+  const onDropFile = useCallback(async (event) => {
+    const file = [...(event.dataTransfer?.files || [])].find((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
+    if (!file) return;
+    event.preventDefault();
+    if (dirty && !window.confirm('You have unsaved edits. Opening another PDF will discard those edits. Continue?')) return;
+    await loadDocument({ name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) });
+  }, [dirty, loadDocument]);
+
+  // Window title and close guard
+  useEffect(() => {
+    const title = pdfDoc ? `${dirty ? '• ' : ''}${fileName} - Edit PDF - PDF Studio` : 'PDF Studio - Edit PDF';
+    if (standalone) { document.title = title; window.pdfStudio?.setEditorTitle?.(title); }
+  }, [dirty, fileName, pdfDoc, standalone]);
+  useEffect(() => {
+    if (!standalone || !dirty) return undefined;
+    const guard = (event) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', guard);
+    return () => window.removeEventListener('beforeunload', guard);
+  }, [dirty, standalone]);
+
+  // ---- page size, rendering, content ----------------------------------------------------------
   useEffect(() => {
     if (!stageRef.current || typeof ResizeObserver === 'undefined') return undefined;
-    const observer = new ResizeObserver((entries) => {
-      const rect = entries[0]?.contentRect;
-      if (rect) setStageSize({ width: rect.width, height: rect.height });
-    });
+    const observer = new ResizeObserver((entries) => { const r = entries[0]?.contentRect; if (r) setStageSize({ width: r.width, height: r.height }); });
     observer.observe(stageRef.current);
     return () => observer.disconnect();
-  }, []);
+  }, [pdfDoc]);
 
   useEffect(() => {
-    if (!pdfDoc || !canvasRef.current) return undefined;
+    if (!pdfDoc) return undefined;
     let cancelled = false;
-    let renderTask;
-    const renderPage = async () => {
+    pdfDoc.getPage(pageNumber).then((page) => {
+      if (cancelled) return;
+      const v = page.getViewport({ scale: 1, rotation: page.rotate || 0 });
+      setBase({ w: v.width, h: v.height, rotation: page.rotate || 0 });
+    }).catch((error) => setNotice(error?.message || 'This PDF page could not be read.'));
+    return () => { cancelled = true; };
+  }, [pdfDoc, pageNumber]);
+
+  useEffect(() => {
+    if (!pdfDoc || !base || !canvasRef.current) return undefined;
+    let cancelled = false; let task;
+    (async () => {
       try {
         const page = await pdfDoc.getPage(pageNumber);
         if (cancelled) return;
-        const base = page.getViewport({ scale: 1, rotation: page.rotate || 0 });
-        const availableWidth = Math.max(220, stageSize.width - 68);
-        const availableHeight = Math.max(260, stageSize.height - 58);
-        const fit = Math.min(availableWidth / base.width, availableHeight / base.height, 1.28);
-        const scale = Math.max(0.25, fit * zoom);
         const viewport = page.getViewport({ scale, rotation: page.rotate || 0 });
+        let out = Math.min(window.devicePixelRatio || 1, 2);
+        while (viewport.width * viewport.height * out * out > 24e6 && out > 1) out = Math.max(1, out - 0.25);
+        const buffer = document.createElement('canvas');
+        buffer.width = Math.floor(viewport.width * out); buffer.height = Math.floor(viewport.height * out);
+        const context = buffer.getContext('2d', { alpha: false });
+        context.fillStyle = '#fff'; context.fillRect(0, 0, buffer.width, buffer.height);
+        task = page.render({ canvasContext: context, viewport, transform: out === 1 ? null : [out, 0, 0, out, 0, 0], background: '#fff' });
+        await task.promise;
+        if (cancelled || !canvasRef.current) return;
         const canvas = canvasRef.current;
-        const context = canvas?.getContext('2d', { alpha: false });
-        if (!canvas || !context) return;
-        const outputScale = Math.min(window.devicePixelRatio || 1, 2);
-        canvas.width = Math.floor(viewport.width * outputScale);
-        canvas.height = Math.floor(viewport.height * outputScale);
-        canvas.style.width = `${viewport.width}px`;
-        canvas.style.height = `${viewport.height}px`;
-        context.fillStyle = '#fff';
-        context.fillRect(0, 0, canvas.width, canvas.height);
-        renderTask = page.render({ canvasContext: context, viewport, transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0], background: '#fff' });
-        await renderTask.promise;
-        if (cancelled) return;
-        setDimensions({ width: viewport.width, height: viewport.height, scale, baseWidth: base.width, baseHeight: base.height, rotation: page.rotate || 0 });
-      } catch (error) {
-        if (!cancelled && error?.name !== 'RenderingCancelledException') {
-          console.error('PDF page rendering failed', error);
-          setNotice(error?.message || 'This PDF page could not be rendered.');
+        canvas.width = buffer.width; canvas.height = buffer.height;
+        canvas.getContext('2d', { alpha: false }).drawImage(buffer, 0, 0);
+        kRef.current = buffer.width / base.w;
+        const key = `${docKeyRef.current}:${pageNumber}`;
+        if (contentKeyRef.current !== key) {
+          contentKeyRef.current = key;
+          const found = await extractPageContent(page, page.getViewport({ scale: 1, rotation: page.rotate || 0 }), pageNumber - 1);
+          if (!cancelled || contentKeyRef.current === key) setContent({ key, ...found });
         }
+      } catch (error) {
+        if (!cancelled && error?.name !== 'RenderingCancelledException') { console.error('PDF page rendering failed', error); setNotice(error?.message || 'This PDF page could not be rendered.'); }
       }
-    };
-    renderPage();
-    return () => { cancelled = true; try { renderTask?.cancel?.(); } catch { /* no-op */ } };
-  }, [pdfDoc, pageNumber, zoom, stageSize.width, stageSize.height]);
+    })();
+    return () => { cancelled = true; try { task?.cancel?.(); } catch { /* no-op */ } };
+  }, [pdfDoc, pageNumber, scale, base]);
 
-  const toPercent = useCallback((event) => {
-    const rect = surfaceRef.current?.getBoundingClientRect();
-    if (!rect) return { x: 50, y: 50 };
-    return { x: clamp((event.clientX - rect.left) / rect.width * 100, 0, 100), y: clamp((event.clientY - rect.top) / rect.height * 100, 0, 100) };
+  const pageContent = content.key === `${docKeyRef.current}:${pageNumber}` ? content : { blocks: [], images: [] };
+
+  // ---- ruler alignment --------------------------------------------------------------------------
+  const measureNow = useCallback(() => {
+    const stage = stageRef.current; const surface = surfaceRef.current;
+    if (!stage || !surface) return;
+    const s = stage.getBoundingClientRect(); const p = surface.getBoundingClientRect();
+    setMeasure((prev) => (Math.abs(prev.ox - (p.left - s.left)) < 0.3 && Math.abs(prev.oy - (p.top - s.top)) < 0.3 && prev.w === s.width && prev.h === s.height ? prev : { ox: p.left - s.left, oy: p.top - s.top, w: s.width, h: s.height }));
   }, []);
-
-  const placeAnnotation = useCallback((annotation) => {
-    const withId = { id: idFor(), ...annotation };
-    changeCurrent((list) => [...list, withId]);
-    setSelectedId(withId.id);
-    setEditingId(withId.type === 'text' || withId.type === 'note' ? withId.id : null);
-    if (withId.type === 'text' || withId.type === 'note') editStartRef.current = annotationMapRef.current;
-    setActiveTool('select');
-  }, [changeCurrent]);
-
-  const pointerDownOnSurface = useCallback((event) => {
-    if (!pdfDoc || busy) return;
-    if (event.button !== 0) return;
-    const position = toPercent(event);
-    if (activeTool === 'select') {
-      setSelectedId(null);
-      setEditingId(null);
-      return;
-    }
-    if (activeTool === 'text') {
-      event.preventDefault();
-      placeAnnotation({ type: 'text', x: position.x, y: position.y, w: 25, h: 6, text: '', color: DEFAULT_COLOR, size: Number(fontSize), fontStyle, lineWidth: Number(lineWidth) });
-      return;
-    }
-    if (activeTool === 'signature') {
-      if (!pendingImage?.kind || pendingImage.kind !== 'signature') {
-        setSignatureOpen(true);
-        return;
-      }
-      placeAnnotation({ type: 'signature', x: position.x, y: position.y, w: 30, h: 9, data: pendingImage.data, mime: 'image/png', color: signatureColor, size: Number(fontSize), lineWidth: Number(lineWidth) });
-      setPendingImage(null);
-      return;
-    }
-    if (activeTool === 'image') {
-      if (!pendingImage?.data || pendingImage.kind === 'signature') {
-        imageInputRef.current?.click();
-        return;
-      }
-      const ratio = pendingImage.width && pendingImage.height ? pendingImage.height / pendingImage.width : 0.65;
-      placeAnnotation({ type: 'image', x: position.x, y: position.y, w: 26, h: clamp(26 * ratio, 8, 35), data: pendingImage.data, mime: pendingImage.mime, lineWidth: Number(lineWidth) });
-      setPendingImage(null);
-      return;
-    }
-    if (activeTool === 'note') {
-      placeAnnotation({ type: 'note', x: clamp(position.x, 0, 76), y: clamp(position.y, 0, 78), w: 24, h: 18, text: '', color: '#55461a', size: Number(fontSize), fontStyle: 'regular', lineWidth: Number(lineWidth) });
-      return;
-    }
-    if (activeTool === 'stamp') {
-      placeAnnotation({ type: 'stamp', x: clamp(position.x, 0, 70), y: clamp(position.y, 0, 90), w: 28, h: 7, text: stampText, color, size: Number(fontSize), fontStyle: 'bold', lineWidth: Number(lineWidth) });
-      return;
-    }
-
-    const startAnnotations = annotationMapRef.current;
-    const draft = {
-      id: idFor(), type: activeTool, x: position.x, y: position.y, w: 0.2, h: 0.2,
-      color: activeTool === 'highlight' ? highlightColor : color, size: Number(fontSize), fontStyle, lineWidth: Number(lineWidth),
-      opacity: activeTool === 'highlight' ? 0.34 : 1,
-      points: activeTool === 'draw' ? [position] : undefined,
-      startPoint: activeTool === 'line' ? position : undefined,
-      endPoint: activeTool === 'line' ? position : undefined,
-    };
-    interactionRef.current = { type: 'draw', tool: activeTool, start: position, startAnnotations, draft };
-    setDraftAnnotation(draft);
-    surfaceRef.current?.setPointerCapture?.(event.pointerId);
-    event.preventDefault();
-  }, [activeTool, busy, color, highlightColor, fontSize, fontStyle, lineWidth, pdfDoc, pendingImage, placeAnnotation, signatureColor, stampText, toPercent]);
-
-  const pointerMoveOnSurface = useCallback((event) => {
-    const interaction = interactionRef.current;
-    if (!interaction || !surfaceRef.current) return;
-    const position = toPercent(event);
-    if (interaction.type === 'draw') {
-      const start = interaction.start;
-      if (interaction.tool === 'draw') {
-        const old = interaction.draft;
-        const points = [...(old.points || []), position];
-        const xs = points.map((point) => point.x);
-        const ys = points.map((point) => point.y);
-        const x = Math.min(...xs);
-        const y = Math.min(...ys);
-        interaction.draft = { ...old, points, x, y, w: Math.max(0.25, Math.max(...xs) - x), h: Math.max(0.25, Math.max(...ys) - y) };
-      } else {
-        interaction.draft = { ...interaction.draft, x: Math.min(start.x, position.x), y: Math.min(start.y, position.y), w: Math.max(0.2, Math.abs(position.x - start.x)), h: Math.max(0.2, Math.abs(position.y - start.y)), ...(interaction.tool === 'line' ? { startPoint: start, endPoint: position } : {}) };
-      }
-      setDraftAnnotation({ ...interaction.draft });
-      return;
-    }
-    const deltaX = position.x - interaction.start.x;
-    const deltaY = position.y - interaction.start.y;
-    const key = String(pageNumber - 1);
-    const current = annotationMapRef.current;
-    const list = current[key] || [];
-    const nextList = list.map((annotation) => {
-      if (annotation.id !== interaction.id) return annotation;
-      if (interaction.type === 'resize') {
-        return { ...annotation, w: clamp(interaction.original.w + deltaX, 1, 100 - interaction.original.x), h: clamp(interaction.original.h + deltaY, 1, 100 - interaction.original.y) };
-      }
-      return { ...annotation, x: clamp(interaction.original.x + deltaX, 0, 100 - interaction.original.w), y: clamp(interaction.original.y + deltaY, 0, 100 - interaction.original.h) };
-    });
-    assignMap({ ...current, [key]: nextList }, true);
-  }, [assignMap, pageNumber, toPercent]);
-
-  const pointerUpOnSurface = useCallback(() => {
-    const interaction = interactionRef.current;
-    if (!interaction) return;
-    if (interaction.type === 'draw') {
-      const draft = interaction.draft;
-      const enough = interaction.tool === 'draw'
-        ? (draft.points?.length || 0) > 1
-        : draft.w > 0.65 || draft.h > 0.65;
-      const normalized = { ...draft };
-      if (interaction.tool === 'highlight') normalized.h = Math.max(2.8, normalized.h);
-      if (interaction.tool === 'underline' || interaction.tool === 'strike' || interaction.tool === 'line') normalized.h = Math.max(1.2, normalized.h);
-      if (enough) {
-        const key = String(pageNumber - 1);
-        const next = { ...interaction.startAnnotations, [key]: [...(interaction.startAnnotations[key] || []), normalized] };
-        commitMap(next);
-        setSelectedId(normalized.id);
-      } else {
-        setNotice('Drag on the page to draw the selected mark.');
-      }
-      setDraftAnnotation(null);
-    } else {
-      const before = interaction.startAnnotations;
-      if (JSON.stringify(before) !== JSON.stringify(annotationMapRef.current)) {
-        undoStackRef.current.push(before);
-        if (undoStackRef.current.length > 100) undoStackRef.current.shift();
-        redoStackRef.current = [];
-      }
-    }
-    interactionRef.current = null;
-  }, [commitMap, pageNumber]);
-
-  const beginAnnotationInteraction = useCallback((event, annotation, type = 'move') => {
-    if (editingId === annotation.id) return;
-    if (activeTool !== 'select') return;
-    event.stopPropagation();
-    event.preventDefault();
-    const start = toPercent(event);
-    interactionRef.current = { type, id: annotation.id, start, original: { x: annotation.x, y: annotation.y, w: annotation.w, h: annotation.h }, startAnnotations: annotationMapRef.current };
-    setSelectedId(annotation.id);
-    surfaceRef.current?.setPointerCapture?.(event.pointerId);
-  }, [activeTool, editingId, toPercent]);
-
-  const startTextEdit = useCallback((event, annotation) => {
-    if (activeTool !== 'select') return;
-    event.stopPropagation();
-    setSelectedId(annotation.id);
-    setEditingId(annotation.id);
-    editStartRef.current = annotationMapRef.current;
-  }, [activeTool]);
-
-  const finishTextEdit = useCallback(() => {
-    const before = editStartRef.current;
-    if (before && JSON.stringify(before) !== JSON.stringify(annotationMapRef.current)) {
-      undoStackRef.current.push(before);
-      if (undoStackRef.current.length > 100) undoStackRef.current.shift();
-      redoStackRef.current = [];
-    }
-    editStartRef.current = null;
-    setEditingId(null);
-  }, []);
-
-  const updateSelected = useCallback((patch) => {
-    if (!selectedId) return;
-    changeCurrent((list) => list.map((item) => item.id === selectedId ? { ...item, ...patch } : item));
-  }, [changeCurrent, selectedId]);
-
-  const removeSelected = useCallback(() => {
-    if (!selectedId) return;
-    changeCurrent((list) => list.filter((item) => item.id !== selectedId));
-    setSelectedId(null);
-    setEditingId(null);
-  }, [changeCurrent, selectedId]);
-
-  const undo = useCallback(() => {
-    const previous = undoStackRef.current.pop();
-    if (!previous) { notify?.('Nothing to undo in the Edit PDF workspace.', 'info'); return; }
-    redoStackRef.current.push(annotationMapRef.current);
-    assignMap(previous, true);
-    setSelectedId(null);
-  }, [assignMap, notify]);
-
-  const redo = useCallback(() => {
-    const next = redoStackRef.current.pop();
-    if (!next) { notify?.('Nothing to redo in the Edit PDF workspace.', 'info'); return; }
-    undoStackRef.current.push(annotationMapRef.current);
-    assignMap(next, true);
-    setSelectedId(null);
-  }, [assignMap, notify]);
+  useLayoutEffect(() => { measureNow(); }, [measureNow, scale, base, stageSize, view.rulers, pdfDoc, pageNumber]);
+  useEffect(() => {
+    const stage = stageRef.current; if (!stage) return undefined;
+    let raf = 0;
+    const onScroll = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(measureNow); };
+    stage.addEventListener('scroll', onScroll, { passive: true });
+    return () => { stage.removeEventListener('scroll', onScroll); cancelAnimationFrame(raf); };
+  }, [measureNow, pdfDoc]);
 
   useEffect(() => {
-    const onKeyDown = (event) => {
-      if (!active) return;
-      const target = event.target;
-      const editingField = target instanceof HTMLElement && (target.matches('textarea, input, select, [contenteditable="true"]'));
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !editingField) { event.preventDefault(); event.shiftKey ? redo() : undo(); }
-      else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y' && !editingField) { event.preventDefault(); redo(); }
-      else if ((event.key === 'Delete' || event.key === 'Backspace') && !editingField && selectedId && activeTool === 'select') { event.preventDefault(); removeSelected(); }
-      else if (event.key === 'Escape') { setDraftAnnotation(null); interactionRef.current = null; setEditingId(null); setSelectedId(null); }
+    const stage = stageRef.current; if (!stage) return undefined;
+    const onWheel = (event) => {
+      if (event.shiftKey && !(event.ctrlKey || event.metaKey)) { event.preventDefault(); stage.scrollLeft += event.deltaY || event.deltaX; return; }
+      if (!(event.ctrlKey || event.metaKey)) return;
+      event.preventDefault();
+      setZoom((z) => ({ mode: 'custom', value: clamp((z.mode === 'custom' ? z.value : scale) * (event.deltaY < 0 ? 1.1 : 1 / 1.1), 0.2, 12) }));
     };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [active, activeTool, redo, removeSelected, selectedId, undo]);
+    stage.addEventListener('wheel', onWheel, { passive: false });
+    return () => stage.removeEventListener('wheel', onWheel);
+  }, [scale, pdfDoc]);
 
-  const savePdf = useCallback(async () => {
-    if (!pdfDoc || !sourceBytes) {
-      notify?.('Open a PDF before saving edits.', 'error');
+  // ---- geometry helpers --------------------------------------------------------------------------
+  const toPt = useCallback((event) => {
+    const rect = surfaceRef.current?.getBoundingClientRect();
+    if (!rect || !base) return { x: 0, y: 0 };
+    return { x: (event.clientX - rect.left) / (rect.width / base.w), y: (event.clientY - rect.top) / (rect.height / base.h) };
+  }, [base]);
+
+  const snapSet = useCallback((excludeIds = [], overrides = {}) => {
+    const objects = [];
+    for (const i of pageList()) if (!excludeIds.includes(i.id) && !i.deleted && !i.hidden) objects.push({ x: i.x, y: i.y, w: i.w, h: i.h });
+    const done = new Set(pageList().map((i) => i.blockId).filter(Boolean));
+    for (const b of [...pageContent.blocks, ...pageContent.images]) if (!done.has(b.id)) objects.push({ x: b.x, y: b.y, w: b.w, h: b.h });
+    return buildSnapLines({
+      pageW: base.w, pageH: base.h, margins: view.showMargins && view.snapMargins ? margins : null, guides: view.showGuides ? pageGuides : null, objects,
+      flags: { page: view.snapPage, margins: view.showMargins && view.snapMargins, guides: view.snapGuides && view.showGuides, objects: view.snapObjects, grid: view.snapGrid && view.grid, gridSize: view.gridSize, ...overrides },
+    });
+  }, [base, margins, pageContent, pageGuides, pageList, view]);
+  const snapping = (event) => view.snap && !event.altKey;
+
+  // ---- materialising existing content ------------------------------------------------------------
+  const ensureBlockItem = useCallback((block) => {
+    const existing = pageList().find((i) => i.blockId === block.id);
+    if (existing) return existing.id;
+    const colors = sampleColors(canvasRef.current, kRef.current, block);
+    let item;
+    if (block.kind === 'image') {
+      item = { id: uid(), type: 'imageedit', blockId: block.id, src: { x: block.x, y: block.y, w: block.w, h: block.h }, cover: colors.bg, x: block.x, y: block.y, w: block.w, h: block.h, data: null, orig: { x: block.x, y: block.y, w: block.w, h: block.h } };
+    } else {
+      const f = block.font;
+      const underline = detectUnderline(canvasRef.current, kRef.current, block, colors.bg, colors.fg);
+      item = {
+        id: uid(), type: 'textedit', blockId: block.id, src: { x: block.x, y: block.y, w: block.w, h: block.h }, cover: colors.bg,
+        text: block.text, size: block.size, font: f.family, fontName: f.name || '', fontRef: f.ref || '', bold: f.bold, italic: f.italic, origBold: f.bold, origItalic: f.italic,
+        underline, strike: false, color: colors.fg, align: block.align, lineHeight: block.lineHeight, reflow: false, pad: 0, x: block.x, w: block.w, h: block.h,
+        origFont: { font: f.family, fontName: f.name || '', fontRef: f.ref || '' },
+      };
+      const layout = layoutItem(item);
+      item.y = block.firstBaseline - baselineOf(layout, 0, 0);
+      item.h = layout.autoH;
+      item.orig = { x: item.x, y: item.y, text: item.text, size: item.size, font: item.font, fontName: item.fontName, bold: item.bold, italic: item.italic, underline, strike: false, color: item.color, align: item.align, lineHeight: item.lineHeight };
+    }
+    applyAnn(withList([...pageList(), item]), false);
+    if (block.kind === 'image' && pdfDoc) {
+      const key = pageKey; const itemId = item.id;
+      pdfDoc.getPage(pageNumber).then((page) => renderRegionToDataUrl(page, block)).then((data) => {
+        const list = annRef.current[key] || [];
+        if (list.some((i) => i.id === itemId)) applyAnn({ ...annRef.current, [key]: list.map((i) => (i.id === itemId ? { ...i, data } : i)) }, false);
+      }).catch(() => notify?.('This image could not be extracted for editing.', 'error'));
+    }
+    return item.id;
+  }, [applyAnn, notify, pageKey, pageList, pageNumber, pdfDoc, withList]);
+
+  // ---- tools --------------------------------------------------------------------------------------
+  const setTool = useCallback((id) => {
+    if (!pdfDoc) { setNotice('Open a PDF to start editing.'); return; }
+    if (editingId) finishEditing();
+    setSelection([]); setToolState(id);
+    if (id === 'signature') setSignatureOpen(true);
+    if (id === 'image') imageInputRef.current?.click();
+  }, [editingId, finishEditing, pdfDoc, setSelection]);
+
+  const placeItem = useCallback((item, before = annRef.current) => {
+    commitAnn(withList([...pageList(), item]), before);
+    setSelectedIds([item.id]); setToolState('select');
+  }, [commitAnn, pageList, withList]);
+
+  const handleImageInput = useCallback(async (event) => {
+    const file = event.target.files?.[0]; event.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { notify?.('Choose an image file for this tool.', 'error'); return; }
+    try { setPendingImage({ kind: 'image', ...(await readImageFile(file)) }); setToolState('image'); setNotice(`Image ready: ${file.name}. Click the page to place it.`); }
+    catch (error) { notify?.(error?.message || 'Could not read that image.', 'error'); }
+  }, [notify]);
+
+  const handleReplaceInput = useCallback(async (event) => {
+    const file = event.target.files?.[0]; event.target.value = '';
+    if (!file || !selectedIds[0]) return;
+    try { const img = await readImageFile(file); patchItems([selectedIds[0]], { data: img.data, replaced: true }); }
+    catch (error) { notify?.(error?.message || 'Could not read that image.', 'error'); }
+  }, [notify, patchItems, selectedIds]);
+
+  // ---- guides & margins dragging ------------------------------------------------------------------
+  const setGuides = useCallback((key, guides) => setGuidesByPage((prev) => ({ ...prev, [key]: guides })), []);
+  const beginGuideDrag = useCallback((axis, index, event) => {
+    if (!base) return;
+    event.preventDefault();
+    const key = pageKey; const set = snapSet([], { guides: false });
+    const thr = snapThreshold(scale);
+    const posOf = (e) => { const pt = toPt(e); let value = axis === 'v' ? pt.x : pt.y; if (view.snap && !e.altKey) { const s = snapPoint(pt, set, thr); value = axis === 'v' ? s.x : s.y; } return value; };
+    setDraftGuide({ axis, index, pos: posOf(event) });
+    const move = (e) => setDraftGuide({ axis, index, pos: posOf(e) });
+    const up = (e) => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+      const pos = posOf(e); const limit = axis === 'v' ? base.w : base.h;
+      const current = guidesByPageRef.current[key] || EMPTY_GUIDES;
+      const list = [...(current[axis] || [])];
+      const inside = pos >= 0 && pos <= limit;
+      if (index >= 0) { if (inside) list[index] = pos; else list.splice(index, 1); }
+      else if (inside) list.push(pos);
+      setGuides(key, { ...current, [axis]: list }); setDraftGuide(null);
+    };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  }, [base, pageKey, scale, setGuides, snapSet, toPt, view.snap]);
+  const guidesByPageRef = useRef({});
+  guidesByPageRef.current = guidesByPage;
+
+  const beginMarginDrag = useCallback((side, event) => {
+    event.preventDefault();
+    const move = (e) => {
+      const pt = toPt(e);
+      const raw = side === 'left' ? pt.x : side === 'right' ? base.w - pt.x : side === 'top' ? pt.y : base.h - pt.y;
+      const value = clamp(raw, 0, (side === 'left' || side === 'right' ? base.w : base.h) / 2 - 1);
+      setViewState((prev) => ({ ...prev, margins: prev.marginLink ? { top: value, right: value, bottom: value, left: value } : { ...prev.margins, [side]: value } }));
+    };
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); setViewState((prev) => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prev)); } catch { /* ignore */ } return prev; }); };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  }, [base, toPt]);
+
+  const onGuides = useCallback((op, axis, index, value) => {
+    const current = pageGuides; const list = [...(current[axis] || [])];
+    if (op === 'add') list.push(value); else if (op === 'remove') list.splice(index, 1); else list[index] = clamp(value, 0, axis === 'v' ? base.w : base.h);
+    setGuides(pageKey, { ...current, [axis]: list });
+  }, [base, pageGuides, pageKey, setGuides]);
+
+  // ---- pointer interaction on the page -------------------------------------------------------------
+  const selectedItems = useMemo(() => items.filter((i) => selectedIds.includes(i.id)), [items, selectedIds]);
+  const single = selectedItems.length === 1 ? selectedItems[0] : null;
+
+  const stagePointerDown = (event) => {
+    if (!(event.button === 1 || (event.button === 0 && spaceRef.current))) return;
+    const stage = stageRef.current; if (!stage) return;
+    event.preventDefault(); event.stopPropagation();
+    panRef.current = { x: event.clientX, y: event.clientY, left: stage.scrollLeft, top: stage.scrollTop };
+    stage.setPointerCapture?.(event.pointerId); setPanning(true);
+  };
+  const stagePointerMove = (event) => {
+    const pan = panRef.current;
+    if (pan) { const stage = stageRef.current; stage.scrollLeft = pan.left - (event.clientX - pan.x); stage.scrollTop = pan.top - (event.clientY - pan.y); return; }
+    if (!ixRef.current) cursorBus.current.forEach((fn) => fn(toPt(event)));
+  };
+  const stagePointerUp = () => { if (panRef.current) { panRef.current = null; setPanning(false); } };
+
+  const surfaceDown = (event) => {
+    if (!pdfDoc || busy || event.button !== 0 || !base || spaceRef.current) return;
+    const target = event.target;
+    if (target.closest('textarea')) return;
+    const pt = toPt(event);
+    const guideEl = target.closest('[data-guide]');
+    if (guideEl) { if (!view.guidesLocked) beginGuideDrag(guideEl.dataset.axis, Number(guideEl.dataset.index), event); return; }
+    const marginEl = target.closest('[data-margin]');
+    if (marginEl && !view.guidesLocked) { beginMarginDrag(marginEl.dataset.margin, event); return; }
+    if (tool === 'select') selectDown(event, pt); else createDown(event, pt);
+  };
+
+  const startMove = (event, ids, pt, editOnClick) => {
+    const list = pageList(); const originals = list.filter((i) => ids.includes(i.id));
+    ixRef.current = { type: 'move', ids, originals, startPt: pt, startClient: { x: event.clientX, y: event.clientY }, before: annRef.current, moved: false, editOnClick, set: snapSet(ids) };
+    surfaceRef.current?.setPointerCapture?.(event.pointerId);
+  };
+
+  const selectDown = (event, pt) => {
+    const target = event.target;
+    const handleEl = target.closest('[data-handle]');
+    if (handleEl && single) {
+      const original = single; const imageLike = ['image', 'signature', 'imageedit'].includes(original.type);
+      ixRef.current = { type: 'resize', id: original.id, handle: handleEl.dataset.handle, original, startPt: pt, before: annRef.current, aspect: (imageLike ? !event.shiftKey : event.shiftKey) && view.lockAspect !== false ? original.w / original.h : 0, set: snapSet([original.id]) };
+      surfaceRef.current?.setPointerCapture?.(event.pointerId); event.preventDefault(); return;
+    }
+    const objEl = target.closest('[data-obj]'); const blockEl = target.closest('[data-block]');
+    if (objEl || blockEl) {
+      event.preventDefault();
+      if (editingId) finishEditing();
+      let id;
+      if (objEl) id = objEl.dataset.obj;
+      else { const block = [...pageContent.blocks, ...pageContent.images].find((b) => b.id === blockEl.dataset.block); if (!block) return; id = ensureBlockItem(block); }
+      const item = pageList().find((i) => i.id === id); if (!item || item.deleted) return;
+      let ids;
+      if (event.shiftKey) { ids = selectedIds.includes(id) ? selectedIds.filter((x) => x !== id) : [...selectedIds, id]; setSelection(ids); if (!ids.includes(id)) return; }
+      else if (selectedIds.includes(id)) ids = selectedIds;
+      else { ids = [id]; setSelection(ids); }
+      startMove(event, ids, pt, !event.shiftKey && ids.length === 1 && TEXT_TYPES.has(item.type) && item.type !== 'stamp');
       return;
     }
+    if (editingId) finishEditing();
+    ixRef.current = { type: 'marquee', start: pt, additive: event.shiftKey, base: event.shiftKey ? selectedIds : [], pageItems: pageList() };
+    if (!event.shiftKey) setSelection([]);
+    surfaceRef.current?.setPointerCapture?.(event.pointerId);
+  };
+
+  const createDown = (event, rawPt) => {
+    if (editingId) finishEditing();
+    setSelection([]);
+    const set = snapping(event) ? snapSet() : null;
+    const pt = set ? snapPoint(rawPt, set, snapThreshold(scale)) : rawPt;
+    const before = annRef.current; const d = textDefaults;
+    if (tool === 'text') {
+      ixRef.current = { type: 'text', start: pt, before, startClient: { x: event.clientX, y: event.clientY }, dragged: false, set };
+      surfaceRef.current?.setPointerCapture?.(event.pointerId); event.preventDefault(); return;
+    }
+    if (tool === 'signature') {
+      if (pendingImage?.kind !== 'signature') { setSignatureOpen(true); return; }
+      const w = 170; placeItem({ id: uid(), type: 'signature', x: pt.x, y: pt.y, w, h: w * pendingImage.height / pendingImage.width, data: pendingImage.data, mime: 'image/png' }, before); setPendingImage(null); return;
+    }
+    if (tool === 'image') {
+      if (pendingImage?.kind !== 'image') { imageInputRef.current?.click(); return; }
+      const w = Math.min(base.w * 0.4, pendingImage.width * 0.75); placeItem({ id: uid(), type: 'image', x: pt.x, y: pt.y, w, h: w * pendingImage.height / pendingImage.width, data: pendingImage.data, mime: pendingImage.mime }, before); setPendingImage(null); return;
+    }
+    if (tool === 'note') { const item = { id: uid(), type: 'note', x: pt.x, y: pt.y, w: 150, h: 100, text: '', color: '#55461a', size: 11, font: 'helvetica' }; commitAnn(withList([...pageList(), item]), before); startEditing(item.id); setToolState('select'); editStartRef.current = annRef.current; return; }
+    if (tool === 'stamp') { placeItem({ id: uid(), type: 'stamp', x: pt.x - 75, y: pt.y - 20, w: 150, h: 40, text: stampText, color: defaults.color === '#000000' ? '#b4232a' : defaults.color, size: 18, lineWidth: defaults.lineWidth, font: 'helvetica' }, before); return; }
+    const isHighlight = tool === 'highlight';
+    const first = { id: uid(), type: tool, x: pt.x, y: pt.y, w: 0.2, h: 0.2, color: isHighlight ? defaults.highlight : defaults.color, lineWidth: defaults.lineWidth, opacity: isHighlight ? 0.34 : 1, points: tool === 'draw' ? [pt] : undefined, startPoint: tool === 'line' ? pt : undefined, endPoint: tool === 'line' ? pt : undefined };
+    ixRef.current = { type: 'draw', tool, start: pt, before, draft: first, set };
+    setDraft(first); surfaceRef.current?.setPointerCapture?.(event.pointerId); event.preventDefault();
+  };
+
+  const surfaceMove = (event) => {
+    const pt = toPt(event);
+    cursorBus.current.forEach((fn) => fn(pt));
+    const ix = ixRef.current; if (!ix || !base) return;
+    const thr = snapThreshold(scale);
+    if (ix.type === 'move') {
+      if (!ix.moved && Math.hypot(event.clientX - ix.startClient.x, event.clientY - ix.startClient.y) < 3) return;
+      ix.moved = true;
+      let dx = pt.x - ix.startPt.x; let dy = pt.y - ix.startPt.y;
+      if (event.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
+      const b = boundsOf(ix.originals);
+      let hits = [];
+      if (snapping(event)) { const s = snapMove({ x: b.x + dx, y: b.y + dy, w: b.w, h: b.h }, ix.set, thr); dx += s.dx; dy += s.dy; hits = s.hits; }
+      dx = clamp(dx, 8 - (b.x + b.w), base.w - 8 - b.x); dy = clamp(dy, 8 - (b.y + b.h), base.h - 8 - b.y);
+      const originals = new Map(ix.originals.map((i) => [i.id, i]));
+      applyAnn(withList(pageList().map((i) => (originals.has(i.id) ? translateItem(originals.get(i.id), dx, dy) : i)), ix.before), true);
+      setSnapHits(hits); return;
+    }
+    if (ix.type === 'resize') {
+      const o = ix.original; const text = TEXT_TYPES.has(o.type);
+      const minW = text ? Math.max(12, (o.size || 12) * 1.5) : 4; const minH = text ? o.h : 4;
+      let rect = resizeRect(o, ix.handle, pt.x - ix.startPt.x, pt.y - ix.startPt.y, minW, minH, ix.aspect);
+      let hits = [];
+      if (snapping(event) && !ix.aspect) { const s = snapResize(rect, ix.handle, ix.set, thr, minW); rect = { ...rect, ...s.rect }; hits = s.hits; }
+      const next = text ? applyPatch(o, { x: rect.x, w: rect.w, reflow: true }) : transformItem(o, { x: o.x, y: o.y, w: o.w, h: o.h }, rect);
+      applyAnn(withList(pageList().map((i) => (i.id === o.id ? next : i)), ix.before), true);
+      setSnapHits(hits); return;
+    }
+    if (ix.type === 'text') {
+      if (!ix.dragged && Math.hypot(event.clientX - ix.startClient.x, event.clientY - ix.startClient.y) < 5) return;
+      ix.dragged = true; ix.end = pt;
+      setDraft({ id: 'draft', type: 'rect', x: Math.min(ix.start.x, pt.x), y: Math.min(ix.start.y, pt.y), w: Math.abs(pt.x - ix.start.x), h: Math.abs(pt.y - ix.start.y), color: '#6757d9', lineWidth: 0.8, dashed: true }); return;
+    }
+    if (ix.type === 'draw') {
+      const p = ix.set && ix.tool !== 'draw' && snapping(event) ? snapPoint(pt, ix.set, thr) : pt;
+      const s = ix.start; const old = ix.draft;
+      if (ix.tool === 'draw') {
+        const points = [...old.points, pt]; const xs = points.map((q) => q.x); const ys = points.map((q) => q.y);
+        ix.draft = { ...old, points, x: Math.min(...xs), y: Math.min(...ys), w: Math.max(0.25, Math.max(...xs) - Math.min(...xs)), h: Math.max(0.25, Math.max(...ys) - Math.min(...ys)) };
+      } else {
+        let end = p;
+        if (ix.tool === 'line' && event.shiftKey) { const ddx = Math.abs(end.x - s.x); const ddy = Math.abs(end.y - s.y); end = ddx > ddy ? { x: end.x, y: s.y } : { x: s.x, y: end.y }; }
+        ix.draft = { ...old, x: Math.min(s.x, end.x), y: Math.min(s.y, end.y), w: Math.max(0.2, Math.abs(end.x - s.x)), h: Math.max(0.2, Math.abs(end.y - s.y)), ...(ix.tool === 'line' ? { startPoint: s, endPoint: end } : {}) };
+      }
+      setDraft({ ...ix.draft }); setSnapHits(p.hits || []); return;
+    }
+    if (ix.type === 'marquee') {
+      const rect = { x: Math.min(ix.start.x, pt.x), y: Math.min(ix.start.y, pt.y), w: Math.abs(pt.x - ix.start.x), h: Math.abs(pt.y - ix.start.y) };
+      setMarquee(rect); ix.rect = rect;
+    }
+  };
+
+  const surfaceUp = () => {
+    const ix = ixRef.current; if (!ix) return;
+    ixRef.current = null; setSnapHits([]);
+    if (ix.type === 'move') {
+      if (ix.moved) { const changed = JSON.stringify(ix.before) !== JSON.stringify(annRef.current); if (changed) pushHistory(ix.before); }
+      else if (ix.editOnClick) startEditing(ix.ids[0]);
+    } else if (ix.type === 'resize') {
+      if (JSON.stringify(ix.before) !== JSON.stringify(annRef.current)) pushHistory(ix.before);
+    } else if (ix.type === 'text') {
+      const d = textDefaults; const lh = d.size * d.lineHeight; const pad = 2;
+      const dragged = ix.dragged && ix.end && Math.abs(ix.end.x - ix.start.x) > 14;
+      const x = dragged ? Math.min(ix.start.x, ix.end.x) : ix.start.x - pad;
+      const item = { id: uid(), type: 'text', x, y: dragged ? Math.min(ix.start.y, ix.end.y) : ix.start.y - lh / 2 - pad, w: dragged ? Math.abs(ix.end.x - ix.start.x) : d.size * 3, h: lh + 2 * pad, text: '', font: d.font, fontName: d.fontName || '', underline: !!d.underline, strike: !!d.strike, size: d.size, bold: d.bold, italic: d.italic, color: d.color, align: d.align, lineHeight: d.lineHeight, reflow: !!dragged };
+      applyAnn(withList([...pageList(), item], ix.before), false);
+      editStartRef.current = ix.before; setSelectedIds([item.id]); setEditingId(item.id); setToolState('select'); setDraft(null);
+    } else if (ix.type === 'draw') {
+      const d = ix.draft; const enough = ix.tool === 'draw' ? (d.points?.length || 0) > 1 : d.w > 2 || d.h > 2;
+      if (enough) {
+        const out = { ...d };
+        if (ix.tool === 'highlight') out.h = Math.max(10, out.h);
+        if (['underline', 'strike', 'line'].includes(ix.tool)) out.h = Math.max(1.5, out.h);
+        commitAnn(withList([...pageList(), out], ix.before), ix.before); setSelectedIds([out.id]);
+      } else setNotice('Drag on the page to draw the selected mark.');
+      setDraft(null);
+    } else if (ix.type === 'marquee') {
+      const rect = ix.rect; setMarquee(null);
+      if (!rect || (rect.w < 3 && rect.h < 3)) return;
+      const hit = ix.pageItems.filter((i) => !i.deleted && rectsIntersect(rect, i)).map((i) => i.id);
+      const done = new Set(ix.pageItems.map((i) => i.blockId).filter(Boolean));
+      const extra = [...pageContent.blocks, ...pageContent.images].filter((b) => !done.has(b.id) && rectContains(rect, b)).map((b) => ensureBlockItem(b));
+      setSelection([...new Set([...ix.base, ...hit, ...extra])]);
+    }
+  };
+
+  // ---- commands ------------------------------------------------------------------------------------
+  const deleteSelected = useCallback(() => {
+    if (!selectedIds.length) return;
+    const before = annRef.current;
+    const list = pageList().flatMap((i) => {
+      if (!selectedIds.includes(i.id)) return [i];
+      return i.blockId ? [{ ...i, deleted: true }] : [];
+    });
+    commitAnn(withList(list), before); setSelectedIds([]); setEditingId(null);
+  }, [commitAnn, pageList, selectedIds, withList]);
+
+  const duplicateSelected = useCallback(() => {
+    if (!selectedItems.length) return;
+    const copies = selectedItems.map((i) => translateItem(detach(i), 12, 12));
+    commitAnn(withList([...pageList(), ...copies])); setSelectedIds(copies.map((c) => c.id));
+  }, [commitAnn, pageList, selectedItems, withList]);
+
+  const reorder = useCallback((where) => {
+    const list = pageList(); const chosen = list.filter((i) => selectedIds.includes(i.id)); const rest = list.filter((i) => !selectedIds.includes(i.id));
+    commitAnn(withList(where === 'front' ? [...rest, ...chosen] : [...chosen, ...rest]));
+  }, [commitAnn, pageList, selectedIds, withList]);
+
+  const nudge = useCallback((dx, dy) => {
+    if (!selectedIds.length) return;
+    const before = annRef.current; const now = Date.now();
+    const list = pageList().map((i) => (selectedIds.includes(i.id) ? translateItem(i, dx, dy) : i));
+    if (now - nudgeRef.current > 700) pushHistory(before);
+    nudgeRef.current = now; applyAnn(withList(list), true);
+  }, [applyAnn, pageList, pushHistory, selectedIds, withList]);
+
+  const doAlign = useCallback((mode) => {
+    if (!selectedItems.length || !base) return;
+    let target = { x: 0, y: 0, w: base.w, h: base.h };
+    if (alignTo === 'margins') target = { x: margins.left, y: margins.top, w: base.w - margins.left - margins.right, h: base.h - margins.top - margins.bottom };
+    else if (alignTo === 'selection' && selectedItems.length > 1) target = boundsOf(selectedItems);
+    const moved = new Map(alignItems(selectedItems, mode, target).map((i) => [i.id, i]));
+    commitAnn(withList(pageList().map((i) => moved.get(i.id) || i)));
+  }, [alignTo, base, commitAnn, margins, pageList, selectedItems, withList]);
+
+  const doDistribute = useCallback((axis) => {
+    if (selectedItems.length < 3) return;
+    const moved = new Map(distributeItems(selectedItems, axis).map((i) => [i.id, i]));
+    commitAnn(withList(pageList().map((i) => moved.get(i.id) || i)));
+  }, [commitAnn, pageList, selectedItems, withList]);
+
+  const goToPage = useCallback((n) => {
+    if (!Number.isFinite(n)) return;
+    const next = clamp(Math.round(n), 1, pageCount || 1);
+    if (next === pageNumber) return;
+    if (editingId) finishEditing();
+    setSelectedIds([]); setPageNumber(next);
+  }, [editingId, finishEditing, pageCount, pageNumber]);
+
+  const textTargets = selectedItems.filter((i) => TEXT_TYPES.has(i.type));
+  const styleSource = textTargets[0];
+  const formatStyle = styleSource ? { ...resolveText(styleSource), color: styleSource.color || '#000000' } : { ...textDefaults, family: textDefaults.font, fontName: textDefaults.fontName || '' };
+  const onFormat = useCallback((patch) => {
+    let next = patch;
+    if ('font' in patch) {
+      const choice = patch.font;
+      const original = textTargets[0]?.origFont;
+      if (choice === '__original__' && original) next = { ...patch, font: original.font, fontName: original.fontName, fontRef: original.fontRef, bold: textTargets[0].origBold, italic: textTargets[0].origItalic };
+      else if (FONT_IDS.has(choice)) next = { ...patch, font: choice, fontName: '', fontRef: '' };
+      else { const common = COMMON_FONTS.find((f) => f.name === choice); next = { ...patch, font: common?.base || 'helvetica', fontName: choice, fontRef: '' }; }
+    }
+    if (textTargets.length) patchItems(textTargets.map((i) => i.id), next);
+    else setTextDefaults((prev) => ({ ...prev, ...next }));
+  }, [patchItems, textTargets]);
+  const onFormatKey = useCallback((key) => {
+    const target = pageList().find((i) => i.id === editingId); if (!target) return;
+    const r = resolveText(target);
+    patchItems([target.id], key === 'b' ? { bold: !r.bold } : key === 'i' ? { italic: !r.italic } : { underline: !r.underline });
+  }, [editingId, pageList, patchItems]);
+
+  // ---- keyboard ------------------------------------------------------------------------------------
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (!active || !pdfDoc) return;
+      const target = event.target;
+      const typing = target instanceof HTMLElement && target.matches('textarea, input, select, [contenteditable="true"]');
+      const mod = event.ctrlKey || event.metaKey; const key = event.key.toLowerCase();
+      if (mod && key === 'z' && !typing) { event.preventDefault(); if (event.shiftKey) redo(); else undo(); }
+      else if (mod && key === 'y' && !typing) { event.preventDefault(); redo(); }
+      else if (typing) return;
+      else if (mod && key === 'd') { event.preventDefault(); duplicateSelected(); }
+      else if (mod && key === 'c' && selectedItems.length) { clipboardRef.current = selectedItems.map((i) => ({ ...i })); }
+      else if (mod && key === 'v' && clipboardRef.current.length) { event.preventDefault(); const copies = clipboardRef.current.map((i) => translateItem(detach(i), 12, 12)); commitAnn(withList([...pageList(), ...copies])); setSelectedIds(copies.map((c) => c.id)); clipboardRef.current = copies.map((c) => ({ ...c })); }
+      else if (mod && key === 'a') { event.preventDefault(); setSelection(pageList().filter((i) => !i.deleted).map((i) => i.id)); }
+      else if (mod && key === '0') { event.preventDefault(); setZoom({ mode: 'page', value: CSS_PT }); }
+      else if (mod && key === '1') { event.preventDefault(); setZoom({ mode: 'custom', value: CSS_PT }); }
+      else if (mod && key === '2') { event.preventDefault(); setZoom({ mode: 'width', value: CSS_PT }); }
+      else if (mod && (key === '=' || key === '+' || event.code === 'NumpadAdd')) { event.preventDefault(); zoomStep(1); }
+      else if (mod && (key === '-' || key === '_' || event.code === 'NumpadSubtract')) { event.preventDefault(); zoomStep(-1); }
+      else if (mod && key === 'w' && standalone) { event.preventDefault(); window.pdfStudio?.closeEditor?.(); }
+      else if (mod) return;
+      else if (key === ' ') { event.preventDefault(); if (!spaceRef.current) { spaceRef.current = true; setSpaceHeld(true); } }
+      else if (key === 'delete' || key === 'backspace') { if (selectedIds.length && tool === 'select') { event.preventDefault(); deleteSelected(); } }
+      else if (key.startsWith('arrow') && selectedIds.length) { event.preventDefault(); const step = event.shiftKey ? 10 : 1; nudge(key === 'arrowleft' ? -step : key === 'arrowright' ? step : 0, key === 'arrowup' ? -step : key === 'arrowdown' ? step : 0); }
+      else if (key.startsWith('arrow')) { event.preventDefault(); const st = stageRef.current; const amount = event.shiftKey ? 320 : 80; st?.scrollBy({ left: key === 'arrowleft' ? -amount : key === 'arrowright' ? amount : 0, top: key === 'arrowup' ? -amount : key === 'arrowdown' ? amount : 0 }); }
+      else if (key === 'pagedown' || key === 'pageup') {
+        event.preventDefault();
+        const st = stageRef.current; const dir = key === 'pagedown' ? 1 : -1;
+        const edge = dir > 0 ? st.scrollTop + st.clientHeight >= st.scrollHeight - 2 : st.scrollTop <= 2;
+        if (!edge) st.scrollBy({ top: dir * st.clientHeight * 0.9 });
+        else if (dir > 0 && pageNumber < pageCount) { goToPage(pageNumber + 1); requestAnimationFrame(() => { st.scrollTop = 0; }); }
+        else if (dir < 0 && pageNumber > 1) { goToPage(pageNumber - 1); requestAnimationFrame(() => { st.scrollTop = st.scrollHeight; }); }
+      }
+      else if (key === 'home') { event.preventDefault(); goToPage(1); }
+      else if (key === 'end') { event.preventDefault(); goToPage(pageCount); }
+      else if (key === 'enter' && single && TEXT_TYPES.has(single.type) && !editingId) { event.preventDefault(); startEditing(single.id); }
+      else if (key === 'escape') { setDraft(null); ixRef.current = null; setMarquee(null); setSnapHits([]); if (selectedIds.length) setSelection([]); else setToolState('select'); }
+      else if (key === 'v') setTool('select');
+      else if (key === 't') setTool('text');
+      else if (key === 'i') setTool('image');
+    };
+    const onKeyUp = (event) => { if (event.key === ' ' && spaceRef.current) { spaceRef.current = false; setSpaceHeld(false); } };
+    window.addEventListener('keydown', onKeyDown); window.addEventListener('keyup', onKeyUp);
+    return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp); };
+  }, [active, commitAnn, deleteSelected, duplicateSelected, editingId, goToPage, nudge, pageCount, pageList, pageNumber, pdfDoc, redo, selectedIds, selectedItems, setSelection, setTool, single, standalone, startEditing, tool, undo, withList, zoomStep]);
+
+  // ---- save ----------------------------------------------------------------------------------------
+  const savePdf = useCallback(async () => {
+    if (!pdfDoc || !sourceBytes) { notify?.('Open a PDF before saving edits.', 'error'); return; }
     try {
-      finishTextEdit();
-      setBusy(true);
-      setNotice('Applying edits and preparing the PDF…');
-      const savedBytes = await exportEditedPdf(sourceBytes, pdfDoc, annotationMapRef.current, { title: `${cleanName(fileName)} (edited)` });
-      const suggestedName = `${cleanName(fileName)}-edited.pdf`;
-      let result;
-      if (window.pdfStudio?.saveFile) {
-        result = await window.pdfStudio.saveFile({ name: suggestedName, data: savedBytes, filters: [{ name: 'PDF document', extensions: ['pdf'] }] });
-      } else {
-        result = await saveInBrowser(savedBytes, suggestedName, 'application/pdf');
-      }
-      if (result?.canceled) {
-        setNotice('Save cancelled. Your edits are still in this session.');
-      } else {
-        setDirty(false);
-        setNotice('Edited PDF saved. The original file was left unchanged.');
-        notify?.('Edited PDF saved successfully.', 'success');
-      }
+      finishEditing(); setBusy(true); setNotice('Applying edits and preparing the PDF…');
+      const clean = {};
+      for (const [key, list] of Object.entries(annRef.current)) clean[key] = list.filter((i) => !isPristine(i) && !(i.type === 'text' && !(i.text || '').trim()));
+      const bytes = await exportEditedPdf(sourceBytes, pdfDoc, clean, { title: `${cleanName(fileName)} (edited)`, findFont: window.pdfStudio?.findFont });
+      const name = `${cleanName(fileName)}-edited.pdf`;
+      const result = window.pdfStudio?.saveFile ? await window.pdfStudio.saveFile({ name, data: bytes, filters: [{ name: 'PDF document', extensions: ['pdf'] }] }) : await saveInBrowser(bytes, name, 'application/pdf');
+      if (result?.canceled) setNotice('Save cancelled. Your edits are still in this session.');
+      else { setDirty(false); setNotice('Edited PDF saved. The original file was left unchanged.'); notify?.('Edited PDF saved successfully.', 'success'); }
     } catch (error) {
       console.error('Unable to save edited PDF', error);
       const message = error?.message || 'PDF Studio could not save this edited PDF.';
-      setNotice(message);
-      notify?.(message, 'error');
-    } finally {
-      setBusy(false);
-    }
-  }, [fileName, finishTextEdit, notify, pdfDoc, sourceBytes]);
+      setNotice(message); notify?.(message, 'error');
+    } finally { setBusy(false); }
+  }, [fileName, finishEditing, notify, pdfDoc, sourceBytes]);
 
   useEffect(() => {
-    const onEditorShortcut = (event) => {
-      if (!active) return;
-      const modifier = event.ctrlKey || event.metaKey;
-      if (!modifier) return;
+    const onShortcut = (event) => {
+      if (!active || !(event.ctrlKey || event.metaKey)) return;
       const key = event.key.toLowerCase();
       if (key === 's') { event.preventDefault(); event.stopPropagation(); savePdf(); }
       else if (key === 'o' && !(event.target instanceof HTMLElement && event.target.matches('textarea, input, select'))) { event.preventDefault(); event.stopPropagation(); openPdf(); }
     };
-    window.addEventListener('keydown', onEditorShortcut);
-    return () => window.removeEventListener('keydown', onEditorShortcut);
+    window.addEventListener('keydown', onShortcut);
+    return () => window.removeEventListener('keydown', onShortcut);
   }, [active, openPdf, savePdf]);
 
-  const handleImageInput = useCallback(async (event) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
-    if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      notify?.('Choose an image file for this tool.', 'error');
-      return;
-    }
-    try {
-      const data = new Uint8Array(await file.arrayBuffer());
-      const image = new Image();
-      const url = URL.createObjectURL(new Blob([data], { type: file.type }));
-      try {
-        image.src = url;
-        await image.decode();
-        const imageCanvas = document.createElement('canvas');
-        imageCanvas.width = image.naturalWidth;
-        imageCanvas.height = image.naturalHeight;
-        const imageContext = imageCanvas.getContext('2d');
-        if (!imageContext) throw new Error('Image conversion is not available.');
-        imageContext.drawImage(image, 0, 0);
-        setPendingImage({ kind: 'image', data: imageCanvas.toDataURL('image/png'), mime: 'image/png', width: image.naturalWidth, height: image.naturalHeight, name: file.name });
-      } finally {
-        URL.revokeObjectURL(url);
-      }
-      setActiveTool('image');
-      setNotice(`Image ready: ${file.name}. Click on the PDF page to place it.`);
-    } catch (error) {
-      notify?.(error?.message || 'Could not read that image.', 'error');
-    }
-  }, [notify]);
+  // ---- render --------------------------------------------------------------------------------------
+  const onTextChange = useCallback((id, value) => {
+    const key = pageKey;
+    const list = (annRef.current[key] || []).map((i) => (i.id === id ? applyPatch(i, { text: value }) : i));
+    applyAnn({ ...annRef.current, [key]: list }, true);
+  }, [applyAnn, pageKey]);
 
-  const setTool = useCallback((toolId) => {
-    if (!pdfDoc) {
-      setNotice('Open a PDF to start editing.');
-      return;
-    }
-    setSelectedId(null);
-    setEditingId(null);
-    setActiveTool(toolId);
-    if (toolId === 'signature') setSignatureOpen(true);
-    if (toolId === 'image') imageInputRef.current?.click();
-  }, [pdfDoc]);
-
-  const signaturePointerDown = useCallback((event) => {
-    if (signatureMode !== 'draw') return;
-    const canvas = signatureCanvasRef.current;
-    const context = canvas?.getContext('2d');
-    if (!canvas || !context) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = (event.clientX - rect.left) * canvas.width / rect.width;
-    const y = (event.clientY - rect.top) * canvas.height / rect.height;
-    context.strokeStyle = signatureColor;
-    context.lineWidth = 3.4;
-    context.lineCap = 'round';
-    context.lineJoin = 'round';
-    context.beginPath();
-    context.moveTo(x, y);
-    canvas.setPointerCapture?.(event.pointerId);
-    setHasSignatureInk(true);
-  }, [signatureColor, signatureMode]);
-
-  const signaturePointerMove = useCallback((event) => {
-    if (signatureMode !== 'draw' || !event.buttons) return;
-    const canvas = signatureCanvasRef.current;
-    const context = canvas?.getContext('2d');
-    if (!canvas || !context) return;
-    const rect = canvas.getBoundingClientRect();
-    context.lineTo((event.clientX - rect.left) * canvas.width / rect.width, (event.clientY - rect.top) * canvas.height / rect.height);
-    context.stroke();
-  }, [signatureMode]);
-
-  const clearSignature = useCallback(() => {
-    const canvas = signatureCanvasRef.current;
-    canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
-    setHasSignatureInk(false);
-  }, []);
-
-  const saveSignature = useCallback(() => {
-    const canvas = signatureCanvasRef.current;
-    if (!canvas) return;
-    if (signatureMode === 'type') {
-      const context = canvas.getContext('2d');
-      context.clearRect(0, 0, canvas.width, canvas.height);
-      context.fillStyle = signatureColor;
-      context.textAlign = 'center';
-      context.textBaseline = 'middle';
-      context.font = 'italic 58px cursive';
-      context.fillText(signatureText.trim() || 'Signature', canvas.width / 2, canvas.height / 2, canvas.width - 36);
-    } else if (!hasSignatureInk) {
-      notify?.('Draw your signature in the box before adding it.', 'error');
-      return;
-    }
-    setPendingImage({ kind: 'signature', data: canvas.toDataURL('image/png'), mime: 'image/png', width: canvas.width, height: canvas.height });
-    setSignatureOpen(false);
-    setActiveTool('signature');
-    setNotice('Signature ready. Click on the PDF page to place it.');
-  }, [hasSignatureInk, notify, signatureMode, signatureColor, signatureText]);
-
-  const renderedAnnotations = useMemo(() => draftAnnotation ? [...annotations, draftAnnotation] : annotations, [annotations, draftAnnotation]);
+  const covered = useMemo(() => new Set(items.map((i) => i.blockId).filter(Boolean)), [items]);
+  const selectionBounds = selectedItems.length ? boundsOf(selectedItems) : null;
+  const band = selectionBounds ? { x: { start: selectionBounds.x, end: selectionBounds.x + selectionBounds.w }, y: { start: selectionBounds.y, end: selectionBounds.y + selectionBounds.h } } : null;
+  const px = (v) => v * scale;
+  const interactive = tool === 'select';
+  const gridPx = view.gridSize * scale;
+  const hasWorkspacePdfs = documents.some((d) => d.kind === 'pdf' && sourcesRef?.current?.has(d.id));
+  const surfaceStyle = base ? { width: px(base.w), height: px(base.h) } : undefined;
+  if (surfaceStyle && view.grid && gridPx > 5) {
+    surfaceStyle.backgroundImage = 'linear-gradient(to right, rgba(60,80,200,.16) 1px, transparent 1px), linear-gradient(to bottom, rgba(60,80,200,.16) 1px, transparent 1px)';
+    surfaceStyle.backgroundSize = `${gridPx}px ${gridPx}px`;
+  }
+  const guides = view.showGuides ? pageGuides : EMPTY_GUIDES;
+  const activeDraftIndex = draftGuide ? `${draftGuide.axis}${draftGuide.index}` : null;
 
   return (
-    <section className="edit-pdf-view">
+    <section className={cx('ep-view', standalone && 'is-standalone')} onDragOver={(event) => event.preventDefault()} onDrop={onDropFile}>
       <input ref={fileInputRef} className="hidden-input" type="file" accept="application/pdf,.pdf" onChange={onPdfInputChange} />
       <input ref={imageInputRef} className="hidden-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" onChange={handleImageInput} />
-      <header className="ed-page-header">
-        <div className="ed-header-copy">
-          <div className="ed-eyebrow"><FilePenLine size={15} /> PDF editing studio</div>
-          <h1>Edit PDF</h1>
-          <p>Add text, signatures, highlights, shapes, stamps, and images directly to a PDF, then save a new copy.</p>
-        </div>
-        <div className="ed-header-actions">
-          {documents.some((document) => document.kind === 'pdf' && sourcesRef?.current?.has(document.id)) && <select className="ed-existing-doc-select" aria-label="Choose a PDF already in your workspace" value={loadedSourceId || ''} onChange={switchToWorkspacePdf} disabled={busy}><option value="">Workspace PDFs…</option>{documents.filter((document) => document.kind === 'pdf' && sourcesRef?.current?.has(document.id)).map((document) => <option key={document.id} value={document.id}>{document.name}</option>)}</select>}
-          <button type="button" className="ed-button ed-button-secondary" onClick={openPdf} disabled={busy}><FolderOpen size={16} /> Open PDF</button>
-          <button type="button" className="ed-button ed-button-primary" onClick={savePdf} disabled={!pdfDoc || busy}><Save size={16} /> {busy ? 'Working…' : 'Save as PDF'}{dirty && <span className="ed-unsaved-dot" title="Unsaved edits" />}</button>
+      <input ref={replaceInputRef} className="hidden-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" onChange={handleReplaceInput} />
+      <header className="ep-header">
+        <div><h1><FilePenLine size={20} /> Edit PDF</h1><p>Edit existing text and images, add your own, and line everything up with rulers, guides and margins.</p></div>
+        <div className="ep-header-actions">
+          {!standalone && hasWorkspacePdfs && <select className="ep-select" aria-label="Choose a PDF already in your workspace" value={loadedSourceId || ''} onChange={switchToWorkspacePdf} disabled={busy}><option value="">Workspace PDFs…</option>{documents.filter((d) => d.kind === 'pdf' && sourcesRef?.current?.has(d.id)).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select>}
+          <button type="button" className="ep-btn" onClick={openPdf} disabled={busy}><FolderOpen size={16} /> Open PDF</button>
+          <button type="button" className="ep-btn ep-btn-primary" onClick={savePdf} disabled={!pdfDoc || busy}><Save size={16} /> {busy ? 'Working…' : 'Save as PDF'}{dirty && <span className="ep-dot" title="Unsaved edits" />}</button>
         </div>
       </header>
 
-      {notice && <div className={cx('ed-notice', /saved successfully/i.test(notice) && 'ed-notice-success')} role="status"><span>{notice}</span><button type="button" onClick={() => setNotice('')} aria-label="Dismiss notice"><X size={14} /></button></div>}
+      {notice && <div className={cx('ep-notice', /saved/i.test(notice) && 'is-ok')} role="status"><span>{notice}</span><button type="button" onClick={() => setNotice('')} aria-label="Dismiss"><X size={14} /></button></div>}
 
       {!pdfDoc ? (
-        <div className="ed-empty-state">
-          <div className="ed-empty-icon"><FilePenLine size={30} /></div>
-          <h2>Make changes to your PDF</h2>
-          <p>Open a PDF to add text, signatures, highlights, shapes, images, and review marks. Your original file stays unchanged.</p>
-          <button type="button" className="ed-button ed-button-primary" onClick={openPdf} disabled={busy}><FolderOpen size={17} /> Choose a PDF to edit</button>
-          <div className="ed-empty-points"><span><ShieldCheck size={15} /> Processed on this device</span><span><Save size={15} /> Save as a new PDF</span></div>
+        <div className="ep-empty">
+          <div className="ep-empty-icon"><FilePenLine size={30} /></div>
+          <h2>Edit text, images and layout in your PDF</h2>
+          <p>Open a PDF, click any text or image to change it, and use guides and margins to keep it aligned. Your original file stays unchanged.</p>
+          <button type="button" className="ep-btn ep-btn-primary" onClick={openPdf} disabled={busy}><FolderOpen size={17} /> Choose a PDF to edit</button>
+          <div className="ep-empty-points"><span><ShieldCheck size={15} /> Processed on this device</span><span><Save size={15} /> Saved as a new PDF</span></div>
         </div>
       ) : (
-        <div className="ed-editor-shell">
-          <aside className="ed-tools-panel" aria-label="PDF editing tools">
-            <div className="ed-panel-label">TOOLS</div>
-            {TOOLS.map((tool) => {
-              const Icon = tool.icon;
-              return <button type="button" key={tool.id} className={cx('ed-tool-button', activeTool === tool.id && 'is-active')} onClick={() => setTool(tool.id)} title={tool.hint} aria-pressed={activeTool === tool.id}><Icon size={17} /><span>{tool.label}</span></button>;
-            })}
-            <div className="ed-tool-tip"><strong>{activeToolInfo.label}</strong><span>{activeToolInfo.hint}</span></div>
-          </aside>
-
-          <aside className="ed-pages-panel" aria-label="Page navigation">
-            <div className="ed-panel-title"><span>Pages</span><b>{pageCount}</b></div>
-            <div className="ed-page-list">
-              {Array.from({ length: pageCount }, (_, index) => index + 1).map((page) => (
-                <button type="button" key={page} className={cx('ed-page-thumbnail', pageNumber === page && 'is-active')} onClick={() => { finishTextEdit(); setPageNumber(page); setSelectedId(null); }}>
-                  <span className="ed-mini-page"><FileText size={18} /><i /><i /><i /></span>
-                  <span>Page {page}</span>
-                  {(annotationsByPage[String(page - 1)] || []).length > 0 && <small>{annotationsByPage[String(page - 1)].length} edits</small>}
+        <div className="ep-shell">
+          <ToolRail tool={tool} onTool={setTool} />
+          <aside className="ep-pages" aria-label="Pages">
+            <div className="ep-pages-title"><span>Pages</span><b>{pageCount}</b></div>
+            <div className="ep-pages-list">
+              {Array.from({ length: pageCount }, (_, i) => i + 1).map((n) => (
+                <button type="button" key={n} className={cx('ep-page-btn', n === pageNumber && 'is-active')} onClick={() => goToPage(n)}>
+                  <PageThumb pdfDoc={pdfDoc} pageNumber={n} /><span>{n}</span>{(ann[String(n - 1)] || []).filter((i) => !isPristine(i)).length > 0 && <small>{(ann[String(n - 1)] || []).filter((i) => !isPristine(i)).length}</small>}
                 </button>
               ))}
             </div>
-            <div className="ed-pages-footer"><span>Original pages</span><span>{pageCount}</span></div>
           </aside>
 
-          <main className="ed-document-panel">
-            <div className="ed-document-toolbar">
-              <div className="ed-document-name"><FileText size={16} /><span title={fileName}>{fileName}</span>{dirty && <em>Unsaved</em>}</div>
-              <div className="ed-page-control">
-                <button type="button" onClick={() => { finishTextEdit(); setPageNumber((n) => Math.max(1, n - 1)); setSelectedId(null); }} disabled={pageNumber <= 1} aria-label="Previous page"><ChevronLeft size={16} /></button>
-                <label><input aria-label="Current page" type="number" min={1} max={pageCount} value={pageNumber} onChange={(event) => { const n = Number(event.target.value); if (n >= 1 && n <= pageCount) { finishTextEdit(); setPageNumber(n); setSelectedId(null); } }} /><span>/ {pageCount}</span></label>
-                <button type="button" onClick={() => { finishTextEdit(); setPageNumber((n) => Math.min(pageCount, n + 1)); setSelectedId(null); }} disabled={pageNumber >= pageCount} aria-label="Next page"><ChevronRight size={16} /></button>
-              </div>
-              <div className="ed-zoom-controls"><button type="button" onClick={() => setZoom((z) => clamp(Number((z - 0.1).toFixed(2)), 0.55, 2))} disabled={zoom <= 0.55} title="Zoom out"><ZoomOut size={16} /></button><span>{Math.round(zoom * 100)}%</span><button type="button" onClick={() => setZoom((z) => clamp(Number((z + 0.1).toFixed(2)), 0.55, 2))} disabled={zoom >= 2} title="Zoom in"><ZoomIn size={16} /></button></div>
-              <div className="ed-history-controls"><button type="button" onClick={undo} disabled={!undoStackRef.current.length} title="Undo (Ctrl+Z)"><Undo2 size={16} /></button><button type="button" onClick={redo} disabled={!redoStackRef.current.length} title="Redo (Ctrl+Y)"><Redo2 size={16} /></button></div>
-            </div>
-
-            <div className="ed-stage" ref={stageRef}>
-              <div className="ed-workspace-hint"><MousePointer2 size={13} /> {activeTool === 'select' ? 'Select an item to move, resize, or edit it.' : activeToolInfo.hint}</div>
-              <div className="ed-canvas-center">
-                <div ref={surfaceRef} className={cx('ed-page-surface', `tool-${activeTool}`)} style={dimensions ? { width: dimensions.width, height: dimensions.height } : undefined} onPointerDown={pointerDownOnSurface} onPointerMove={pointerMoveOnSurface} onPointerUp={pointerUpOnSurface} onPointerCancel={pointerUpOnSurface}>
-                  <canvas ref={canvasRef} className="ed-pdf-canvas" aria-label={`PDF page ${pageNumber}`} />
-                  <div className="ed-annotation-layer">
-                    {renderedAnnotations.map((annotation) => <Annotation key={annotation.id} annotation={annotation} dimensions={dimensions} selected={selectedId === annotation.id} editing={editingId === annotation.id} activeTool={activeTool} onPointerDown={(event) => beginAnnotationInteraction(event, annotation)} onDoubleClick={(event) => startTextEdit(event, annotation)} onTextChange={(value) => {
-                      const key = String(pageNumber - 1);
-                      const current = annotationMapRef.current;
-                      const list = current[key] || [];
-                      assignMap({ ...current, [key]: list.map((item) => item.id === annotation.id ? { ...item, text: value } : item) }, true);
-                    }} onFinishText={finishTextEdit} onResizePointerDown={(event) => beginAnnotationInteraction(event, annotation, 'resize')} />)}
+          <main className="ep-main">
+            <DocBar fileName={fileName} dirty={dirty} pageNumber={pageNumber} pageCount={pageCount} onPage={goToPage} zoomPercent={zoomPercent} zoomMode={zoom.mode} onZoomStep={zoomStep}
+              onZoomPreset={(p) => setZoom({ mode: 'custom', value: p / 100 * CSS_PT })} onFit={(mode) => setZoom({ mode, value: CSS_PT })}
+              canUndo={undoRef.current.length > 0 && historyVersion >= 0} canRedo={redoRef.current.length > 0} onUndo={undo} onRedo={redo} view={view} setView={setView} />
+            <FormatBar original={styleSource?.origFont?.fontName || (styleSource?.origFont ? 'PDF font' : '')} style={formatStyle} onStyle={onFormat} hasTextTarget={textTargets.length > 0} selectionCount={selectedItems.length} alignTo={alignTo} setAlignTo={setAlignTo}
+              onAlign={doAlign} onDistribute={doDistribute} canAlign={selectedItems.length > 0} canDistribute={selectedItems.length >= 3} />
+            <div className={cx('ep-canvas-area', view.rulers && 'has-rulers')} style={{ '--ep-ruler': `${RULER_SIZE}px` }}>
+              {view.rulers && base && <RulersLayer bus={cursorBus} view={measure} unit={view.unit} scale={scale} base={base} band={band} onGuideStart={beginGuideDrag} />}
+              <div className={cx('ep-stage', spaceHeld && 'is-pan', panning && 'is-panning')} ref={stageRef} onPointerDownCapture={stagePointerDown} onPointerMove={stagePointerMove} onPointerUp={stagePointerUp} onPointerCancel={stagePointerUp} onPointerLeave={() => cursorBus.current.forEach((fn) => fn(null))} onAuxClick={(event) => event.preventDefault()}>
+                <div className="ep-hint-pill">{tool === 'select' ? 'Click text or an image to edit it. Drag to move it.' : toolInfo.hint}</div>
+                <div className="ep-page-wrap">
+                  <div ref={surfaceRef} className={cx('ep-surface', `tool-${tool}`, editingId && 'is-editing')} style={surfaceStyle} onPointerDown={surfaceDown} onPointerMove={surfaceMove} onPointerUp={surfaceUp} onPointerCancel={surfaceUp}>
+                    <canvas ref={canvasRef} className="ep-canvas" style={surfaceStyle} aria-label={`PDF page ${pageNumber}`} />
+                    {base && (
+                      <>
+                        {view.showMargins && (
+                          <div className="ep-margins" aria-hidden="true">
+                            <div className="ep-margin-box" style={{ left: px(margins.left), top: px(margins.top), right: px(margins.right), bottom: px(margins.bottom) }} />
+                            {['left', 'right', 'top', 'bottom'].map((side) => <i key={side} data-margin={side} className={cx('ep-margin-line', `is-${side}`, view.guidesLocked && 'is-locked')} style={side === 'left' ? { left: px(margins.left) } : side === 'right' ? { right: px(margins.right) } : side === 'top' ? { top: px(margins.top) } : { bottom: px(margins.bottom) }} title={`${side} margin: drag to adjust`} />)}
+                          </div>
+                        )}
+                        <div className="ep-covers" aria-hidden="true">{items.filter((i) => i.src && (i.type === 'textedit' || i.data || i.deleted)).map((i) => <i key={i.id} style={{ left: px(i.src.x - 0.75), top: px(i.src.y - 0.75), width: px(i.src.w + 1.5), height: px(i.src.h + 1.5), background: i.cover }} />)}</div>
+                        {interactive && <div className="ep-blocks">{[...pageContent.blocks, ...pageContent.images].filter((b) => !covered.has(b.id)).map((b) => <i key={b.id} data-block={b.id} className={cx('ep-block', b.kind === 'image' && 'is-image')} style={{ left: px(b.x - 1), top: px(b.y - 1), width: px(b.w + 2), height: px(b.h + 2) }} />)}</div>}
+                        <div className="ep-objects">
+                          {items.map((i) => <ObjectView key={i.id} item={i} scale={scale} selected={selectedIds.includes(i.id)} editing={editingId === i.id} interactive={interactive} showHandles={interactive && single?.id === i.id && !i.deleted} onTextChange={onTextChange} onFinish={finishEditing} onFormatKey={onFormatKey} />)}
+                          {draft && (draft.dashed ? <div className="ep-draft-box" style={{ left: px(draft.x), top: px(draft.y), width: px(draft.w), height: px(draft.h) }} /> : <ObjectView item={draft} scale={scale} selected={false} editing={false} interactive={false} showHandles={false} onTextChange={onTextChange} onFinish={finishEditing} />)}
+                          {selectedItems.length > 1 && selectionBounds && <div className="ep-group-box" style={{ left: px(selectionBounds.x), top: px(selectionBounds.y), width: px(selectionBounds.w), height: px(selectionBounds.h) }} />}
+                        </div>
+                        <div className="ep-guides">
+                          {['v', 'h'].map((axis) => (guides[axis] || []).map((pos, index) => (activeDraftIndex === `${axis}${index}` ? null : <i key={`${axis}${index}`} data-guide data-axis={axis} data-index={index} className={cx('ep-guide', `is-${axis}`, view.guidesLocked && 'is-locked')} style={axis === 'v' ? { left: px(pos) } : { top: px(pos) }} title={`${formatUnit(pos, view.unit, true)}. Drag to move, drag off the page to remove`} />)))}
+                          {draftGuide && <i className={cx('ep-guide is-draft', `is-${draftGuide.axis}`, (draftGuide.pos < 0 || draftGuide.pos > (draftGuide.axis === 'v' ? base.w : base.h)) && 'is-removing')} style={draftGuide.axis === 'v' ? { left: px(draftGuide.pos) } : { top: px(draftGuide.pos) }}><b>{formatUnit(draftGuide.pos, view.unit, true)}</b></i>}
+                          {snapHits.map((hit, index) => <i key={`s${index}`} className={cx('ep-snap', `is-${hit.axis}`, `k-${hit.kind}`)} style={hit.axis === 'v' ? { left: px(hit.pos), top: hit.from != null ? px(hit.from) : 0, bottom: hit.to != null ? `calc(100% - ${px(hit.to)}px)` : 0 } : { top: px(hit.pos), left: hit.from != null ? px(hit.from) : 0, right: hit.to != null ? `calc(100% - ${px(hit.to)}px)` : 0 }} />)}
+                        </div>
+                        {marquee && <div className="ep-marquee" style={{ left: px(marquee.x), top: px(marquee.y), width: px(marquee.w), height: px(marquee.h) }} />}
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
             </div>
-            <footer className="ed-document-footer"><span>Page {pageNumber} of {pageCount}</span><span>{annotations.length} annotation{annotations.length === 1 ? '' : 's'} on this page</span><span><ShieldCheck size={13} /> Local editing</span></footer>
+            <footer className="ep-status"><span>Page {pageNumber} of {pageCount}</span><Coords bus={cursorBus} unit={view.unit} /><span>{zoomPercent}%</span><span>{items.filter((i) => !isPristine(i)).length} change{items.filter((i) => !isPristine(i)).length === 1 ? '' : 's'} on this page</span><span className="ep-status-end"><ShieldCheck size={13} /> Local editing</span></footer>
           </main>
 
-          <aside className="ed-properties-panel" aria-label="Properties">
-            <div className="ed-properties-heading"><span>Properties</span>{selectedAnnotation && <button type="button" onClick={removeSelected} title="Delete selected item"><Trash2 size={15} /></button>}</div>
-            {selectedAnnotation ? (
-              <div className="ed-property-group">
-                <span className="ed-property-kicker">SELECTED ITEM</span>
-                <strong className="ed-selected-type">{selectedAnnotation.type.charAt(0).toUpperCase() + selectedAnnotation.type.slice(1)}</strong>
-                {['text', 'stamp', 'note'].includes(selectedAnnotation.type) && <label className="ed-field-label">Text<textarea rows={3} value={selectedAnnotation.text || ''} onChange={(event) => updateSelected({ text: event.target.value })} /></label>}
-                {selectedAnnotation.type !== 'signature' && selectedAnnotation.type !== 'image' && <label className="ed-field-label">Color<input type="color" value={selectedAnnotation.color || DEFAULT_COLOR} onChange={(event) => updateSelected({ color: event.target.value })} /></label>}
-                {['text', 'stamp', 'note'].includes(selectedAnnotation.type) && <label className="ed-field-label">Font size <span>{selectedAnnotation.size || 16} pt</span><input type="range" min="6" max="72" value={selectedAnnotation.size || 16} onChange={(event) => updateSelected({ size: Number(event.target.value) })} /></label>}
-                {['rect', 'ellipse', 'line', 'underline', 'strike', 'draw', 'stamp'].includes(selectedAnnotation.type) && <label className="ed-field-label">Line width <span>{selectedAnnotation.lineWidth || 2} pt</span><input type="range" min="0.5" max="10" step="0.5" value={selectedAnnotation.lineWidth || 2} onChange={(event) => updateSelected({ lineWidth: Number(event.target.value) })} /></label>}
-                {['highlight', 'whiteout'].includes(selectedAnnotation.type) && <label className="ed-field-label">Opacity <span>{Math.round((selectedAnnotation.opacity ?? 1) * 100)}%</span><input type="range" min="10" max="100" value={Math.round((selectedAnnotation.opacity ?? 1) * 100)} onChange={(event) => updateSelected({ opacity: Number(event.target.value) / 100 })} /></label>}
-                <button type="button" className="ed-danger-button" onClick={removeSelected}><Trash2 size={15} /> Delete item</button>
-              </div>
-            ) : (
-              <div className="ed-property-group">
-                <span className="ed-property-kicker">DEFAULT STYLE</span>
-                <label className="ed-field-label">Color<input type="color" value={activeTool === 'highlight' ? highlightColor : color} onChange={(event) => activeTool === 'highlight' ? setHighlightColor(event.target.value) : setColor(event.target.value)} /></label>
-                <label className="ed-field-label">Text size <span>{fontSize} pt</span><input type="range" min="6" max="72" value={fontSize} onChange={(event) => setFontSize(Number(event.target.value))} /></label>
-                <label className="ed-field-label">Line width <span>{lineWidth} pt</span><input type="range" min="0.5" max="10" step="0.5" value={lineWidth} onChange={(event) => setLineWidth(Number(event.target.value))} /></label>
-                <div className="ed-font-style-row"><button type="button" className={cx(fontStyle === 'bold' && 'is-active')} onClick={() => setFontStyle((s) => s === 'bold' ? 'regular' : 'bold')} title="Bold"><Bold size={15} /></button><button type="button" className={cx(fontStyle === 'italic' && 'is-active')} onClick={() => setFontStyle((s) => s === 'italic' ? 'regular' : 'italic')} title="Italic"><Italic size={15} /></button><button type="button" className={cx(fontStyle === 'regular' && 'is-active')} onClick={() => setFontStyle('regular')} title="Regular"><AlignLeft size={15} /></button></div>
-                {activeTool === 'stamp' && <label className="ed-field-label">Stamp text<select value={stampText} onChange={(event) => setStampText(event.target.value)}>{STAMPS.map((stamp) => <option key={stamp}>{stamp}</option>)}</select></label>}
-                <div className="ed-tip-card"><ShieldCheck size={16} /><p>Edits are added to a new PDF copy. The original PDF is not overwritten.</p></div>
-                <div className="ed-shortcut-list"><span><kbd>Ctrl</kbd> + <kbd>Z</kbd><small>Undo</small></span><span><kbd>Ctrl</kbd> + <kbd>Y</kbd><small>Redo</small></span><span><kbd>Del</kbd><small>Remove selection</small></span></div>
-              </div>
-            )}
-            <div className="ed-properties-bottom"><button type="button" className="ed-button ed-button-primary" onClick={savePdf} disabled={busy}><ArrowDownToLine size={15} /> Save edited PDF</button><small>{dirty ? 'You have unsaved edits.' : 'Changes are only in this session until saved.'}</small></div>
-          </aside>
+          <SidePanel tab={tab} setTab={setTab} unit={view.unit} setUnit={(unit) => setView({ unit })} selected={selectedItems} single={single}
+            onPatch={(patch) => single && patchItems([single.id], patch)} onDelete={deleteSelected} onDuplicate={duplicateSelected} onOrder={reorder} onReplaceImage={() => replaceInputRef.current?.click()}
+            defaults={defaults} setDefaults={(patch) => setDefaultsState((prev) => ({ ...prev, ...patch }))} stampText={stampText} setStampText={setStampText} tool={tool}
+            pageSize={base || { w: 612, h: 792 }} view={view} setView={setView} margins={margins} setMargins={setMargins} guides={pageGuides} onGuides={onGuides}
+            onApplyGuidesAll={() => { const all = {}; for (let n = 0; n < pageCount; n += 1) all[String(n)] = { v: [...(pageGuides.v || [])], h: [...(pageGuides.h || [])] }; setGuidesByPage(all); notify?.('Guides copied to every page.', 'success'); }}
+            onClearGuides={() => setGuides(pageKey, EMPTY_GUIDES)} onSave={savePdf} busy={busy} dirty={dirty} />
         </div>
       )}
 
-      {signatureOpen && <div className="ed-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSignatureOpen(false); }}>
-        <section className="ed-signature-dialog" role="dialog" aria-modal="true" aria-labelledby="ed-signature-title">
-          <header><div><span className="ed-dialog-icon"><Signature size={18} /></span><div><h2 id="ed-signature-title">Create signature</h2><p>Draw it with your mouse or type a signature style.</p></div></div><button type="button" onClick={() => setSignatureOpen(false)} aria-label="Close signature dialog"><X size={18} /></button></header>
-          <div className="ed-signature-tabs"><button type="button" className={cx(signatureMode === 'draw' && 'is-active')} onClick={() => { setSignatureMode('draw'); setHasSignatureInk(false); }}>Draw signature</button><button type="button" className={cx(signatureMode === 'type' && 'is-active')} onClick={() => { setSignatureMode('type'); setHasSignatureInk(false); }}>Type signature</button></div>
-          {signatureMode === 'type' && <label className="ed-field-label ed-signature-type-field">Signature text<input value={signatureText} onChange={(event) => setSignatureText(event.target.value)} maxLength={60} placeholder="Type your name" /></label>}
-          <div className="ed-signature-canvas-wrap"><canvas ref={signatureCanvasRef} width={680} height={220} className="ed-signature-canvas" onPointerDown={signaturePointerDown} onPointerMove={signaturePointerMove} /></div>
-          <div className="ed-signature-options"><label>Ink color<input type="color" value={signatureColor} onChange={(event) => setSignatureColor(event.target.value)} /></label><button type="button" className="ed-button ed-button-secondary" onClick={clearSignature}><RotateCcw size={14} /> Clear</button></div>
-          <footer><button type="button" className="ed-button ed-button-secondary" onClick={() => setSignatureOpen(false)}>Cancel</button><button type="button" className="ed-button ed-button-primary" onClick={saveSignature}><Check size={15} /> Use signature</button></footer>
-        </section>
-      </div>}
+      {signatureOpen && <SignatureDialog notify={notify} onClose={() => { setSignatureOpen(false); setToolState('select'); }} onUse={(signature) => { setPendingImage(signature); setSignatureOpen(false); setToolState('signature'); setNotice('Signature ready. Click the page to place it.'); }} />}
     </section>
   );
-}
-
-function Annotation({ annotation, dimensions, selected, editing, activeTool, onPointerDown, onDoubleClick, onTextChange, onFinishText, onResizePointerDown }) {
-  const scale = dimensions?.scale || 1;
-  const style = {
-    left: `${annotation.x}%`, top: `${annotation.y}%`, width: `${Math.max(annotation.w || 0.25, 0.25)}%`, height: `${Math.max(annotation.h || 0.25, 0.25)}%`,
-    color: annotation.color || DEFAULT_COLOR,
-    fontSize: `${Math.max(4, (Number(annotation.size) || 16) * scale)}px`,
-    opacity: annotation.type === 'highlight' ? (annotation.opacity ?? 0.34) : (annotation.type === 'whiteout' ? 1 : (annotation.opacity ?? 1)),
-    pointerEvents: activeTool === 'select' ? 'auto' : 'none',
-  };
-  const isText = ['text', 'stamp', 'note'].includes(annotation.type);
-  if (annotation.type === 'highlight') style.backgroundColor = annotation.color || '#f6d64a';
-  if (annotation.type === 'whiteout') style.backgroundColor = '#fff';
-  if (annotation.type === 'rect' || annotation.type === 'stamp') style.border = `${Math.max(0.8, (Number(annotation.lineWidth) || 2) * scale)}px solid ${annotation.color || DEFAULT_COLOR}`;
-  if (annotation.type === 'ellipse') { style.border = `${Math.max(0.8, (Number(annotation.lineWidth) || 2) * scale)}px solid ${annotation.color || DEFAULT_COLOR}`; style.borderRadius = '50%'; }
-  if (annotation.type === 'note') { style.backgroundColor = '#fff3b5'; style.border = '1px solid #e9ca62'; style.padding = '3px'; style.color = '#55461a'; }
-  if (annotation.fontStyle === 'bold' || annotation.type === 'stamp') style.fontWeight = 800;
-  if (annotation.fontStyle === 'italic') style.fontStyle = 'italic';
-  if (annotation.type === 'stamp') { style.textAlign = 'center'; style.display = 'grid'; style.placeItems = 'center'; style.fontWeight = 800; style.letterSpacing = '.08em'; }
-  if (annotation.type === 'signature' || annotation.type === 'image') { style.display = 'flex'; style.alignItems = 'stretch'; style.justifyContent = 'stretch'; }
-  return (
-    <div className={cx('ed-annotation', `ed-annotation-${annotation.type}`, selected && 'is-selected', editing && 'is-editing', activeTool === 'select' && 'can-select')} style={style} onPointerDown={onPointerDown} onDoubleClick={onDoubleClick} role={isText ? 'group' : undefined} aria-label={isText ? annotation.text || 'Text annotation' : `${annotation.type} annotation`}>
-      {annotation.type === 'signature' || annotation.type === 'image' ? <img draggable="false" src={annotation.data} alt={annotation.type === 'signature' ? 'Signature' : 'Placed image'} /> : null}
-      {annotation.type === 'draw' && <FreehandPath annotation={annotation} />}
-      {['line', 'underline', 'strike'].includes(annotation.type) && <svg className="ed-line-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><line x1={annotation.type === 'line' && annotation.startPoint ? clamp((annotation.startPoint.x - annotation.x) / Math.max(annotation.w, 0.2) * 100, 0, 100) : 0} y1={annotation.type === 'line' && annotation.startPoint ? clamp((annotation.startPoint.y - annotation.y) / Math.max(annotation.h, 0.2) * 100, 0, 100) : (annotation.type === 'strike' ? 50 : 100)} x2={annotation.type === 'line' && annotation.endPoint ? clamp((annotation.endPoint.x - annotation.x) / Math.max(annotation.w, 0.2) * 100, 0, 100) : 100} y2={annotation.type === 'line' && annotation.endPoint ? clamp((annotation.endPoint.y - annotation.y) / Math.max(annotation.h, 0.2) * 100, 0, 100) : (annotation.type === 'strike' ? 50 : 100)} stroke={annotation.color || DEFAULT_COLOR} strokeWidth={Math.max(1, (Number(annotation.lineWidth) || 2) * 1.5)} vectorEffect="non-scaling-stroke" /></svg>}
-      {isText && (editing ? <textarea autoFocus value={annotation.text || ''} onChange={(event) => onTextChange(event.target.value)} onBlur={onFinishText} onPointerDown={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.blur(); } }} placeholder="Type here…" aria-label="Edit annotation text" /> : <span>{annotation.text || (annotation.type === 'text' ? 'Double-click to edit' : annotation.type === 'stamp' ? 'APPROVED' : '')}</span>)}
-      {selected && activeTool === 'select' && <button type="button" className="ed-resize-handle" onPointerDown={onResizePointerDown} aria-label="Resize selected annotation" title="Drag to resize"><Move size={10} /></button>}
-    </div>
-  );
-}
-
-function FreehandPath({ annotation }) {
-  const points = annotation.points || [];
-  if (points.length < 2) return null;
-  const xs = points.map((point) => point.x);
-  const ys = points.map((point) => point.y);
-  const minX = Math.min(...xs); const maxX = Math.max(...xs);
-  const minY = Math.min(...ys); const maxY = Math.max(...ys);
-  const width = Math.max(0.25, maxX - minX); const height = Math.max(0.25, maxY - minY);
-  const polyline = points.map((point) => `${(point.x - minX) / width * 100},${(point.y - minY) / height * 100}`).join(' ');
-  return <svg className="ed-freehand-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polyline points={polyline} fill="none" stroke={annotation.color || DEFAULT_COLOR} strokeWidth={Math.max(1.2, (Number(annotation.lineWidth) || 2) * 1.5)} strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" /></svg>;
 }

@@ -1,7 +1,12 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('pdfStudio', Object.freeze({
-  openFiles: () => ipcRenderer.invoke('files:open'),
+  openFiles: (options) => ipcRenderer.invoke('files:open', options),
+  openEditor: (payload) => ipcRenderer.invoke('editor:open', payload),
+  getEditorInit: () => ipcRenderer.invoke('editor:init'),
+  closeEditor: () => ipcRenderer.invoke('editor:close'),
+  setEditorTitle: (title) => ipcRenderer.invoke('editor:set-title', title),
+  findFont: (query) => ipcRenderer.invoke('fonts:find', query),
   saveFile: (payload) => ipcRenderer.invoke('files:save', payload),
   saveBatch: (files) => ipcRenderer.invoke('files:save-batch', files),
   getAccessState: () => ipcRenderer.invoke('access:get-state'),

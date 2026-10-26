@@ -32,5 +32,7 @@ export async function loadPdfSource(bytes, password) {
     standardFontDataUrl: new URL('standard_fonts/', resourceBase).href,
     iccUrl: new URL('iccs/', resourceBase).href,
     useSystemFonts: true,
+    // Keeps the real font names so the editor can match and embed the original font.
+    fontExtraProperties: true,
   }).promise;
 }
