@@ -2,8 +2,9 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.jsx';
 import '@fontsource-variable/inter/wght.css';
-import './index.css';
-import './ui-refresh.css';
+import './styles/index.css';
+import './styles/ui-refresh.css';
+import './styles/tour.css';
 
 const rootElement = document.getElementById('root');
 createRoot(rootElement).render(

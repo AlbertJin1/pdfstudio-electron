@@ -6,8 +6,8 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
 const mammoth = require('mammoth');
-const { isPdfStudioMonitorApiUrl, monitorApiUrlCandidates } = require('./monitor-api.cjs');
-const accessPolicy = require('./access-policy.cjs');
+const { isPdfStudioMonitorApiUrl, monitorApiUrlCandidates } = require('./services/monitor-api.cjs');
+const accessPolicy = require('./services/access-policy.cjs');
 
 // All settings, caches and staged updates live in the per-user app-data folder (%AppData%\PDF Studio), so the
 // portable EXE never creates any folder next to itself. The folder name is set explicitly because the package name

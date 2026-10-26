@@ -1,0 +1,9 @@
+import { AlignLeft, Type } from 'lucide-react';
+import ActionButton from '../components/common/ActionButton.jsx';
+import Modal from '../components/common/Modal.jsx';
+
+export default function TextModal({ textValue, textColor, textSize, setModal, setTextValue, setTextColor, setTextSize, addTextOverlay }) {
+  return (
+    <Modal title="Add text overlay" eyebrow="ANNOTATE PAGE" onClose={() => setModal(null)} footer={<><ActionButton onClick={() => setModal(null)}>Cancel</ActionButton><ActionButton variant="primary" icon={Type} onClick={addTextOverlay}>Apply text</ActionButton></>}><div className="modal-intro"><div className="modal-hero-icon modal-hero-purple"><Type size={22}/></div><div><strong>Add a text overlay to the selected page</strong><p>Text is embedded in the PDF when exported. It is an overlay and does not modify existing PDF text objects.</p></div></div><label className="form-label">Text to add<input className="form-input" value={textValue} onChange={(event) => setTextValue(event.target.value)} placeholder="Type something..." autoFocus /></label><div className="form-two-col"><label className="form-label">Text size<select className="form-input" value={textSize} onChange={(event) => setTextSize(event.target.value)}><option value="12">12 pt — small</option><option value="18">18 pt — medium</option><option value="24">24 pt — large</option><option value="36">36 pt — heading</option></select></label><label className="form-label">Text color<div className="color-picker-row"><input type="color" value={textColor} onChange={(event) => setTextColor(event.target.value)}/><span>{textColor.toUpperCase()}</span></div></label></div><div className="modal-note"><AlignLeft size={15}/><span>New text appears near the upper-left area of the page. Select multiple pages to apply it to all of them.</span></div></Modal>
+  );
+}

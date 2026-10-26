@@ -1,0 +1,36 @@
+import { AnimatePresence } from 'motion/react';
+import AboutModal from './AboutModal.jsx';
+import ConfirmDeleteModal from './ConfirmDeleteModal.jsx';
+import CoverModal from './CoverModal.jsx';
+import ExportModal from './ExportModal.jsx';
+import ExportSelectedModal from './ExportSelectedModal.jsx';
+import GuideModal from './GuideModal.jsx';
+import ImagesModal from './ImagesModal.jsx';
+import PageMenuModal from './PageMenuModal.jsx';
+import SplitModal from './SplitModal.jsx';
+import TextModal from './TextModal.jsx';
+import UpdateReadyModal from './UpdateReadyModal.jsx';
+import WordModal from './WordModal.jsx';
+
+export default function ModalHost({ hideGuide, setHideGuide, pages, guideStep, setGuideStep, chooseFiles, readyUpdate, applyingUpdate, modal, textValue, textColor, textSize, coverColor, exportTitle, exportAuthor, exportPageNumbers, exportWatermark, splitMode, splitEvery, splitRanges, imageFormat, imageQuality, appVersion, selectedPages, setSelectedIds, setActiveId, setMode, setSettingsTab, setModal, setTextValue, setTextColor, setTextSize, setCoverColor, setExportTitle, setExportAuthor, setExportPageNumbers, setExportWatermark, setSplitMode, setSplitEvery, setSplitRanges, setImageFormat, setImageQuality, deleteSelected, requestDeleteSelected, rotateSelected, duplicateSelected, addTextOverlay, addCoverOverlay, doExportPdf, convertToWord, convertToImages, splitPdf, deferReadyUpdate, applyReadyUpdate }) {
+  return (
+    <>
+    <AnimatePresence mode="sync" initial={false}>
+    {modal?.type === 'confirm-delete' && <ConfirmDeleteModal key="confirm-delete" modal={modal} setModal={setModal} deleteSelected={deleteSelected} />}
+    {modal?.type === 'export' && <ExportModal key="export" pages={pages} exportTitle={exportTitle} exportAuthor={exportAuthor} exportPageNumbers={exportPageNumbers} exportWatermark={exportWatermark} setModal={setModal} setExportTitle={setExportTitle} setExportAuthor={setExportAuthor} setExportPageNumbers={setExportPageNumbers} setExportWatermark={setExportWatermark} doExportPdf={doExportPdf} />}
+    {modal?.type === 'export-selected' && <ExportSelectedModal key="export-selected" selectedPages={selectedPages} setModal={setModal} doExportPdf={doExportPdf} />}
+    {modal?.type === 'word' && <WordModal key="word" pages={pages} setModal={setModal} convertToWord={convertToWord} />}
+    {modal?.type === 'images' && <ImagesModal key="images" pages={pages} imageFormat={imageFormat} imageQuality={imageQuality} selectedPages={selectedPages} setModal={setModal} setImageFormat={setImageFormat} setImageQuality={setImageQuality} convertToImages={convertToImages} />}
+    {modal?.type === 'split' && <SplitModal key="split" pages={pages} splitMode={splitMode} splitEvery={splitEvery} splitRanges={splitRanges} setModal={setModal} setSplitMode={setSplitMode} setSplitEvery={setSplitEvery} setSplitRanges={setSplitRanges} splitPdf={splitPdf} />}
+    {modal?.type === 'text' && <TextModal key="text" textValue={textValue} textColor={textColor} textSize={textSize} setModal={setModal} setTextValue={setTextValue} setTextColor={setTextColor} setTextSize={setTextSize} addTextOverlay={addTextOverlay} />}
+    {modal?.type === 'cover' && <CoverModal key="cover" coverColor={coverColor} setModal={setModal} setCoverColor={setCoverColor} addCoverOverlay={addCoverOverlay} />}
+    {modal?.type === 'page-menu' && <PageMenuModal key="page-menu" modal={modal} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setModal={setModal} requestDeleteSelected={requestDeleteSelected} rotateSelected={rotateSelected} duplicateSelected={duplicateSelected} />}
+    {modal?.type === 'guide' && <GuideModal key="guide" guideStep={guideStep} setGuideStep={setGuideStep} setMode={setMode} setSettingsTab={setSettingsTab} setModal={setModal} chooseFiles={chooseFiles} hideGuide={hideGuide} setHideGuide={setHideGuide} />}
+    {modal?.type === 'about' && <AboutModal key="about" appVersion={appVersion} setMode={setMode} setSettingsTab={setSettingsTab} setModal={setModal} />}
+    </AnimatePresence>
+    <AnimatePresence>
+    {readyUpdate && <UpdateReadyModal key={`update-ready-${readyUpdate.version}`} readyUpdate={readyUpdate} applyingUpdate={applyingUpdate} deferReadyUpdate={deferReadyUpdate} applyReadyUpdate={applyReadyUpdate} />}
+    </AnimatePresence>
+    </>
+  );
+}

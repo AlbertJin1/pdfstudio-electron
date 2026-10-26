@@ -17,7 +17,7 @@
     "build:win": "npm run web:build && electron-builder --win portable --x64",
     "postbuild:win": "node scripts/release-tool.cjs finalize",
     "check": "npm run web:build",
-    "test:access": "node scripts/test-access-policy.cjs && node scripts/test-monitor-telemetry.cjs",
+    "test:access": "node tests/access-policy.test.cjs && node tests/monitor-telemetry.test.cjs",
     "prepare:pdfjs-assets": "node scripts/copy-pdfjs-assets.cjs"
   },
   "dependencies": {

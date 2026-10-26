@@ -51,6 +51,8 @@ If you ever need to launch Electron directly without rebuilding, use `npx electr
 
 ### PDF and conversion actions
 
+- Dedicated Edit PDF workspace with PDF.js page preview, page navigation, zoom, and tools for text, typed/drawn signatures, images, highlight, underline, strikeout, freehand ink, rectangles, ovals, lines, sticky notes, status stamps, and whiteout.
+- Select, move, resize, recolor, restyle, and delete placed items; Ctrl+Z / Ctrl+Y undo and redo editor changes. Save As writes a new edited PDF and leaves the original file unchanged.
 - Combine multiple PDFs and images into a single PDF.
 - Export the current page order, selected pages, rotations and added overlay objects.
 - Export page ranges as separate PDFs, split into single-page PDFs, or split into groups of N pages.
@@ -79,8 +81,8 @@ The renderer uses the `motion` package with imports from `motion/react`. This is
 
 This is a functional Electron rebuild and does not include every feature of the earlier C# app.
 
-- Text overlays are added on top of a page. The current UI does not rewrite existing PDF text objects in-place.
-- “Cover area” is a visual rectangle overlay, **not secure/certified redaction**. Do not rely on it to remove confidential data from the underlying PDF structure.
+- The Edit PDF tools add content overlays to the existing page. The current editor does not rewrite embedded PDF text objects in-place; to visually replace wording, use Whiteout and then add new text.
+- Whiteout is a visual cover, **not secure/certified redaction**. The covered text or images remain in the underlying PDF content and may still be extractable. Do not rely on it to remove confidential data.
 - PDF-to-Word exports selectable text into regular DOCX paragraphs with page breaks. It does not yet match the legacy app’s advanced table reconstruction, image placement, and OCR fallback; scanned PDFs without text layers may produce little or no text.
 - Word-to-PDF is based on DOCX-to-HTML conversion and Chromium printing. Documents with complex layouts, custom fonts, or special floating objects may not look exactly the same as in Word.
 - PDF export uses object streams, but does not promise a smaller file size; it does not yet expose a dedicated image-downsampling compression engine.
@@ -92,16 +94,35 @@ This is a functional Electron rebuild and does not include every feature of the 
 
 ```text
 PDFStudio-Windows/
-├── electron/
-│   ├── main.cjs          # Electron window, dialogs, local file operations, DOCX → PDF
-│   └── preload.cjs       # Small allow-listed IPC surface (context isolation enabled)
-├── src/
-│   ├── App.jsx           # Responsive workspace, page tools, conversions and dialogs
-│   ├── index.css         # Tailwind entry plus custom design system and responsive UI
-│   ├── main.jsx
-│   └── lib/pdfWorkspace.js # PDF.js rendering, page composition, export and DOCX creation
-├── build_publish.bat     # Builds the single portable publish\PdfStudio.exe
-├── release.bat           # build_publish.bat + upload to the Monitor with CHANGELOG notes
+├── electron/                   # Main process (Node / Electron)
+│   ├── main.cjs                # Window, dialogs, local file operations, DOCX → PDF, updater
+│   ├── preload.cjs             # Small allow-listed IPC surface (context isolation enabled)
+│   └── services/
+│       ├── access-policy.cjs   # Monitor enable / disable decision logic
+│       └── monitor-api.cjs     # Monitor endpoint validation helpers
+├── src/                        # Renderer (React)
+│   ├── main.jsx                # React entry point
+│   ├── App.jsx                 # Thin composition root: wires hooks to layout, views and modals
+│   ├── components/
+│   │   ├── common/             # ActionButton, IconButton, Modal, SectionLabel, SettingToggle, ShortcutKeys
+│   │   ├── layout/             # TitleBar, WindowControls, Sidebar, Topbar, LoadingOverlay, Toast
+│   │   ├── workspace/          # PageGridPanel, PageCard, AddPagesCard, InspectorPanel, PagePreview, ...
+│   │   └── access/             # AccessLockScreen
+│   ├── views/                  # HomeView, WorkspaceView, ConvertView, HistoryView
+│   │   └── settings/           # SettingsView, SettingsNav and one component per settings tab
+│   ├── modals/                 # ModalHost plus one component per dialog
+│   ├── hooks/                  # State + behaviour (useWorkspace, useExporters, usePreferences, ...)
+│   ├── services/pdf/           # PDF.js rendering, pdf-lib composition, DOCX and image export
+│   ├── constants/              # Motion presets, tool list, accent presets, default preferences
+│   ├── utils/                  # cx, formatting, ids, byte helpers, browser download fallback
+│   └── styles/                 # index.css (Tailwind + design system) and ui-refresh.css
+├── public/                     # Icons and the PDF.js worker / cmaps (copied by postinstall)
+├── scripts/                    # Build tooling (release-tool, copy-pdfjs-assets)
+├── tests/                      # Node tests for access policy and monitor telemetry
+├── docs/                       # BUILD-WINDOWS.md, VERIFICATION.md
+├── build_publish.bat           # Builds the single portable publish\PdfStudio.exe
+├── release.bat                 # build_publish.bat + upload to the Monitor with CHANGELOG notes
+├── run-dev.bat
 ├── package.json
 └── README.md
 ```
