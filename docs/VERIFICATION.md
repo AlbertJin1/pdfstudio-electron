@@ -49,13 +49,13 @@ Before publishing, manually verify six accent presets and all text-size options 
 ## PDF Studio Monitor updater wiring
 
 - The Electron update base URL is fixed to `https://pdfstudio.shares.zrok.io/pdfstudio-monitor/api`, matching the legacy C# `UsageTracker.DefaultBaseUrl` exactly.
-- The request shape matches `Services/UpdateService.cs`: `GET update.php?action=latest&version=<app version>` with `X-Api-Key` and `ngrok-skip-browser-warning: 1`.
-- Windows packages use the Monitor's backward-compatible `action=latest` / `action=download` URLs.
-- The download handler accepts only HTTPS URLs from the PDF Studio Monitor API and only the Monitor `download` action.
+- The Electron client now calls `client-gateway.php?resource=update&action=latest`; the server gateway translates that to the legacy Monitor `update.php` shape and injects `X-Api-Key` server-side only.
+- Windows packages retain the Monitor's backward-compatible `action=latest` / `action=download` behavior through the gateway.
+- The download handler accepts only HTTPS URLs from the configured PDF Studio Monitor host and only the gateway's `resource=update&action=download` operation.
 - Main-process requests verify any Monitor SHA-256 value before committing the downloaded file and delete partial files on failures/cancellation.
 - Static JavaScript syntax and archive integrity must be checked on the target build environment; a live remote check and full package build require reachable zrok Monitor service and npm dependencies.
 
-Targeted mocked updater integration tests passed for Windows (legacy `action=latest` / `action=download`). Tests verified the zrok host/path, release query parameters, `X-Api-Key` and tunnel-warning headers, successful SHA-256 validation, and rejection of non-Monitor download URLs. A live zrok request could not be verified in this environment because DNS resolution for `pdfstudio.shares.zrok.io` failed; recheck against the deployed Monitor before publishing.
+Regression tests now verify that Electron never loads or sends `X-Api-Key`, access policy and telemetry use the gateway, and the server gateway uses the server-side API key only for allowlisted requests. A live zrok request and production package were not verified in this environment; deploy/configure the gateway on the Monitor server before publishing this client build.
 
 
 ## Production chunk warning remediation (2026-10-25)
@@ -70,7 +70,7 @@ Targeted mocked updater integration tests passed for Windows (legacy `action=lat
 - The app checks shortly after its main window opens, retries transient failures after 15 minutes, and repeats periodic checks during long sessions. Verified packages are persisted in the user-data update staging directory; a staged update remains available if the connection is temporarily unavailable.
 - Once verified, the app shows an Update now / Update later dialog. Update later defers installation for the current app session and retains the staged package for the next launch.
 - Legacy-compatible session telemetry sends `open`, cumulative `heartbeat` (every 60 seconds) and `close` events with `app`, version, OS, stable random install ID, random session ID, hostname, local IP, start time and elapsed seconds. Failed events are queued locally and retried. Document content, PDF bytes and file names are not part of telemetry.
-- UI status text is intentionally generic: the hardcoded service endpoint and API key remain in the main process, and connection details are not rendered in Settings.
+- UI status text is intentionally generic: the service endpoint remains fixed in the main process, but the shared API key resides only on the Monitor server and is never bundled in Electron.
 - Static syntax and source-contract checks were run. A live zrok request and production build were not verified in this environment.
 
 ## Spinner stability and OS version reporting (2026-10-25)
@@ -89,9 +89,9 @@ Targeted mocked updater integration tests passed for Windows (legacy `action=lat
 - Regression checks: `node --check electron/main.cjs`, `node --check electron/services/monitor-api.cjs`, `node tests/monitor-telemetry.cjs`, and PHP syntax validation passed. The live Monitor endpoint could not be tested from this environment because its DNS host was not resolvable here; a fresh GUI package build also requires the project dependencies to be installed.
 
 
-## Device access control: Monitor enable / disable (3.0.2, 2026-10-25)
+## Device access control: Monitor enable / disable (3.0.3 security follow-up, 2026-10-26)
 
-- The Monitor administrator can now disable a single PC from the dashboard's Installs table, and the Electron app honours it exactly like the legacy Windows client: `electron/access-policy.cjs` polls `api/access.php` with the shared API key (about every 30 seconds, and again when the window regains focus), using the same canonical/`public/api` route fallback as telemetry.
+- The Monitor administrator can disable a single PC from the dashboard's Installs table. Electron polls the read-only `client-gateway.php?resource=access` operation about every 30 seconds and when the window regains focus; the gateway forwards to `access.php` using the server-only API key.
 - New and unknown devices are enabled by default and PDF Studio never waits for the network to start. A "disabled" answer locks the app immediately; an "enabled" answer unlocks a running copy on the next successful check. The Monitor's canonical install id is adopted so the policy follows the PC after a reinstall.
 - The last answer is cached in `monitor-access.json` (user-data folder) and loaded synchronously before the first window is created, so a disabled device stays locked after a restart or while the Monitor is unreachable. Network errors, 401/404/5xx and tunnel HTML pages never change the current decision; only a valid policy can lock or unlock.
 - Enforcement is in the main process: `files:open`, `files:save` and `files:save-batch` refuse while locked. The renderer shows a full-screen lock screen (administrator's reason, computer name, device id, who/when, offline note, "Check again", "Quit PDF Studio"), makes the application shell inert, and also guards the picker, drag-and-drop and shortcuts. Telemetry continues while locked so the administrator still sees the device.

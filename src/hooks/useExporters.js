@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 import { composePdf, loadPdfSource, pdfToDocx, renderPdfImages } from '../services/pdf/index.js';
+import { rasterizePdfForCompression } from '../services/pdf/rasterize.js';
 import { saveInBrowser } from '../utils/download.js';
 import { uid } from '../utils/id.js';
 
@@ -7,7 +8,14 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
   const [exportTitle, setExportTitle] = useState('');
   const [exportAuthor, setExportAuthor] = useState('PDF Studio');
   const [exportPageNumbers, setExportPageNumbers] = useState(false);
+  const [exportWatermarkMode, setExportWatermarkMode] = useState('none');
   const [exportWatermark, setExportWatermark] = useState('');
+  const [exportWatermarkOpacity, setExportWatermarkOpacity] = useState('32');
+  const [exportWatermarkAngle, setExportWatermarkAngle] = useState('35');
+  const [exportWatermarkColor, setExportWatermarkColor] = useState('#626b7c');
+  const [exportPaperSize, setExportPaperSize] = useState('original');
+  const [exportCompression, setExportCompression] = useState('lossless');
+  const [exportPassword, setExportPassword] = useState('');
   const [splitMode, setSplitMode] = useState('each');
   const [splitEvery, setSplitEvery] = useState('2');
   const [splitRanges, setSplitRanges] = useState('1-3, 4-6');
@@ -15,19 +23,61 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
   const doExportPdf = useCallback(async (onlySelected = false) => {
     const exportPages = onlySelected ? selectedPages : pages;
     if (!exportPages.length) return notify('There are no pages to export.', 'error');
+    if (exportPassword && exportPassword.length < 8) return notify('Use at least 8 characters for the PDF password.', 'error');
     setIsLoading(true); setLoadingLabel('Building your PDF');
     try {
-      const bytes = await composePdf(exportPages, sourcesRef.current, { title: exportTitle || 'PDF Studio document', author: exportAuthor || 'PDF Studio', pageNumbers: exportPageNumbers, watermark: exportWatermark });
+      const watermarkPresets = { draft: 'DRAFT', confidential: 'CONFIDENTIAL', internal: 'INTERNAL USE ONLY' };
+      const watermarkText = exportWatermarkMode === 'custom'
+        ? exportWatermark.trim()
+        : (watermarkPresets[exportWatermarkMode] || '');
+      let bytes = await composePdf(exportPages, sourcesRef.current, {
+        title: exportTitle || 'PDF Studio document',
+        author: exportAuthor || 'PDF Studio',
+        pageNumbers: exportPageNumbers,
+        watermark: watermarkText,
+        watermarkOpacity: Number(exportWatermarkOpacity) / 100,
+        watermarkAngle: Number(exportWatermarkAngle),
+        watermarkColor: exportWatermarkColor,
+        paperSize: exportPaperSize,
+      });
+
+      if (exportCompression === 'compact' || exportCompression === 'smallest') {
+        setLoadingLabel(exportCompression === 'compact' ? 'Creating compact page images' : 'Creating smallest-size page images');
+        bytes = await rasterizePdfForCompression(bytes, {
+          maxDimension: exportCompression === 'compact' ? 1800 : 1200,
+          quality: exportCompression === 'compact' ? 0.78 : 0.64,
+          title: exportTitle || 'PDF Studio document',
+          author: exportAuthor || 'PDF Studio',
+        });
+      }
+
       const name = `${(exportTitle || (documents.length === 1 ? documents[0].name.replace(/\.[^.]+$/, '') : 'PDF-Studio-document')).replace(/[\\/:*?"<>|]/g, '-').slice(0, 100)}.pdf`;
       let result;
-      if (window.pdfStudio?.saveFile) result = await window.pdfStudio.saveFile({ name, data: bytes, filters: [{ name: 'PDF document', extensions: ['pdf'] }] });
-      else result = await saveInBrowser(bytes, name, 'application/pdf');
+      if (window.pdfStudio?.saveFinalizedPdf) {
+        setLoadingLabel(exportPassword
+          ? 'Encrypting PDF with AES-256 in a background worker'
+          : exportCompression !== 'none'
+            ? 'Optimizing PDF in a background worker'
+            : 'Saving PDF');
+        result = await window.pdfStudio.saveFinalizedPdf({
+          name,
+          data: bytes,
+          filters: [{ name: 'PDF document', extensions: ['pdf'] }],
+          options: { compress: exportCompression !== 'none', password: exportPassword || '' },
+        });
+      } else {
+        if (exportPassword || exportCompression !== 'none') {
+          throw new Error('Password protection and QPDF optimization are available in the PDF Studio desktop app. Open the desktop app and export again.');
+        }
+        result = await saveInBrowser(bytes, name, 'application/pdf');
+      }
       if (result?.canceled) return;
       setModal(null);
+      setExportPassword('');
       notify(`PDF exported${result?.filePath ? ` to ${result.filePath}` : ''}.`);
     } catch (error) { console.error(error); notify(error?.message || 'PDF export failed.', 'error'); }
     finally { setIsLoading(false); setLoadingLabel('Preparing your workspace'); }
-  }, [documents, exportAuthor, exportPageNumbers, exportTitle, exportWatermark, notify, pages, selectedPages]);
+  }, [documents, exportAuthor, exportCompression, exportPageNumbers, exportPaperSize, exportPassword, exportTitle, exportWatermark, exportWatermarkAngle, exportWatermarkColor, exportWatermarkMode, exportWatermarkOpacity, notify, pages, selectedPages, setIsLoading, setLoadingLabel, setModal, sourcesRef]);
 
 
   const convertToWord = useCallback(async () => {
@@ -109,8 +159,22 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
     setExportAuthor,
     exportPageNumbers,
     setExportPageNumbers,
+    exportWatermarkMode,
+    setExportWatermarkMode,
     exportWatermark,
     setExportWatermark,
+    exportWatermarkOpacity,
+    setExportWatermarkOpacity,
+    exportWatermarkAngle,
+    setExportWatermarkAngle,
+    exportWatermarkColor,
+    setExportWatermarkColor,
+    exportPaperSize,
+    setExportPaperSize,
+    exportCompression,
+    setExportCompression,
+    exportPassword,
+    setExportPassword,
     splitMode,
     setSplitMode,
     splitEvery,

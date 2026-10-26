@@ -102,11 +102,11 @@ assert.ok(blankReason.reason.length > 0, 'a lock always has an explanation');
   const preload = fs.readFileSync(path.join(__dirname, '..', 'electron', 'preload.cjs'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'App.jsx'), 'utf8');
   for (const channel of ['files:open', 'files:save', 'files:save-batch']) {
-    assert.match(main, new RegExp(`ipcMain\\.handle\\('${channel}'[^\\n]*\\n\\s*assertAccessAllowed\\(\\);`), `${channel} is refused by the main process while locked`);
+    assert.match(main, new RegExp(`handle\\('${channel}'[^\\n]*\\n\\s*assertAccessAllowed\\(\\);`), `${channel} is refused by the main process while locked`);
   }
   assert.match(main, /loadAccessCacheSync\(\);\s*createWindow\(\);\s*startAccessControl\(\);/, 'cached lock is in force before the first window exists');
-  assert.match(main, /ipcMain\.handle\('access:get-state'/);
-  assert.match(main, /ipcMain\.handle\('access:recheck'/);
+  assert.match(main, /handle\('access:get-state'/);
+  assert.match(main, /handle\('access:recheck'/);
   assert.match(preload, /getAccessState/);
   assert.match(preload, /onAccessState/);
   assert.match(app, /accessLockedRef\.current\) return;/, 'renderer paths (picker, drop, shortcuts) are guarded');

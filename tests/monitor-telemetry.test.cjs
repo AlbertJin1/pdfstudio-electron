@@ -28,4 +28,14 @@ assert.match(main, /monitor-usage\.log/, 'client-side telemetry errors are logge
 assert.match(main, /void startUsageMonitoring\(\);/, 'telemetry starts during app readiness');
 assert.doesNotMatch(main, /if \(response\.status >= 400 && response\.status < 500\) return true;/, '4xx must not be silently treated as delivery');
 
+const accessPolicy = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'access-policy.cjs'), 'utf8');
+assert.doesNotMatch(accessPolicy, /apiKey|X-Api-Key/, 'access policy polling does not carry a shared key');
+assert.match(main, /monitorGatewayEndpoint\(\{ resource: 'telemetry' \}\)/, 'telemetry flows through the server-side gateway');
+assert.doesNotMatch(main, /monitorApiKey|loadMonitorApiKey|X-Api-Key|PDF_STUDIO_MONITOR_API_KEY/, 'Electron never loads or sends the shared Monitor API key');
+const gateway = fs.readFileSync(path.join(__dirname, '..', 'server-bridge', 'public', 'api', 'client-gateway.php'), 'utf8');
+assert.match(gateway, /X-Api-Key: /, 'only the server-side gateway attaches the shared key upstream');
+assert.match(gateway, /CURLOPT_FOLLOWLOCATION => false/, 'gateway does not forward the server key across redirects');
+assert.match(gateway, /Unknown Monitor gateway resource/, 'gateway is not an unrestricted proxy');
+assert.match(gateway, /update-download/); 
+
 console.log('Monitor telemetry route and client reporting regression checks passed.');

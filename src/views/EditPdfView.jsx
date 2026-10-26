@@ -18,6 +18,8 @@ import { formatUnit } from './edit/units.js';
 
 const CSS_PT = 96 / 72;
 const PREFS_KEY = 'pdfstudio.editor.view.v1';
+const PANEL_PREFS_KEY = 'pdfstudio.editor.panels.v1';
+const loadPanels = () => { try { return { tools: true, pages: true, properties: true, ...JSON.parse(localStorage.getItem(PANEL_PREFS_KEY) || '{}') }; } catch { return { tools: true, pages: true, properties: true }; } };
 const DEFAULT_VIEW = {
   unit: 'in', rulers: true, grid: false, gridSize: 18, showGuides: true, guidesLocked: false, showMargins: false, marginLink: false,
   snap: true, snapObjects: true, snapPage: true, snapGuides: true, snapMargins: true, snapGrid: true, lockAspect: true,
@@ -28,6 +30,28 @@ const cleanName = (value) => String(value || 'document.pdf').replace(/\.pdf$/i, 
 const LAYOUT_KEYS = ['text', 'size', 'font', 'fontName', 'fontRef', 'bold', 'italic', 'lineHeight', 'align', 'reflow', 'w'];
 const PRISTINE_KEYS = ['x', 'y', 'text', 'size', 'font', 'fontName', 'bold', 'italic', 'underline', 'strike', 'color', 'align', 'lineHeight'];
 const EMPTY_GUIDES = { v: [], h: [] };
+const PREVIEW_FONT_LOADS = new Set();
+async function loadPreviewFont(family, bold = false, italic = false, embeddedBytes = null) {
+  const name = String(family || '').trim();
+  if (!name || typeof FontFace === 'undefined' || (!embeddedBytes?.length && !window.pdfStudio?.findFont)) return;
+  const key = `${name.toLowerCase()}|${bold ? 1 : 0}|${italic ? 1 : 0}`;
+  if (PREVIEW_FONT_LOADS.has(key)) return;
+  PREVIEW_FONT_LOADS.add(key);
+  try {
+    let bytes = embeddedBytes;
+    const signature = bytes?.length >= 4 ? String.fromCharCode(...bytes.slice(0, 4)) : '';
+    if (!(signature === '\u0000\u0001\u0000\u0000' || signature === 'OTTO' || signature === 'true' || signature === 'typ1')) {
+      bytes = await window.pdfStudio.findFont({ family: name, bold, italic });
+    }
+    if (!bytes?.length) return;
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'font/ttf' }));
+    const face = new FontFace(name, `url("${url}")`, { weight: bold ? '700' : '400', style: italic ? 'italic' : 'normal' });
+    await face.load();
+    document.fonts.add(face);
+    URL.revokeObjectURL(url);
+  } catch { PREVIEW_FONT_LOADS.delete(key); /* fallback stack is still usable */ }
+}
+
 const EMPTY_LIST = [];
 const FONT_IDS = new Set(['helvetica', 'times', 'courier']);
 
@@ -118,7 +142,7 @@ function Coords({ bus, unit }) {
   return <span className="ep-coords">{p ? `${formatUnit(p.x, unit)}, ${formatUnit(p.y, unit)} ${unit}` : '–'}</span>;
 }
 
-export default function EditPdfView({ active = true, documents = [], sourcesRef, initialDocument, initialFile, standalone = false, notify }) {
+export default function EditPdfView({ active = true, documents = [], sourcesRef, initialDocument, initialFile, standalone = false, notify, onDirtyChange, onTabTitleChange, onCloseTab }) {
   const [pdfDoc, setPdfDoc] = useState(null);
   const [sourceBytes, setSourceBytes] = useState(null);
   const [fileName, setFileName] = useState('');
@@ -146,6 +170,9 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
   const [draft, setDraft] = useState(null);
   const [alignTo, setAlignTo] = useState('page');
   const [tab, setTab] = useState('format');
+  const [panels, setPanels] = useState(loadPanels);
+  useEffect(() => { try { localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify(panels)); } catch { /* storage may be disabled */ } }, [panels]);
+  const togglePanel = useCallback((key) => setPanels((old) => ({ ...old, [key]: !old[key] })), []);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [signatureOpen, setSignatureOpen] = useState(false);
@@ -326,7 +353,11 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
     await loadDocument({ name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) });
   }, [dirty, loadDocument]);
 
-  // Window title and close guard
+  // Publish editor state to the host tab so its title and close behaviour stay in sync.
+  useEffect(() => { onDirtyChange?.(Boolean(dirty)); }, [dirty, onDirtyChange]);
+  useEffect(() => { onTabTitleChange?.(pdfDoc ? `${dirty ? '● ' : ''}${fileName}` : 'Edit PDF'); }, [dirty, fileName, onTabTitleChange, pdfDoc]);
+
+  // Window title and close guard remain active for legacy standalone editor launches.
   useEffect(() => {
     const title = pdfDoc ? `${dirty ? '• ' : ''}${fileName} - Edit PDF - PDF Studio` : 'PDF Studio - Edit PDF';
     if (standalone) { document.title = title; window.pdfStudio?.setEditorTitle?.(title); }
@@ -450,6 +481,15 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
       item = { id: uid(), type: 'imageedit', blockId: block.id, src: { x: block.x, y: block.y, w: block.w, h: block.h }, cover: colors.bg, x: block.x, y: block.y, w: block.w, h: block.h, data: null, orig: { x: block.x, y: block.y, w: block.w, h: block.h } };
     } else {
       const f = block.font;
+      if (f?.name) {
+        // Prefer the source PDF's own font program when it is embedded and usable; otherwise the
+        // main process finds an installed file or downloads an allow-listed open-font substitute.
+        void pdfDoc?.getPage(pageNumber).then((page) => {
+          let embedded = null;
+          try { if (f.ref && page.commonObjs.has(f.ref)) embedded = page.commonObjs.get(f.ref)?.data || null; } catch { /* use managed font lookup */ }
+          return loadPreviewFont(f.name, !!f.bold, !!f.italic, embedded);
+        }).catch(() => loadPreviewFont(f.name, !!f.bold, !!f.italic));
+      }
       const underline = detectUnderline(canvasRef.current, kRef.current, block, colors.bg, colors.fg);
       item = {
         id: uid(), type: 'textedit', blockId: block.id, src: { x: block.x, y: block.y, w: block.w, h: block.h }, cover: colors.bg,
@@ -459,7 +499,9 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
       };
       const layout = layoutItem(item);
       item.y = block.firstBaseline - baselineOf(layout, 0, 0);
-      item.h = layout.autoH;
+      // Keep the initial selection on the PDF's measured glyph bounds. Once text changes,
+      // the regular auto-fit path expands the box to fit the replacement content.
+      item.h = Math.max(1, block.h);
       item.orig = { x: item.x, y: item.y, text: item.text, size: item.size, font: item.font, fontName: item.fontName, bold: item.bold, italic: item.italic, underline, strike: false, color: item.color, align: item.align, lineHeight: item.lineHeight };
     }
     applyAnn(withList([...pageList(), item]), false);
@@ -815,7 +857,7 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
       else if (mod && key === '2') { event.preventDefault(); setZoom({ mode: 'width', value: CSS_PT }); }
       else if (mod && (key === '=' || key === '+' || event.code === 'NumpadAdd')) { event.preventDefault(); zoomStep(1); }
       else if (mod && (key === '-' || key === '_' || event.code === 'NumpadSubtract')) { event.preventDefault(); zoomStep(-1); }
-      else if (mod && key === 'w' && standalone) { event.preventDefault(); window.pdfStudio?.closeEditor?.(); }
+      else if (mod && key === 'w' && (standalone || onCloseTab)) { event.preventDefault(); if (standalone) window.pdfStudio?.closeEditor?.(); else onCloseTab?.(); }
       else if (mod) return;
       else if (key === ' ') { event.preventDefault(); if (!spaceRef.current) { spaceRef.current = true; setSpaceHeld(true); } }
       else if (key === 'delete' || key === 'backspace') { if (selectedIds.length && tool === 'select') { event.preventDefault(); deleteSelected(); } }
@@ -840,7 +882,7 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
     const onKeyUp = (event) => { if (event.key === ' ' && spaceRef.current) { spaceRef.current = false; setSpaceHeld(false); } };
     window.addEventListener('keydown', onKeyDown); window.addEventListener('keyup', onKeyUp);
     return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp); };
-  }, [active, commitAnn, deleteSelected, duplicateSelected, editingId, goToPage, nudge, pageCount, pageList, pageNumber, pdfDoc, redo, selectedIds, selectedItems, setSelection, setTool, single, standalone, startEditing, tool, undo, withList, zoomStep]);
+  }, [active, commitAnn, deleteSelected, duplicateSelected, editingId, goToPage, nudge, onCloseTab, pageCount, pageList, pageNumber, pdfDoc, redo, selectedIds, selectedItems, setSelection, setTool, single, standalone, startEditing, tool, undo, withList, zoomStep]);
 
   // ---- save ----------------------------------------------------------------------------------------
   const savePdf = useCallback(async () => {
@@ -919,9 +961,9 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
           <div className="ep-empty-points"><span><ShieldCheck size={15} /> Processed on this device</span><span><Save size={15} /> Saved as a new PDF</span></div>
         </div>
       ) : (
-        <div className="ep-shell">
-          <ToolRail tool={tool} onTool={setTool} />
-          <aside className="ep-pages" aria-label="Pages">
+        <div className={cx('ep-shell', !panels.tools && 'is-tools-collapsed', !panels.pages && 'is-pages-collapsed', !panels.properties && 'is-properties-collapsed', panels.pages && 'is-pages-open')}>
+          <ToolRail tool={tool} onTool={setTool} collapsed={!panels.tools} />
+          <aside className="ep-pages" aria-label="Pages" aria-hidden={!panels.pages}>
             <div className="ep-pages-title"><span>Pages</span><b>{pageCount}</b></div>
             <div className="ep-pages-list">
               {Array.from({ length: pageCount }, (_, i) => i + 1).map((n) => (
@@ -935,7 +977,7 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
           <main className="ep-main">
             <DocBar fileName={fileName} dirty={dirty} pageNumber={pageNumber} pageCount={pageCount} onPage={goToPage} zoomPercent={zoomPercent} zoomMode={zoom.mode} onZoomStep={zoomStep}
               onZoomPreset={(p) => setZoom({ mode: 'custom', value: p / 100 * CSS_PT })} onFit={(mode) => setZoom({ mode, value: CSS_PT })}
-              canUndo={undoRef.current.length > 0 && historyVersion >= 0} canRedo={redoRef.current.length > 0} onUndo={undo} onRedo={redo} view={view} setView={setView} />
+              canUndo={undoRef.current.length > 0 && historyVersion >= 0} canRedo={redoRef.current.length > 0} onUndo={undo} onRedo={redo} view={view} setView={setView} panels={panels} onTogglePanel={togglePanel} />
             <FormatBar original={styleSource?.origFont?.fontName || (styleSource?.origFont ? 'PDF font' : '')} style={formatStyle} onStyle={onFormat} hasTextTarget={textTargets.length > 0} selectionCount={selectedItems.length} alignTo={alignTo} setAlignTo={setAlignTo}
               onAlign={doAlign} onDistribute={doDistribute} canAlign={selectedItems.length > 0} canDistribute={selectedItems.length >= 3} />
             <div className={cx('ep-canvas-area', view.rulers && 'has-rulers')} style={{ '--ep-ruler': `${RULER_SIZE}px` }}>

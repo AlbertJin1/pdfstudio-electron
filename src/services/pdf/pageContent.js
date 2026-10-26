@@ -10,9 +10,9 @@ const mul = (m, n) => [
 ];
 
 export function detectFont(realName = '', generic = '', fontObj = null) {
-  const all = `${realName} ${generic} ${fontObj?.fallbackName || ''}`;
-  const bold = /bold|black|heavy|semibold|demi/i.test(realName) || !!fontObj?.bold || !!fontObj?.black;
-  const italic = /italic|oblique|-it\b|ital\b/i.test(realName) || !!fontObj?.italic;
+  const all = `${realName} ${generic} ${fontObj?.fallbackName || ''} ${fontObj?.family || ''}`;
+  const bold = /bold|black|heavy|semibold|demi/i.test(`${realName} ${generic}`) || !!fontObj?.bold || !!fontObj?.black;
+  const italic = /italic|oblique|-it\b|ital\b/i.test(`${realName} ${generic}`) || !!fontObj?.italic;
   let family = 'helvetica';
   if (/courier|mono|consolas|typewriter|menlo/i.test(all)) family = 'courier';
   else if (/times|garamond|georgia|palatino|minion|cambria|bookman|serif/i.test(all) && !/sans/i.test(all)) family = 'times';
@@ -39,6 +39,9 @@ function collectLines(content, page, viewport) {
       font: { ...detectFont(real, style.fontFamily, fontObj), ref: raw.fontName },
     });
   }
+  // PDF content-stream order is not guaranteed to be visual order (tables and multi-column forms
+  // often interleave cells). Reassemble upright text using page coordinates before grouping.
+  items.sort((a, b) => (Math.abs(a.base - b.base) < Math.max(a.size, b.size) * 0.25 ? a.x - b.x : a.base - b.base));
   const lines = [];
   let line = null;
   for (const it of items) {
@@ -47,7 +50,7 @@ function collectLines(content, page, viewport) {
     const sameBase = prev && Math.abs(it.base - prev.base) < Math.max(prev.size, it.size) * 0.3;
     const sameSize = prev && Math.abs(it.size - prev.size) < Math.max(prev.size, it.size) * 0.25;
     const sameFont = prev && prev.font.family === it.font.family && prev.font.bold === it.font.bold && prev.font.italic === it.font.italic && prev.font.name === it.font.name && prev.font.ref === it.font.ref;
-    if (prev && sameBase && sameSize && sameFont && gap > -it.size * 0.4 && gap < it.size * 1.3) {
+    if (prev && sameBase && sameSize && sameFont && gap > -it.size * 0.4 && gap < it.size * 0.82) {
       const needsSpace = gap > it.size * 0.18 && !/\s$/.test(prev.str) && !/^\s/.test(it.str);
       line.text += (needsSpace ? ' ' : '') + it.str;
       line.items.push(it);

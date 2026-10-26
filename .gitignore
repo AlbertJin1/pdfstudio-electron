@@ -4,3 +4,6 @@ publish/
 *.log
 .env*
 *.zip
+
+monitor-key.txt
+monitor-key.bin

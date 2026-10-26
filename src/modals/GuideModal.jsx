@@ -31,7 +31,7 @@ const STEPS = [
     body: 'Edit PDF opens in its own window. Click existing text or images to edit them in the same font, size and colour, add new text and images, sign, highlight and draw, and line everything up with rulers, guides, margins and snapping.',
     tips: ['Ctrl+Z / Ctrl+Y undo and redo, Ctrl+S saves a new PDF, Ctrl+plus / minus / 0 zoom, and Space-drag pans the page.', 'Whiteout only covers what you see. It is not secure redaction, and covered original text remains in the file.'] },
   { id: 'export', icon: Download, title: 'Export when you are ready', mode: 'workspace', targets: ['.workspace-heading-actions'],
-    body: 'Add files brings in more sources. Export PDF (Ctrl+S) saves the pages in their current order, with optional title, author, page numbers and watermark.',
+    body: 'Add files brings in more sources. Merge & export PDF (Ctrl+S) saves the pages in their current order, with paper size, diagonal watermark, optional AES-256 password protection, and compression options.',
     tips: ['Right-click style page menus can export just the selected pages.'] },
   { id: 'convert', icon: WandSparkles, title: 'Convert and split', mode: 'convert', targets: ['.conversion-grid'],
     body: 'Turn a PDF into Word, export pages as PNG or JPG, or split a document by individual pages, fixed groups, or custom ranges.',

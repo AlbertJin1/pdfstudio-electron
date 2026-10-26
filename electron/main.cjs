@@ -1,13 +1,14 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell, session, safeStorage, net } = require('electron');
+const { fileURLToPath } = require('node:url');
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const os = require('node:os');
-const { spawn } = require('node:child_process');
-const mammoth = require('mammoth');
+const { Worker } = require('node:worker_threads');
 const { isPdfStudioMonitorApiUrl, monitorApiUrlCandidates } = require('./services/monitor-api.cjs');
 const accessPolicy = require('./services/access-policy.cjs');
+const reviewQueuePolicy = require('./review-queue-policy.cjs');
 
 // All settings, caches and staged updates live in the per-user app-data folder (%AppData%\PDF Studio), so the
 // portable EXE never creates any folder next to itself. The folder name is set explicitly because the package name
@@ -27,6 +28,20 @@ function configureUserData() {
 }
 configureUserData();
 
+// One running copy only: a second launch just brings the existing window forward.
+const gotInstanceLock = app.requestSingleInstanceLock();
+if (!gotInstanceLock) app.quit();
+app.on('second-instance', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
+
+// Windows: Chromium's native occlusion tracking delays the first paint on some GPUs/drivers and is not needed here.
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+try { require('node:module').enableCompileCache?.(path.join(app.getPath('userData'), 'js-cache')); } catch { /* optional speed-up */ }
+
 // Use the same hand-authored app icon for the Windows taskbar, auxiliary windows,
 // and packaged application. extraResources copies these files to resources/icons.
 function getAppIconPath() {
@@ -38,14 +53,64 @@ function getAppIconPath() {
 
 app.setAppUserModelId('com.regualos.pdfstudio');
 
+// Log stray async failures instead of surfacing Node's UnhandledPromiseRejection warning.
+process.on('unhandledRejection', (reason) => console.error('[pdf-studio] Unhandled rejection:', reason));
+
+// ───────────────────────── Security helpers ─────────────────────────
+// The dev server URL is honoured only in unpackaged runs, so an environment variable can never point a shipped build at remote content.
+function getDevUrl() { return app.isPackaged ? '' : (process.env.VITE_DEV_SERVER_URL || ''); }
+function isTrustedUrl(raw) {
+  try {
+    const url = new URL(String(raw));
+    const dev = getDevUrl();
+    if (dev) return url.origin === new URL(dev).origin;
+    if (url.protocol !== 'file:') return false;
+    const target = path.normalize(fileURLToPath(url)).toLowerCase();
+    return target === path.normalize(path.join(app.getAppPath(), 'dist', 'index.html')).toLowerCase();
+  } catch { return false; }
+}
+function openExternalSafe(value) {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== 'https:' || url.username || url.password) return false;
+    void shell.openExternal(url.toString());
+    return true;
+  } catch { return false; }
+}
+/** Every IPC call must come from our own bundled page; anything else (injected frame, navigated page) is refused. */
+function handle(channel, listener) {
+  ipcMain.handle(channel, (event, ...args) => {
+    const frameUrl = event.senderFrame?.url || '';
+    if (!isTrustedUrl(frameUrl)) throw new Error('Blocked IPC call from an untrusted page.');
+    return listener(event, ...args);
+  });
+}
+app.on('web-contents-created', (_event, contents) => {
+  const guard = (event, url) => { if (!isTrustedUrl(url)) event.preventDefault(); };
+  contents.on('will-navigate', guard);
+  contents.on('will-redirect', guard);
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+  contents.setWindowOpenHandler(({ url }) => { openExternalSafe(url); return { action: 'deny' }; });
+});
+
 let mainWindow;
 let activeUpdateDownload = null;
 
 // Keep PDF Studio on the same release channel as the legacy C# client.
-// This is the monitor base URL (not the public downloads page); the API appends update.php.
+// This is the Monitor API root (not the public downloads page); remote client requests use client-gateway.php.
 const PDF_STUDIO_MONITOR_BASE_URL = 'https://pdfstudio.shares.zrok.io/pdfstudio-monitor/api';
-// Must match `api_key` in pdfstudio-monitor/config/config.php and the legacy C# UsageTracker.DefaultApiKey.
-const PDF_STUDIO_MONITOR_API_KEY = '2YN0sJIeJZeGL33wip2xmN2YEvs4TzqV';
+// The shared Monitor API key belongs exclusively on the Monitor server. Electron never stores,
+// loads, decrypts, or sends it. All remote operations go through the allowlisted server-side gateway.
+// Deploy the matching public/api/client-gateway.php from Monitor 2.4.18 or this server-bridge copy.
+// No client secret is needed; configure MONITOR_API_KEY only in the Monitor server .env/private config.
+const MONITOR_GATEWAY_SCRIPT = 'client-gateway.php';
+function monitorGatewayEndpoint(params = {}) {
+  const endpoint = new URL(`${PDF_STUDIO_MONITOR_BASE_URL}/${MONITOR_GATEWAY_SCRIPT}`);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') endpoint.searchParams.set(key, String(value));
+  }
+  return endpoint;
+}
 
 // Update state is owned by the main process so downloads continue even if the Settings view is closed.
 let updaterState = { status: 'idle', message: 'Automatic updates are enabled.' };
@@ -76,6 +141,77 @@ function toBuffer(data) {
   if (data && typeof data === 'object') return Buffer.from(Object.values(data));
   throw new TypeError('No valid file data was supplied.');
 }
+const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024;
+const toSafeBuffer = (data) => { const b = toBuffer(data); if (b.length > MAX_FILE_BYTES) throw new RangeError('File is too large.'); return b; };
+
+// QPDF/WASM runs in a Node worker thread, never in the Vite browser bundle or Electron UI thread.
+// A persistent worker caches the compiled WASM module between exports and keeps large-file work responsive.
+let pdfToolkitWorker = null;
+let pdfToolkitRequestId = 0;
+const pdfToolkitRequests = new Map();
+
+function rejectPdfToolkitRequestsForWorker(child, error) {
+  for (const [id, request] of pdfToolkitRequests) {
+    if (request.worker !== child) continue;
+    pdfToolkitRequests.delete(id);
+    request.reject(error);
+  }
+}
+
+function getPdfToolkitWorker() {
+  if (pdfToolkitWorker) return pdfToolkitWorker;
+  const child = new Worker(path.join(__dirname, 'pdf-toolkit-worker.mjs'), { name: 'pdfstudio-qpdf-optimizer' });
+  pdfToolkitWorker = child;
+  child.on('message', (message) => {
+    const request = pdfToolkitRequests.get(message?.id);
+    if (!request || request.worker !== child) return;
+    pdfToolkitRequests.delete(message.id);
+    if (message.error) {
+      const error = new Error(String(message.error.message || 'PDF optimization failed.'));
+      error.name = String(message.error.name || 'Error');
+      request.reject(error);
+      return;
+    }
+    if (!(message.bytes instanceof ArrayBuffer)) {
+      request.reject(new Error('The PDF optimization worker returned an invalid result.'));
+      return;
+    }
+    request.resolve(new Uint8Array(message.bytes));
+  });
+  child.on('error', (error) => {
+    if (pdfToolkitWorker === child) pdfToolkitWorker = null;
+    rejectPdfToolkitRequestsForWorker(child, new Error(`PDF optimization worker failed: ${error.message || 'unknown worker error'}`));
+  });
+  child.on('exit', (code) => {
+    if (pdfToolkitWorker === child) pdfToolkitWorker = null;
+    rejectPdfToolkitRequestsForWorker(child, new Error(code === 0 ? 'PDF optimization worker stopped before completing the export.' : `PDF optimization worker exited unexpectedly (code ${code}).`));
+  });
+  return child;
+}
+
+function finalizePdfInWorker(data, options = {}) {
+  const source = toSafeBuffer(data);
+  const bytes = Uint8Array.from(source); // exact-sized transferable buffer; do not transfer a pooled Buffer's backing store
+  const id = ++pdfToolkitRequestId;
+  return new Promise((resolve, reject) => {
+    try {
+      const child = getPdfToolkitWorker();
+      pdfToolkitRequests.set(id, { resolve, reject, worker: child });
+      child.postMessage({ id, bytes: bytes.buffer, options }, [bytes.buffer]);
+    } catch (error) {
+      pdfToolkitRequests.delete(id);
+      reject(error);
+    }
+  });
+}
+
+app.once('before-quit', () => {
+  const child = pdfToolkitWorker;
+  pdfToolkitWorker = null;
+  if (child) void child.terminate();
+  for (const request of pdfToolkitRequests.values()) request.reject(new Error('PDF Studio is closing.'));
+  pdfToolkitRequests.clear();
+});
 
 function safeName(value, fallback = 'document') {
   const name = path.basename(String(value || fallback)).replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').trim();
@@ -93,7 +229,6 @@ function assertPublicHttps(value, base) {
 
 async function fetchHttpsResponse(value, { signal, accept = 'application/json', maxRedirects = 5, allowApiPathFallback = true } = {}) {
   let current = assertPublicHttps(value);
-  const initialOrigin = current.origin;
   const requestSignal = signal || AbortSignal.timeout(20_000);
   for (let redirects = 0; redirects <= maxRedirects; redirects += 1) {
     let response;
@@ -103,10 +238,8 @@ async function fetchHttpsResponse(value, { signal, accept = 'application/json', 
         'ngrok-skip-browser-warning': '1',
         Accept: accept,
       };
-      // Mirror the C# client's X-Api-Key and tunnel-warning header. Never forward the key off-host.
-      if (current.origin === initialOrigin && isPdfStudioMonitorApiUrl(current)) {
-        headers['X-Api-Key'] = PDF_STUDIO_MONITOR_API_KEY;
-      }
+      // No shared API key is shipped to or sent by the desktop client. The server gateway
+      // injects its server-only key only when forwarding allowlisted requests internally.
       response = await fetch(current, {
         method: 'GET',
         redirect: 'manual',
@@ -136,10 +269,18 @@ async function fetchHttpsResponse(value, { signal, accept = 'application/json', 
       if (alternate && routeFallbackStatuses.includes(response.status)) {
         return fetchHttpsResponse(alternate.toString(), { signal, accept, maxRedirects, allowApiPathFallback: false });
       }
-      if (response.status === 401) throw new Error('The PDF Studio Monitor rejected its API key. Check the key in the Electron app against config/config.php or config/config.local.php on the Monitor server.');
-      if (response.status === 404) throw new Error('The PDF Studio Monitor API endpoint was not found at either supported deployment path. Check the Monitor URL and that public/api/update.php is deployed.');
-      if (response.status === 403 || response.status === 429) throw new Error('The PDF Studio Monitor temporarily refused the request. Try again later.');
-      throw new Error(`PDF Studio Monitor returned HTTP ${response.status}.`);
+      let serverDetail = '';
+      if (accept.includes('application/json')) {
+        try {
+          const rawError = (await response.clone().text()).slice(0, 1200);
+          const errorBody = JSON.parse(rawError);
+          if (typeof errorBody?.error === 'string') serverDetail = errorBody.error.replace(/[\r\n\t]+/g, ' ').slice(0, 300);
+        } catch { /* a non-JSON Apache/tunnel response is summarized by status below */ }
+      }
+      if (response.status === 401) throw new Error(`The PDF Studio Monitor gateway refused the request.${serverDetail ? ` ${serverDetail}` : ' Check the server-side gateway configuration and Monitor API credentials.'}`);
+      if (response.status === 404) throw new Error(`The PDF Studio Monitor client gateway was not found. Deploy client-gateway.php to the Monitor API directory and verify the server URL.${serverDetail ? ` ${serverDetail}` : ''}`);
+      if (response.status === 403 || response.status === 429) throw new Error(`The PDF Studio Monitor temporarily refused the request.${serverDetail ? ` ${serverDetail}` : ' Try again later.'}`);
+      throw new Error(`PDF Studio Monitor returned HTTP ${response.status}${serverDetail ? `: ${serverDetail}` : '.'}`);
     }
     // A tunnel splash or web-server fallback can return HTML with HTTP 200. Do not
     // mistake it for valid API metadata; try the alternate deployment path once.
@@ -149,7 +290,7 @@ async function fetchHttpsResponse(value, { signal, accept = 'application/json', 
       if (alternate) {
         return fetchHttpsResponse(alternate.toString(), { signal, accept, maxRedirects, allowApiPathFallback: false });
       }
-      throw new Error('The PDF Studio Monitor returned a non-JSON response. Check the API path and tunnel warning page.');
+      throw new Error('The PDF Studio Monitor gateway returned a non-JSON response. Check the gateway deployment and tunnel route.');
     }
     return response;
   }
@@ -192,22 +333,15 @@ function monitorTarget() {
   return { platform: 'windows', architecture };
 }
 
-function monitorEndpoint(params = {}) {
-  const endpoint = new URL(`${PDF_STUDIO_MONITOR_BASE_URL}/update.php`);
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null && value !== '') endpoint.searchParams.set(key, String(value));
-  }
-  return endpoint;
-}
-
 function assertMonitorDownloadUrl(value) {
   const url = assertPublicHttps(value);
   const allowedPath = [
-    '/pdfstudio-monitor/api/update.php',
-    '/pdfstudio-monitor/public/api/update.php',
+    '/pdfstudio-monitor/api/client-gateway.php',
+    '/pdfstudio-monitor/public/api/client-gateway.php',
   ].includes(url.pathname.toLowerCase());
   if (!isPdfStudioMonitorApiUrl(url)
       || !allowedPath
+      || url.searchParams.get('resource') !== 'update'
       || !['download'].includes(url.searchParams.get('action') || '')) {
     throw new Error('The update package URL is not a valid PDF Studio Monitor download endpoint.');
   }
@@ -227,7 +361,7 @@ async function readMonitorReleaseMetadata() {
     local_ip: getUsageLocalIp(),
   };
   // Windows uses the original C#-compatible release channel (action=latest / action=download).
-  const endpoint = monitorEndpoint(query);
+  const endpoint = monitorGatewayEndpoint({ resource: 'update', ...query });
   const response = await fetchHttpsResponse(endpoint.toString(), { accept: 'application/json' });
   const declaredLength = Number(response.headers.get('content-length') || 0);
   if (declaredLength > 8 * 1024 * 1024) throw new Error('The PDF Studio Monitor release metadata is unexpectedly large.');
@@ -274,7 +408,7 @@ async function readMonitorReleaseMetadata() {
   let download = null;
   if (updateAvailable) {
     // Match legacy C# UpdateService.Endpoint("action=download&version=...").
-    const downloadUrl = monitorEndpoint({ action: 'download', app: 'pdfstudio', version: latestVersion }).toString();
+    const downloadUrl = monitorGatewayEndpoint({ resource: 'update', action: 'download', app: 'pdfstudio', version: latestVersion }).toString();
     const safeDownloadUrl = assertMonitorDownloadUrl(downloadUrl).toString();
     const declaredHash = String(latest.sha256 || '').trim().replace(/^sha256[:=]/i, '').toLowerCase();
     if (!declaredHash) {
@@ -400,6 +534,271 @@ async function downloadReleasePackage(payload, sender) {
 }
 
 // ───────────────────────── Monitor session tracking (compatible with legacy C# client) ─────────────────────────
+
+function getReviewStatePath() {
+  return path.join(app.getPath('userData'), 'review-state.json');
+}
+const DEFAULT_REVIEW_STATE = Object.freeze({
+  totalUsageSeconds: 0,
+  submittedAt: 0,
+  neverAskAgain: false,
+  snoozedUntil: 0,
+  lastPromptAt: 0,
+  promptCount: 0,
+  reviewStatus: 'none',
+  pendingReviewId: '',
+  lastReviewId: '',
+});
+let cachedReviewState = null;
+let reviewStateLoadPromise = null;
+let reviewUsageAccountingPromise = null;
+let reviewOutboxReadBlocked = false;
+let reviewStateReadBlocked = false;
+let reviewOutboxFlushing = false;
+let reviewOutboxTimer = null;
+async function readReviewStateSnapshot() {
+  const file = getReviewStatePath();
+  let foundAny = false;
+  let lastError = null;
+  // A complete .tmp file is the newest intended state when a process was interrupted during replacement.
+  for (const candidate of [`${file}.tmp`, file, `${file}.bak`]) {
+    let raw;
+    try { raw = await fs.readFile(candidate, 'utf8'); }
+    catch (error) { if (error?.code === 'ENOENT') continue; foundAny = true; lastError = error; continue; }
+    foundAny = true;
+    try {
+      const value = JSON.parse(raw);
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Review state is not a JSON object.');
+      if (candidate !== file) {
+        await fs.copyFile(candidate, file);
+        await fs.rm(`${file}.tmp`, { force: true }).catch(() => {});
+        await fs.rm(`${file}.bak`, { force: true }).catch(() => {});
+      }
+      reviewStateReadBlocked = false;
+      return value;
+    } catch (error) { lastError = error; }
+  }
+  if (!foundAny) { reviewStateReadBlocked = false; return null; }
+  reviewStateReadBlocked = true;
+  throw lastError || new Error('Review state could not be recovered.');
+}
+
+async function loadReviewState() {
+  if (cachedReviewState) return cachedReviewState;
+  if (reviewStateLoadPromise) return reviewStateLoadPromise;
+  reviewStateLoadPromise = (async () => {
+    try {
+      const saved = await readReviewStateSnapshot();
+      cachedReviewState = {
+        ...DEFAULT_REVIEW_STATE,
+        ...(saved && typeof saved === 'object' ? saved : {}),
+        totalUsageSeconds: Math.max(0, Math.min(315360000, Number(saved?.totalUsageSeconds) || 0)),
+        submittedAt: Math.max(0, Number(saved?.submittedAt) || 0),
+        neverAskAgain: Boolean(saved?.neverAskAgain),
+        snoozedUntil: Math.max(0, Number(saved?.snoozedUntil) || 0),
+        lastPromptAt: Math.max(0, Number(saved?.lastPromptAt) || 0),
+        promptCount: Math.max(0, Math.min(10000, Number(saved?.promptCount) || 0)),
+        reviewStatus: ['pending', 'submitted'].includes(saved?.reviewStatus) ? saved.reviewStatus : (Number(saved?.submittedAt) > 0 ? 'submitted' : 'none'),
+        pendingReviewId: typeof saved?.pendingReviewId === 'string' ? saved.pendingReviewId.slice(0, 64) : '',
+        lastReviewId: typeof saved?.lastReviewId === 'string' ? saved.lastReviewId.slice(0, 64) : '',
+      };
+    } catch {
+      cachedReviewState = { ...DEFAULT_REVIEW_STATE };
+      if (reviewStateReadBlocked) {
+        cachedReviewState.reviewStatus = 'pending';
+        cachedReviewState.pendingReviewId = 'state-unreadable';
+        cachedReviewState.neverAskAgain = true;
+      }
+    }
+    // Recover the suppression state from the encrypted outbox if the process closed after
+    // durably queueing a review but before it could update review-state.json.
+    try {
+      const queued = await readReviewOutbox();
+      const pending = queued.find((item) => item && typeof item.id === 'string' && item.payload && typeof item.payload === 'object');
+      if (pending && !cachedReviewState.submittedAt) {
+        cachedReviewState.reviewStatus = 'pending';
+        cachedReviewState.pendingReviewId = pending.id;
+        cachedReviewState.neverAskAgain = true;
+      }
+    } catch (error) {
+      // A queue that cannot be decrypted/read must never cause another prompt or be overwritten.
+      reviewOutboxReadBlocked = true;
+      cachedReviewState.reviewStatus = 'pending';
+      cachedReviewState.pendingReviewId = cachedReviewState.pendingReviewId || 'pending-unreadable';
+      cachedReviewState.neverAskAgain = true;
+      void logUsageDiagnostic(`The encrypted review outbox could not be read; prompting is disabled to avoid duplicate feedback (${String(error?.message || error).slice(0, 180)}).`);
+    }
+    return cachedReviewState;
+  })();
+  try { return await reviewStateLoadPromise; }
+  finally { reviewStateLoadPromise = null; }
+}
+async function persistReviewState() {
+  const state = await loadReviewState();
+  // Preserve an unrecoverable state file rather than overwriting history and possibly re-prompting a reviewer.
+  if (reviewStateReadBlocked) return false;
+  const file = getReviewStatePath();
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const temp = `${file}.tmp`;
+  const backup = `${file}.bak`;
+  await fs.writeFile(temp, JSON.stringify(state), { encoding: 'utf8', mode: 0o600 });
+  try {
+    await fs.rm(backup, { force: true });
+    try { await fs.rename(file, backup); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    await fs.rename(temp, file);
+    await fs.rm(backup, { force: true });
+  } catch (error) {
+    try { if (!fsSync.existsSync(file) && fsSync.existsSync(backup)) await fs.rename(backup, file); } catch {}
+    throw error;
+  }
+}
+function getReviewOutboxPath() {
+  return path.join(app.getPath('userData'), 'review-outbox.enc');
+}
+
+/**
+ * Reviews may contain free-form personal feedback, so the durable retry queue is encrypted using
+ * Windows user-bound Electron safeStorage (DPAPI on Windows). No plaintext fallback is permitted.
+ */
+async function readReviewOutbox() {
+  const file = getReviewOutboxPath();
+  const candidates = [`${file}.tmp`, file, `${file}.bak`];
+  let foundAny = false;
+  let lastError = null;
+  for (const candidate of candidates) {
+    let encoded;
+    try { encoded = await fs.readFile(candidate, 'utf8'); }
+    catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      lastError = error;
+      foundAny = true;
+      continue;
+    }
+    foundAny = true;
+    try {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is not available to decrypt pending reviews.');
+      const encrypted = Buffer.from(String(encoded).trim(), 'base64');
+      if (!encrypted.length) throw new Error('The encrypted review outbox is empty or damaged.');
+      const parsed = JSON.parse(safeStorage.decryptString(encrypted));
+      const items = reviewQueuePolicy.normalizeOutbox(parsed);
+      // Recover a fully-written temp/backup file after a crash during an atomic replacement.
+      if (candidate !== file) {
+        await fs.copyFile(candidate, file);
+        await fs.rm(`${file}.tmp`, { force: true }).catch(() => {});
+        await fs.rm(`${file}.bak`, { force: true }).catch(() => {});
+      }
+      reviewOutboxReadBlocked = false;
+      return items;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!foundAny) return [];
+  reviewOutboxReadBlocked = true;
+  const failure = lastError || new Error('The encrypted review outbox cannot be read.');
+  void logUsageDiagnostic(`The encrypted review outbox could not be read and was preserved (${String(failure?.message || failure).slice(0, 180)}).`);
+  throw failure;
+}
+
+async function writeReviewOutbox(items) {
+  if (reviewOutboxReadBlocked) throw new Error('The existing encrypted review queue could not be read; it was not overwritten.');
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable, so the review cannot be saved safely.');
+  const file = getReviewOutboxPath();
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const encrypted = safeStorage.encryptString(JSON.stringify({ version: 1, items: items.slice(-5) }));
+  const temp = `${file}.tmp`;
+  await fs.writeFile(temp, encrypted.toString('base64'), { encoding: 'utf8', mode: 0o600 });
+  // Windows rename cannot reliably replace an existing destination. Keep a recoverable backup
+  // while swapping, and let the reader recover from it if the process is interrupted mid-write.
+  const backup = `${file}.bak`;
+  try {
+    await fs.rm(backup, { force: true });
+    try { await fs.rename(file, backup); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    await fs.rename(temp, file);
+    await fs.rm(backup, { force: true });
+  } catch (error) {
+    try { if (!fsSync.existsSync(file) && fsSync.existsSync(backup)) await fs.rename(backup, file); } catch {}
+    throw error;
+  }
+}
+
+async function queueReview(payload, id) {
+  const queue = await readReviewOutbox();
+  if (queue.some((item) => item.id === id)) return;
+  // Only one review per install is needed. Never overwrite an existing pending review with new text.
+  if (queue.length) throw new Error('A review is already pending delivery from this installation.');
+  queue.push(reviewQueuePolicy.createOutboxItem(id, payload));
+  await writeReviewOutbox(queue);
+}
+
+function reviewRetryDelayMs(attempts, status) { return reviewQueuePolicy.retryDelayMs(attempts, status); }
+
+async function flushPendingReviews({ force = false } = {}) {
+  if (reviewOutboxFlushing || reviewOutboxReadBlocked) return { delivered: 0, pending: true };
+  if (typeof net?.isOnline === 'function' && !net.isOnline()) return { delivered: 0, pending: true, offline: true };
+  reviewOutboxFlushing = true;
+  let delivered = 0;
+  try {
+    let queue = await readReviewOutbox();
+    if (!queue.length) return { delivered: 0, pending: false };
+    const state = await loadReviewState();
+    // If the server acknowledgement was persisted locally but queue cleanup was interrupted, finish cleanup without resending.
+    queue = queue.filter((item) => !(state.submittedAt && state.lastReviewId && item.id === state.lastReviewId));
+    for (const item of queue) {
+      if (!force && Number(item.nextAttemptAt || 0) > Date.now()) continue;
+      const result = await postMonitorUsage(item.payload, 8000);
+      if (result.status === 'delivered') {
+        state.submittedAt = Date.now();
+        state.reviewStatus = 'submitted';
+        state.pendingReviewId = '';
+        state.lastReviewId = item.id;
+        state.neverAskAgain = true;
+        state.snoozedUntil = 0;
+        await persistReviewState();
+        queue = queue.filter((candidate) => candidate.id !== item.id);
+        await writeReviewOutbox(queue);
+        delivered += 1;
+        break;
+      }
+      // Keep the review on every failure, including gateway 4xx errors: a server-side gateway
+      // deployment may become compatible later. Backoff prevents repeated request/log flooding.
+      item.attempts = Math.min(30, Number(item.attempts || 0) + 1);
+      item.lastStatus = String(result.status || 'retry');
+      item.lastError = String(result.message || 'The Monitor did not acknowledge the review.').slice(0, 500);
+      item.nextAttemptAt = Date.now() + reviewRetryDelayMs(item.attempts, item.lastStatus);
+    }
+    await writeReviewOutbox(queue);
+    return { delivered, pending: queue.length > 0 };
+  } catch (error) {
+    await logUsageDiagnostic(`Pending review delivery failed safely: ${String(error?.message || error).slice(0, 300)}`);
+    return { delivered, pending: true, error: String(error?.message || error) };
+  } finally {
+    reviewOutboxFlushing = false;
+  }
+}
+
+function startReviewOutboxService() {
+  if (reviewOutboxTimer) return;
+  void flushPendingReviews();
+  reviewOutboxTimer = setInterval(() => { void flushPendingReviews(); }, 60_000);
+  reviewOutboxTimer.unref?.();
+}
+
+async function accountReviewUsage() {
+  if (!usageSession) return;
+  if (reviewUsageAccountingPromise) return reviewUsageAccountingPromise;
+  reviewUsageAccountingPromise = (async () => {
+    const now = Date.now();
+    const last = Number(usageSession.reviewAccountedMs || usageSession.startedMs || now);
+    const seconds = Math.max(0, Math.floor((now - last) / 1000));
+    if (seconds < 1) return;
+    usageSession.reviewAccountedMs = last + seconds * 1000;
+    const state = await loadReviewState();
+    state.totalUsageSeconds = Math.min(315360000, state.totalUsageSeconds + seconds);
+    await persistReviewState();
+  })().finally(() => { reviewUsageAccountingPromise = null; });
+  return reviewUsageAccountingPromise;
+}
 
 function getUsageStatePath() {
   return path.join(app.getPath('userData'), 'monitor-usage.json');
@@ -528,8 +927,8 @@ async function logUsageDiagnostic(message) {
 }
 
 async function postMonitorUsage(payload, timeoutMs = 8000) {
-  const canonical = `${PDF_STUDIO_MONITOR_BASE_URL}/`;
-  const candidates = monitorApiUrlCandidates(canonical);
+  const gateway = monitorGatewayEndpoint({ resource: 'telemetry' });
+  const candidates = monitorApiUrlCandidates(gateway);
   let lastFailure = 'Could not reach the PDF Studio Monitor telemetry endpoint.';
   let lastStatus = 0;
 
@@ -546,7 +945,6 @@ async function postMonitorUsage(payload, timeoutMs = 8000) {
           'ngrok-skip-browser-warning': '1',
           'Accept': 'application/json',
           'Content-Type': 'application/json',
-          'X-Api-Key': PDF_STUDIO_MONITOR_API_KEY,
         },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(timeoutMs),
@@ -642,18 +1040,22 @@ async function startUsageMonitoring() {
   usageStopping = false;
   usageStartPromise = (async () => {
     await ensureUsageIdentity();
+    startReviewOutboxService();
     usageSession = {
       id: crypto.randomBytes(16).toString('hex'),
       startedAt: Math.floor(Date.now() / 1000),
       startedMs: Date.now(),
+      reviewAccountedMs: Date.now(),
     };
     await flushUsageQueue();
     await sendUsageEvent(usageSessionPayload('open'), 8000);
     if (usageHeartbeatTimer) clearInterval(usageHeartbeatTimer);
     usageHeartbeatTimer = setInterval(() => {
       if (!usageStopping && usageSession) {
+        void accountReviewUsage();
         void sendUsageEvent(usageSessionPayload('heartbeat'), 8000);
         void flushUsageQueue();
+        void flushPendingReviews();
       }
     }, 60_000);
     usageHeartbeatTimer.unref?.();
@@ -669,6 +1071,7 @@ async function stopUsageMonitoring() {
   usageStopPromise = (async () => {
     if (usageStartPromise) await Promise.race([usageStartPromise, new Promise((resolve) => setTimeout(resolve, 2500))]);
     if (usageSession && usageIdentity) {
+      await accountReviewUsage();
       const payload = usageSessionPayload('close');
       const result = await postMonitorUsage(payload, 2500);
       if (result.status === 'retry') await enqueueUsageEvent(payload);
@@ -682,7 +1085,7 @@ async function stopUsageMonitoring() {
 //
 // The Monitor administrator can disable a single PC from the dashboard's Installs table. This client:
 //   * starts normally and never waits for the network (new/unknown devices are enabled by default);
-//   * polls api/access.php with the shared API key (about every 30 seconds, and again when the window regains focus);
+//   * polls the server-side client gateway (about every 30 seconds, and again when the window regains focus);
 //   * locks immediately when the answer is "disabled", and unlocks on the next answer that says "enabled";
 //   * caches the last answer on disk, so a disabled device stays locked after a restart or while offline;
 //   * enforces the lock in THIS (main) process: file dialogs, reading and saving are refused while locked,
@@ -771,7 +1174,6 @@ async function checkAccessPolicy() {
       const outcome = await accessPolicy.fetchAccessPolicy({
         baseUrl: PDF_STUDIO_MONITOR_BASE_URL,
         candidatesFor: monitorApiUrlCandidates,
-        apiKey: PDF_STUDIO_MONITOR_API_KEY,
         userAgent: `PdfStudio/${app.getVersion()}`,
         identity: { installId: identity.installId, version: app.getVersion(), hostname: getUsageHostname(), localIp: getUsageLocalIp() },
       });
@@ -1054,25 +1456,13 @@ function markUpdatePromptShown(version) {
   if (pendingUpdate && pendingUpdate.version === String(version || '')) promptedVersionThisSession = pendingUpdate.version;
 }
 
-function psQuote(value) { return `'${String(value).replace(/'/g, "''")}'`; }
-async function scheduleWindowsUpdate(update) {
-  const launcher = process.env.PORTABLE_EXECUTABLE_FILE;
-  if (!launcher || !fsSync.existsSync(launcher)) {
-    throw new Error('This Windows build cannot locate the portable launcher to replace. Reopen PDF Studio from its Portable EXE and try again.');
-  }
-  const target = path.resolve(launcher);
-  const targetDir = path.dirname(target);
-  const extension = path.extname(target) || '.exe';
-  const replacement = path.join(targetDir, `.pdfstudio-update-${update.version}-${process.pid}${extension}`);
-  await fs.copyFile(update.path, replacement);
-  const scriptPath = path.join(getUpdatesDirectory(), `apply-update-${process.pid}.ps1`);
-  const backup = `${target}.previous`;
-  const script = `$ErrorActionPreference='Stop'\n$Target=${psQuote(target)}\n$Replacement=${psQuote(replacement)}\n$Backup=${psQuote(backup)}\n$WaitPid=${process.pid}\n$Log=${psQuote(path.join(getUpdatesDirectory(), 'apply-update.log'))}\ntry {\n  while (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 400 }\n  if (!(Test-Path -LiteralPath $Target)) { throw 'The current launcher was not found.' }\n  if (Test-Path -LiteralPath $Backup) { Remove-Item -LiteralPath $Backup -Force }\n  $movedOriginal = $false\n  for ($attempt = 0; $attempt -lt 30; $attempt++) {\n    try { Move-Item -LiteralPath $Target -Destination $Backup -Force -ErrorAction Stop; $movedOriginal = $true; break }\n    catch { if ($attempt -ge 29) { throw }; Start-Sleep -Milliseconds 500 }\n  }\n  $installed = $false\n  for ($attempt = 0; $attempt -lt 30; $attempt++) {\n    try { Move-Item -LiteralPath $Replacement -Destination $Target -Force -ErrorAction Stop; $installed = $true; break }\n    catch { if ($attempt -ge 29) { throw }; Start-Sleep -Milliseconds 500 }\n  }\n  if (!$installed) { throw 'The downloaded launcher could not be installed.' }\n  Start-Process -FilePath $Target\n  Add-Content -LiteralPath $Log -Value ('Updated to ${update.version} at ' + (Get-Date).ToString('o'))\n} catch {\n  if (!(Test-Path -LiteralPath $Target) -and (Test-Path -LiteralPath $Backup)) { Move-Item -LiteralPath $Backup -Destination $Target -Force }\n  Add-Content -LiteralPath $Log -Value ('Update failed: ' + $_.Exception.Message)\n}\n`;
-  await fs.writeFile(scriptPath, script, 'utf8');
-  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath], { detached: true, stdio: 'ignore', windowsHide: true });
-  child.unref();
+async function uniqueUpdateTarget(dir, version) {
+  let candidate = path.join(dir, `PdfStudio-${version}.exe`);
+  for (let n = 2; fsSync.existsSync(candidate); n += 1) candidate = path.join(dir, `PdfStudio-${version} (${n}).exe`);
+  return candidate;
 }
+// No scripts, no hidden shells, no overwriting of the running file: the verified package is copied beside the launcher
+// (or into Downloads), re-verified, and started as a normal visible process. Self-replacing droppers are a classic antivirus trigger.
 async function applyPendingUpdateNow() {
   if (!pendingUpdate) throw new Error('No verified update is ready to install.');
   const digest = await sha256File(pendingUpdate.path);
@@ -1080,16 +1470,32 @@ async function applyPendingUpdateNow() {
     await removePendingUpdate({ removePayload: true });
     throw new Error('The update package did not pass its integrity check. Please check for updates again.');
   }
-  await scheduleWindowsUpdate(pendingUpdate);
-  publishUpdaterState({ status: 'applying', latestVersion: pendingUpdate.version, message: 'Applying the update and restarting PDF Studio…' });
-  setTimeout(() => app.quit(), 250);
-  return { started: true };
+  const launcher = process.env.PORTABLE_EXECUTABLE_FILE;
+  const dirs = [launcher && fsSync.existsSync(launcher) ? path.dirname(path.resolve(launcher)) : null, app.getPath('downloads')].filter(Boolean);
+  let installed = null;
+  for (const dir of dirs) {
+    try {
+      const target = await uniqueUpdateTarget(dir, pendingUpdate.version);
+      await fs.copyFile(pendingUpdate.path, target);
+      if ((await sha256File(target)).toLowerCase() !== digest.toLowerCase()) { await fs.rm(target, { force: true }); continue; }
+      installed = target; break;
+    } catch { /* try the next location */ }
+  }
+  if (!installed) throw new Error('The verified update could not be copied to a writable folder.');
+  publishUpdaterState({ status: 'applying', latestVersion: pendingUpdate.version, message: 'Starting the new version of PDF Studio…' });
+  app.releaseSingleInstanceLock();
+  const failure = await shell.openPath(installed);
+  if (failure) throw new Error(`The new version could not be started: ${failure}`);
+  setTimeout(() => app.quit(), 400);
+  return { started: true, path: installed };
 }
 
 async function docxBufferToPdf(buffer) {
+  // Loaded on demand: mammoth is only needed for Word imports and costs startup time otherwise.
+  const mammoth = require('mammoth');
   const result = await mammoth.convertToHtml({ buffer });
   const body = result.value || '<p>This Word document contains no readable text.</p>';
-  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'"><style>
     @page { size: A4; margin: 22mm 20mm; }
     * { box-sizing: border-box; }
     body { font-family: Arial, Helvetica, sans-serif; color: #202236; font-size: 11pt; line-height: 1.55; }
@@ -1103,7 +1509,7 @@ async function docxBufferToPdf(buffer) {
     show: false,
     width: 980,
     height: 1200,
-    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, devTools: false },
   });
   try {
     await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
@@ -1124,6 +1530,7 @@ let startupFailureShown = false;
 async function showStartupFailure(window, { heading, message, details = '' }) {
   if (!window || window.isDestroyed() || startupFailureShown) return;
   startupFailureShown = true;
+  revealMainWindow();
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDF Studio startup problem</title>
     <style>
       :root{color-scheme:light}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f5f6fb;color:#20223a;font:15px/1.55 Inter,Segoe UI,Arial,sans-serif;padding:28px}
@@ -1146,7 +1553,7 @@ async function showStartupFailure(window, { heading, message, details = '' }) {
 }
 
 async function loadRenderer(window) {
-  const devUrl = process.env.VITE_DEV_SERVER_URL;
+  const devUrl = getDevUrl();
   if (devUrl) {
     try {
       await window.loadURL(devUrl);
@@ -1205,33 +1612,47 @@ function createEditorWindow(initial) {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      webviewTag: false,
+      allowRunningInsecureContent: false,
+      devTools: !app.isPackaged,
     },
   });
-  const contentsId = win.webContents.id;
+  const contents = win.webContents;
+  const contentsId = contents.id;
   // Without the default menu, Ctrl+Plus / Ctrl+Minus / Ctrl+0 / Ctrl+R no longer zoom or reload the whole
   // page. The editor handles those shortcuts itself, and pinch/ctrl+wheel zoom is left to the editor too.
   win.removeMenu();
   win.setMenuBarVisibility(false);
-  win.webContents.setVisualZoomLevelLimits(1, 1);
   editorInitPayloads.set(contentsId, initial || null);
   editorWindows.add(win);
-  win.once('ready-to-show', () => { win.show(); win.focus(); });
+  // setVisualZoomLevelLimits needs a live render frame. Calling it straight after construction (before the first
+  // navigation commits) throws "Render frame was disposed before WebFrameMain could be accessed", so it runs once
+  // the page has started loading and is allowed to fail silently.
+  const lockVisualZoom = () => {
+    if (win.isDestroyed() || contents.isDestroyed()) return;
+    try { contents.setVisualZoomLevelLimits(1, 1); } catch { /* purely cosmetic; the renderer also blocks pinch zoom */ }
+  };
+  contents.once('dom-ready', lockVisualZoom);
+  win.once('ready-to-show', () => { if (!win.isDestroyed()) { win.show(); win.focus(); } });
   win.on('closed', () => { editorWindows.delete(win); editorInitPayloads.delete(contentsId); });
-  win.webContents.setWindowOpenHandler(({ url }) => {
+  contents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) shell.openExternal(url);
     return { action: 'deny' };
   });
   // The renderer sets a beforeunload guard while there are unsaved edits; ask the user instead of silently blocking.
-  win.webContents.on('will-prevent-unload', (event) => {
+  contents.on('will-prevent-unload', (event) => {
     const choice = dialog.showMessageBoxSync(win, {
       type: 'question', buttons: ['Discard changes', 'Keep editing'], defaultId: 1, cancelId: 1,
       title: 'Unsaved edits', message: 'This PDF has edits that have not been saved.', detail: 'Closing the window discards them.',
     });
     if (choice === 0) event.preventDefault();
   });
-  const devUrl = process.env.VITE_DEV_SERVER_URL;
-  if (devUrl) void win.loadURL(`${devUrl}${devUrl.includes('?') ? '&' : '?'}window=edit`);
-  else void win.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'), { query: { window: 'edit' } });
+  const devUrl = getDevUrl();
+  const loading = devUrl
+    ? win.loadURL(`${devUrl}${devUrl.includes('?') ? '&' : '?'}window=edit`)
+    : win.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'), { query: { window: 'edit' } });
+  // A window closed mid-load rejects with ERR_ABORTED; that is expected and must not become an unhandled rejection.
+  loading.catch((error) => { if (!win.isDestroyed()) console.error('[pdf-studio] Edit window failed to load:', error?.message || error); });
   return win;
 }
 
@@ -1254,9 +1675,103 @@ const WINDOWS_FONT_FILES = {
 
 function fontDirectories() {
   const home = os.homedir();
-  if (process.platform === 'win32') return [path.join(process.env.WINDIR || 'C:\\Windows', 'Fonts'), path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Microsoft', 'Windows', 'Fonts')];
-  if (process.platform === 'darwin') return ['/System/Library/Fonts', '/System/Library/Fonts/Supplemental', '/Library/Fonts', path.join(home, 'Library', 'Fonts')];
-  return ['/usr/share/fonts', '/usr/local/share/fonts', path.join(home, '.fonts'), path.join(home, '.local', 'share', 'fonts')];
+  const managed = path.join(app.getPath('userData'), 'fonts'); // per-user cache; never installs into the OS
+  if (process.platform === 'win32') return [path.join(process.env.WINDIR || 'C:\\Windows', 'Fonts'), path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Microsoft', 'Windows', 'Fonts'), managed];
+  if (process.platform === 'darwin') return ['/System/Library/Fonts', '/System/Library/Fonts/Supplemental', '/Library/Fonts', path.join(home, 'Library', 'Fonts'), managed];
+  return ['/usr/share/fonts', '/usr/local/share/fonts', path.join(home, '.fonts'), path.join(home, '.local', 'share', 'fonts'), managed];
+}
+
+// Missing fonts may only be resolved to explicitly allow-listed, SIL Open Font Licensed
+// metric-compatible alternatives. No user-provided font URL or arbitrary download host is trusted.
+const OPEN_FONT_FALLBACKS = {
+  arial: {
+    folder: 'arimo', family: 'Arimo', licenseUrls: [
+      'https://raw.githubusercontent.com/google/fonts/main/ofl/arimo/OFL.txt',
+      'https://raw.githubusercontent.com/googlefonts/arimo/main/OFL.txt',
+    ],
+    fileUrls: (style, file) => [
+      `https://raw.githubusercontent.com/google/fonts/main/apache/arimo/Arimo-${file}.ttf`,
+      `https://raw.githubusercontent.com/google/fonts/main/ofl/arimo/static/Arimo-${file}.ttf`,
+      `https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/Arimo/Arimo-${file}.ttf`,
+    ],
+  },
+  calibri: {
+    folder: 'carlito', family: 'Carlito', licenseUrls: [
+      'https://raw.githubusercontent.com/googlefonts/carlito/main/OFL.txt',
+      'https://raw.githubusercontent.com/google/fonts/main/ofl/carlito/OFL.txt',
+    ],
+    fileUrls: (style, file) => [
+      `https://raw.githubusercontent.com/googlefonts/carlito/main/fonts/ttf/Carlito-${file}.ttf`,
+      `https://raw.githubusercontent.com/google/fonts/main/ofl/carlito/static/Carlito-${file}.ttf`,
+    ],
+  },
+  timesnewroman: {
+    folder: 'tinos', family: 'Tinos', licenseUrls: [
+      'https://raw.githubusercontent.com/google/fonts/main/ofl/tinos/OFL.txt',
+    ],
+    fileUrls: (style, file) => [
+      `https://raw.githubusercontent.com/google/fonts/main/apache/tinos/Tinos-${file}.ttf`,
+      `https://raw.githubusercontent.com/google/fonts/main/ofl/tinos/static/Tinos-${file}.ttf`,
+      `https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/Tinos/Tinos-${file}.ttf`,
+    ],
+  },
+};
+const FONT_STYLE_FILES = ['Regular', 'Bold', 'Italic', 'BoldItalic'];
+const FONT_MAX_BYTES = 12 * 1024 * 1024;
+
+async function fetchFontAsset(url, expectedLicense = false) {
+  // Only hard-coded HTTPS GitHub raw URLs in OPEN_FONT_FALLBACKS are passed here.
+  const response = await fetch(url, { signal: AbortSignal.timeout(10000), redirect: 'error', headers: { 'user-agent': 'PDF-Studio-font-cache/1.0' } });
+  if (!response.ok) throw new Error(`Font host returned HTTP ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > (expectedLicense ? 512 * 1024 : FONT_MAX_BYTES)) throw new Error('Font asset size is outside the permitted limit.');
+  if (!expectedLicense) {
+    const signature = String.fromCharCode(...bytes.slice(0, 4));
+    if (!(signature === '\u0000\u0001\u0000\u0000' || signature === 'OTTO' || signature === 'true' || signature === 'typ1')) throw new Error('Downloaded file is not a valid TTF/OTF font.');
+  }
+  return bytes;
+}
+
+async function downloadOpenFontFallback(familyKey, style) {
+  const spec = OPEN_FONT_FALLBACKS[familyKey];
+  if (!spec) return null;
+  const folder = path.join(app.getPath('userData'), 'fonts', spec.folder);
+  const fileName = `${spec.family}-${FONT_STYLE_FILES[style]}.ttf`;
+  const destination = path.join(folder, fileName);
+  try {
+    const cached = await fs.readFile(destination);
+    if (cached.length > 0 && cached.length <= FONT_MAX_BYTES) return new Uint8Array(cached);
+  } catch { /* download missing style */ }
+  try {
+    await fs.mkdir(folder, { recursive: true });
+    const licensePath = path.join(folder, 'OFL.txt');
+    let licenseValid = false;
+    try { licenseValid = (await fs.readFile(licensePath, 'utf8')).includes('SIL OPEN FONT LICENSE'); } catch { /* fetch license below */ }
+    if (!licenseValid) {
+      let license = null;
+      for (const url of spec.licenseUrls) {
+        try {
+          const bytes = await fetchFontAsset(url, true);
+          const body = Buffer.from(bytes).toString('utf8');
+          if (!body.includes('SIL OPEN FONT LICENSE')) continue;
+          license = body; break;
+        } catch { /* try next known official mirror */ }
+      }
+      if (!license) return null;
+      await fs.writeFile(licensePath, license, { flag: 'w' });
+    }
+    let fontBytes = null;
+    for (const url of spec.fileUrls(style, FONT_STYLE_FILES[style])) {
+      try { fontBytes = await fetchFontAsset(url); break; } catch { /* try next allow-listed official mirror */ }
+    }
+    if (!fontBytes) return null;
+    await fs.writeFile(destination, fontBytes, { flag: 'wx' }).catch(async (error) => { if (error.code !== 'EEXIST') throw error; });
+    fontIndexPromise = null; // Include the newly cached family on subsequent lookups.
+    return fontBytes;
+  } catch (error) {
+    console.warn('[pdf-studio] Open font fallback unavailable:', spec.family, error?.message || error);
+    return null;
+  }
 }
 
 async function walkFonts(dir, depth, out) {
@@ -1299,8 +1814,58 @@ async function findInstalledFont({ family, bold, italic }) {
       return new Uint8Array(await fs.readFile(file));
     } catch { /* try the next candidate */ }
   }
-  return null;
+  // Silently cache an open-licensed metrically compatible family under app data, without
+  // prompting for elevation or registering a system-wide Windows font.
+  return await downloadOpenFontFallback(key, style);
 }
+
+// ───────────────────────── Startup splash ─────────────────────────
+const SPLASH_MIN_MS = 2300;
+let splashWindow = null;
+let splashShownAt = 0;
+let splashLoaded = false;
+let splashState = { step: 1, version: '', leaving: false };
+let mainRevealed = false;
+
+function sendSplash(patch) {
+  Object.assign(splashState, patch);
+  if (splashWindow && !splashWindow.isDestroyed() && splashLoaded) splashWindow.webContents.send('splash:update', splashState);
+}
+function createSplashWindow() {
+  splashState.version = app.getVersion();
+  splashWindow = new BrowserWindow({
+    width: 560, height: 360, show: false, frame: false, transparent: true, hasShadow: false,
+    resizable: false, maximizable: false, minimizable: false, fullscreenable: false, skipTaskbar: true,
+    alwaysOnTop: true, center: true, title: 'PDF Studio', icon: getAppIconPath(), backgroundColor: '#00000000',
+    webPreferences: {
+      preload: path.join(__dirname, 'splash-preload.cjs'),
+      contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true,
+      webviewTag: false, devTools: false, spellcheck: false,
+    },
+  });
+  splashWindow.setMenuBarVisibility(false);
+  splashWindow.webContents.once('did-finish-load', () => { splashLoaded = true; sendSplash({}); });
+  splashWindow.once('ready-to-show', () => { if (!splashWindow.isDestroyed()) { splashShownAt = Date.now(); splashWindow.show(); } });
+  splashWindow.on('closed', () => { splashWindow = null; });
+  splashWindow.loadFile(path.join(__dirname, 'splash.html')).catch(() => { if (splashWindow && !splashWindow.isDestroyed()) splashWindow.destroy(); });
+}
+/** Shows the main window once the UI is mounted (or on failure/timeout) and fades the splash out over it. */
+function revealMainWindow() {
+  if (mainRevealed) return;
+  mainRevealed = true;
+  sendSplash({ step: 4 });
+  const wait = splashShownAt ? Math.max(350, SPLASH_MIN_MS - (Date.now() - splashShownAt)) : 0;
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
+    sendSplash({ leaving: true });
+    setTimeout(() => { if (splashWindow && !splashWindow.isDestroyed()) splashWindow.destroy(); }, 450);
+    setTimeout(runBackgroundStartup, 1500).unref?.();
+  }, wait);
+}
+handle('app:renderer-ready', (event) => {
+  if (mainWindow && event.sender === mainWindow.webContents) revealMainWindow();
+  return true;
+});
 
 function createWindow() {
   // Each newly created window gets its own chance to display a startup diagnostic.
@@ -1323,13 +1888,17 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      webviewTag: false,
+      allowRunningInsecureContent: false,
+      devTools: !app.isPackaged,
     },
   });
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-    void startUsageMonitoring();
-  });
+  // The window stays hidden behind the splash until the renderer reports that the UI is mounted.
+  mainWindow.webContents.once('did-start-loading', () => sendSplash({ step: 2 }));
+  mainWindow.webContents.once('dom-ready', () => sendSplash({ step: 3 }));
+  setTimeout(revealMainWindow, 15000).unref?.();
   mainWindow.on('focus', recheckAccessSoon);
+  mainWindow.on('focus', () => { void flushPendingReviews(); });
   mainWindow.on('maximize', () => mainWindow.webContents.send('window:maximized', true));
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('window:maximized', false));
   mainWindow.on('enter-full-screen', () => mainWindow.webContents.send('window:fullscreen', true));
@@ -1348,15 +1917,31 @@ function createWindow() {
     });
   });
 
-  void loadRenderer(mainWindow);
+  loadRenderer(mainWindow).catch((error) => console.error('[pdf-studio] Renderer load failed:', error));
 }
 
 app.whenReady().then(() => {
+  if (!gotInstanceLock) return;
+  // Deny every web permission request (camera, mic, geolocation, notifications…); the app needs none of them.
+  const allowed = new Set(['fullscreen', 'clipboard-sanitized-write']);
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => callback(allowed.has(permission)));
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => allowed.has(permission));
+  createSplashWindow();
   loadAccessCacheSync();
   createWindow();
   startAccessControl();
-  // Begin telemetry as soon as Electron is ready. ready-to-show may be delayed or
-  // suppressed by display/rendering issues even while the app process is running.
+  startReviewOutboxService();
+  // The access check stays on the launch path on purpose: it is one small async request, and the cached lock is
+  // already in force. The update-package hash and the telemetry are not needed for the first frame and used to
+  // compete with the renderer for disk and CPU, so they start once the window is shown (runBackgroundStartup).
+  // The timer is only a safety net for machines where ready-to-show never fires.
+  setTimeout(runBackgroundStartup, 6000).unref?.();
+});
+
+let backgroundStartupDone = false;
+function runBackgroundStartup() {
+  if (backgroundStartupDone) return;
+  backgroundStartupDone = true;
   void startUsageMonitoring();
   // Validate any previously staged package before doing a fresh release lookup.
   // Every launch checks in the background; repeat checks during long sessions without interrupting document work.
@@ -1371,7 +1956,7 @@ app.whenReady().then(() => {
     autoUpdateInterval = setInterval(() => { void checkAndStageUpdate({ manual: false }); }, 6 * 60 * 60 * 1000);
     autoUpdateInterval.unref?.();
   });
-});
+}
 app.on('window-all-closed', () => { app.quit(); });
 app.on('before-quit', (event) => {
   if (usageShutdownComplete) return;
@@ -1381,6 +1966,8 @@ app.on('before-quit', (event) => {
   stopAccessControl();
   if (autoUpdateTimer) clearTimeout(autoUpdateTimer);
   if (autoUpdateInterval) clearInterval(autoUpdateInterval);
+  if (reviewOutboxTimer) clearInterval(reviewOutboxTimer);
+  reviewOutboxTimer = null;
   clearAutoUpdateRetry();
   if (activeUpdateDownload) { activeUpdateDownload.cancelled = true; activeUpdateDownload.controller.abort(); }
   void stopUsageMonitoring().finally(() => {
@@ -1389,42 +1976,41 @@ app.on('before-quit', (event) => {
   });
 });
 
-ipcMain.handle('access:get-state', () => publicAccessState());
-ipcMain.handle('access:recheck', async () => {
+handle('access:get-state', () => publicAccessState());
+handle('access:recheck', async () => {
   if (accessCheckPromise) return accessCheckPromise;
   return checkAccessPolicy();
 });
-ipcMain.handle('window:minimize', () => mainWindow?.minimize());
-ipcMain.handle('window:maximize-toggle', () => {
+handle('window:minimize', () => mainWindow?.minimize());
+handle('window:maximize-toggle', () => {
   if (!mainWindow) return false;
   if (mainWindow.isMaximized()) mainWindow.unmaximize(); else mainWindow.maximize();
   return mainWindow.isMaximized();
 });
-ipcMain.handle('window:close', () => mainWindow?.close());
-ipcMain.handle('window:is-maximized', () => Boolean(mainWindow?.isMaximized()));
-ipcMain.handle('app:version', () => app.getVersion());
-ipcMain.handle('app:open-external', async (_event, url) => {
-  if (typeof url !== 'string' || !/^https:\/\//i.test(url)) throw new TypeError('Only HTTPS links are allowed.');
-  return shell.openExternal(url);
+handle('window:close', () => mainWindow?.close());
+handle('window:is-maximized', () => Boolean(mainWindow?.isMaximized()));
+handle('app:version', () => app.getVersion());
+handle('app:open-external', async (_event, url) => {
+  if (!openExternalSafe(url)) throw new TypeError('Only plain HTTPS links are allowed.');
 });
-ipcMain.handle('app:platform', () => process.platform);
-ipcMain.handle('updater:check', async () => {
+handle('app:platform', () => process.platform);
+handle('updater:check', async () => {
   void checkAndStageUpdate({ manual: true });
   return { status: 'checking', message: 'Checking for updates…' };
 });
-ipcMain.handle('updater:get-state', async () => getUpdaterSnapshot());
-ipcMain.handle('updater:prompt-shown', async (_event, version) => { markUpdatePromptShown(version); return true; });
-ipcMain.handle('updater:update-later', async (_event, version) => { markUpdatePromptShown(version); return true; });
-ipcMain.handle('updater:apply-now', async () => applyPendingUpdateNow());
-ipcMain.handle('updater:cancel', () => {
+handle('updater:get-state', async () => getUpdaterSnapshot());
+handle('updater:prompt-shown', async (_event, version) => { markUpdatePromptShown(version); return true; });
+handle('updater:update-later', async (_event, version) => { markUpdatePromptShown(version); return true; });
+handle('updater:apply-now', async () => applyPendingUpdateNow());
+handle('updater:cancel', () => {
   if (!activeUpdateDownload) return false;
   activeUpdateDownload.cancelled = true;
   activeUpdateDownload.controller.abort();
   return true;
 });
-ipcMain.handle('updater:open-downloads', async () => shell.openPath(app.getPath('downloads')));
+handle('updater:open-downloads', async () => shell.openPath(app.getPath('downloads')));
 
-ipcMain.handle('files:open', async (event, options) => {
+handle('files:open', async (event, options) => {
   assertAccessAllowed();
   const parent = BrowserWindow.fromWebContents(event.sender) || mainWindow;
   const pdfOnly = Boolean(options && options.pdfOnly);
@@ -1452,7 +2038,19 @@ ipcMain.handle('files:open', async (event, options) => {
   return output;
 });
 
-ipcMain.handle('files:save', async (event, { name, data, filters }) => {
+async function openExportFolder(filePath) {
+  try {
+    const folderPath = path.dirname(String(filePath || ''));
+    if (folderPath && folderPath !== '.') {
+      const error = await shell.openPath(folderPath);
+      if (error) console.warn('[PDF Studio] Could not open the export folder:', error);
+    }
+  } catch (error) {
+    console.warn('[PDF Studio] Could not open the export folder:', error?.message || error);
+  }
+}
+
+handle('files:save', async (event, { name, data, filters }) => {
   assertAccessAllowed();
   const safeFile = safeName(name, 'PDF-Studio-export.pdf');
   const defaultExt = path.extname(safeFile).replace('.', '') || 'pdf';
@@ -1461,11 +2059,43 @@ ipcMain.handle('files:save', async (event, { name, data, filters }) => {
     filters: Array.isArray(filters) && filters.length ? filters : [{ name: defaultExt.toUpperCase(), extensions: [defaultExt] }],
   });
   if (result.canceled || !result.filePath) return { canceled: true };
-  await fs.writeFile(result.filePath, toBuffer(data));
+  await fs.writeFile(result.filePath, toSafeBuffer(data));
+  await openExportFolder(result.filePath);
   return { canceled: false, filePath: result.filePath };
 });
 
-ipcMain.handle('files:save-batch', async (event, files) => {
+handle('files:save-finalized-pdf', async (event, payload) => {
+  assertAccessAllowed();
+  if (!payload || typeof payload !== 'object') throw new TypeError('Missing PDF export data.');
+  const safeFile = safeName(payload.name, 'PDF-Studio-export.pdf');
+  const defaultExt = path.extname(safeFile).replace('.', '') || 'pdf';
+  const options = payload.options && typeof payload.options === 'object' ? payload.options : {};
+  const password = String(options.password || '');
+  if (password && password.length < 8) throw new Error('Use at least 8 characters for the PDF password.');
+  if (password.length > 4096) throw new Error('The PDF password is too long.');
+
+  const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender) || mainWindow, {
+    title: 'Save exported PDF',
+    defaultPath: safeFile,
+    filters: Array.isArray(payload.filters) && payload.filters.length
+      ? payload.filters
+      : [{ name: 'PDF document', extensions: [defaultExt] }],
+  });
+  if (result.canceled || !result.filePath) return { canceled: true };
+
+  // Keep the potentially large result out of the renderer-to-main round trip. Compression/encryption
+  // stays in a worker thread, and the target file is written only after a successful transformation.
+  let output = toSafeBuffer(payload.data);
+  if (Boolean(options.compress) || password) {
+    const transformed = await finalizePdfInWorker(output, { compress: Boolean(options.compress), password });
+    output = toSafeBuffer(transformed);
+  }
+  await fs.writeFile(result.filePath, output);
+  await openExportFolder(result.filePath);
+  return { canceled: false, filePath: result.filePath };
+});
+
+handle('files:save-batch', async (event, files) => {
   assertAccessAllowed();
   if (!Array.isArray(files) || files.length === 0) return { canceled: true, count: 0 };
   const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender) || mainWindow, { title: 'Choose an export folder', properties: ['openDirectory', 'createDirectory'] });
@@ -1481,26 +2111,110 @@ ipcMain.handle('files:save-batch', async (event, files) => {
     let n = 2;
     while (used.has(candidate.toLowerCase())) { candidate = `${stem} (${n++})${ext}`; }
     used.add(candidate.toLowerCase());
-    await fs.writeFile(path.join(folder, candidate), toBuffer(file.data));
+    await fs.writeFile(path.join(folder, candidate), toSafeBuffer(file.data));
     count += 1;
   }
+  await shell.openPath(folder).catch((error) => console.warn('[PDF Studio] Could not open the export folder:', error?.message || error));
   return { canceled: false, count, folder };
 });
 
 
-ipcMain.handle('editor:open', async (_event, payload) => {
+handle('editor:open', async (_event, payload) => {
   assertAccessAllowed();
   const bytes = payload && payload.bytes ? new Uint8Array(payload.bytes) : null;
-  createEditorWindow(bytes ? { name: safeName(payload.name, 'document.pdf'), bytes } : null);
-  return true;
+  try {
+    createEditorWindow(bytes ? { name: safeName(payload.name, 'document.pdf'), bytes } : null);
+    return true;
+  } catch (error) {
+    console.error('[pdf-studio] Could not open the Edit PDF window:', error);
+    return false;
+  }
 });
-ipcMain.handle('editor:init', (event) => {
+handle('editor:init', (event) => {
   const payload = editorInitPayloads.get(event.sender.id) || null;
   editorInitPayloads.set(event.sender.id, null);
   return payload;
 });
-ipcMain.handle('editor:close', (event) => { BrowserWindow.fromWebContents(event.sender)?.close(); return true; });
-ipcMain.handle('editor:set-title', (event, title) => { BrowserWindow.fromWebContents(event.sender)?.setTitle(String(title || 'PDF Studio - Edit PDF').slice(0, 200)); return true; });
-ipcMain.handle('fonts:find', async (_event, query) => {
+handle('editor:close', (event) => { BrowserWindow.fromWebContents(event.sender)?.close(); return true; });
+handle('editor:set-title', (event, title) => { BrowserWindow.fromWebContents(event.sender)?.setTitle(String(title || 'PDF Studio - Edit PDF').slice(0, 200)); return true; });
+handle('review:maybe-prompt', async () => {
+  assertAccessAllowed();
+  await accountReviewUsage();
+  const state = await loadReviewState();
+  const now = Date.now();
+  const liveSeconds = usageSession
+    ? Math.max(0, Math.floor((now - Number(usageSession.reviewAccountedMs || usageSession.startedMs || now)) / 1000))
+    : 0;
+  const totalUsageSeconds = state.totalUsageSeconds + liveSeconds;
+  const cooldownMs = 7 * 24 * 60 * 60 * 1000;
+  if (reviewQueuePolicy.shouldSuppressReviewPrompt(state, reviewOutboxReadBlocked || reviewStateReadBlocked)) {
+    return { shouldPrompt: false, stopChecking: true, totalUsageSeconds, submitted: Boolean(state.submittedAt), pending: Boolean(state.pendingReviewId || state.reviewStatus === 'pending' || reviewOutboxReadBlocked) };
+  }
+  if (now < state.snoozedUntil) {
+    return { shouldPrompt: false, totalUsageSeconds, nextCheckAfterMs: Math.min(24 * 60 * 60 * 1000, state.snoozedUntil - now) };
+  }
+  if (state.lastPromptAt && now - state.lastPromptAt < cooldownMs) {
+    return { shouldPrompt: false, totalUsageSeconds, nextCheckAfterMs: Math.min(24 * 60 * 60 * 1000, cooldownMs - (now - state.lastPromptAt)) };
+  }
+  if (totalUsageSeconds < 30 * 60) {
+    return { shouldPrompt: false, totalUsageSeconds, nextCheckAfterMs: Math.max(60_000, Math.min(10 * 60_000, (30 * 60 - totalUsageSeconds) * 1000 + Math.random() * 20_000)) };
+  }
+  const shouldPrompt = Math.random() < 0.28;
+  return { shouldPrompt, totalUsageSeconds, submitted: false, nextCheckAfterMs: shouldPrompt ? 0 : Math.round((12 + Math.random() * 18) * 60_000) };
+});
+handle('review:prompt-shown', async () => {
+  const state = await loadReviewState();
+  if (reviewQueuePolicy.shouldSuppressReviewPrompt(state, reviewOutboxReadBlocked || reviewStateReadBlocked)) return false;
+  state.lastPromptAt = Date.now();
+  state.promptCount = Math.min(10000, state.promptCount + 1);
+  await persistReviewState();
+  return true;
+});
+handle('review:defer', async (_event, choice) => {
+  const state = await loadReviewState();
+  if (state.submittedAt || state.pendingReviewId || state.reviewStatus === 'pending') return true;
+  if (String(choice) === 'never') {
+    state.neverAskAgain = true;
+    state.snoozedUntil = 0;
+  } else {
+    state.snoozedUntil = Date.now() + 7 * 24 * 60 * 60 * 1000;
+  }
+  await persistReviewState();
+  return true;
+});
+handle('review:submit', async (_event, review) => {
+  assertAccessAllowed();
+  const rating = Number(review?.rating);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new Error('Choose a rating from 1 to 5 stars.');
+  const state = await loadReviewState();
+  if (state.submittedAt || state.reviewStatus === 'submitted') return { ok: true, alreadySubmitted: true };
+  if (reviewStateReadBlocked && state.pendingReviewId === 'state-unreadable') throw new Error('PDF Studio could not safely recover its local review history. No new review was added to avoid a possible duplicate.');
+  if (reviewOutboxReadBlocked) throw new Error('PDF Studio could not safely read its existing encrypted review queue. No new review was added and no pending feedback was overwritten.');
+  if (state.pendingReviewId || state.reviewStatus === 'pending') return { ok: true, queued: true, alreadyQueued: true };
+
+  const name = String(review?.name || '').replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 60);
+  const message = String(review?.message || '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').trim().slice(0, 1500);
+  await ensureUsageIdentity();
+  const reviewId = crypto.randomBytes(16).toString('hex');
+  const payload = {
+    event: 'review', app: 'pdfstudio', session_id: reviewId,
+    client_review_id: reviewId,
+    install_id: usageIdentity.installId, version: app.getVersion(), os: getUsageOsLabel(),
+    hostname: getUsageHostname(), local_ip: getUsageLocalIp(),
+    started_at: Math.floor(Date.now() / 1000), seconds: 0, rating, name, message,
+  };
+
+  // The encrypted outbox is written first. Only after it is durable do we suppress future prompts,
+  // so an interrupted process cannot lose a review and then ask the same person to write it again.
+  await queueReview(payload, reviewId);
+  state.reviewStatus = 'pending';
+  state.pendingReviewId = reviewId;
+  state.neverAskAgain = true;
+  state.snoozedUntil = 0;
+  await persistReviewState();
+  void flushPendingReviews({ force: true });
+  return { ok: true, queued: true, reviewId };
+});
+handle('fonts:find', async (_event, query) => {
   try { return await findInstalledFont({ family: String(query?.family || ''), bold: Boolean(query?.bold), italic: Boolean(query?.italic) }); } catch { return null; }
 });

@@ -709,3 +709,71 @@ button, input, select, textarea { font-family: inherit; }
 }
 
 .persistent-edit-pdf { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+
+/* Browser-style in-app tabs in the draggable Electron title bar. */
+:root:root .app-shell {
+  & .titlebar { justify-content: flex-start; gap: 8px; padding-left: 16px; background: #f4f6f9; }
+  & .titlebar-brand { flex: 0 0 196px; width: 196px; min-width: 0; }
+  & .titlebar-tabs { display: flex; flex: 1 1 auto; align-self: stretch; align-items: stretch; gap: 3px; min-width: 0; padding: 7px 0 0 2px; overflow: hidden; -webkit-app-region: no-drag; }
+  & .titlebar-tab { position: relative; display: flex; align-items: center; justify-content: flex-start; gap: 8px; height: 100%; min-width: 0; max-width: 260px; flex: 0 1 205px; padding: 0 30px 0 12px; border: 1px solid transparent; border-bottom: 0; border-radius: 9px 9px 0 0; background: transparent; color: #647086; text-align: left; -webkit-app-region: no-drag; transition: background .14s, color .14s, border-color .14s; }
+  & .titlebar-tab:hover:not(.is-active) { background: #e9edf3; color: #303b4b; }
+  & .titlebar-tab.is-active, & .titlebar-tab-wrap.is-active .titlebar-tab { background: #fff; color: #283446; border-color: #dce2e9; box-shadow: 0 1px 0 #fff; }
+  & .titlebar-tab[aria-selected="true"]::before { content: ''; position: absolute; top: -1px; left: 11px; right: 11px; height: 2px; border-radius: 2px 2px 0 0; background: var(--accent, #6253df); }
+  & .titlebar-tab > svg { flex: 0 0 auto; color: #8072dc; }
+  & .titlebar-tab-label { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 650; }
+  & .titlebar-tab-wrap { position: relative; display: flex; align-items: stretch; flex: 0 1 250px; min-width: 130px; max-width: 290px; }
+  & .titlebar-tab-wrap .titlebar-tab { flex: 1 1 auto; width: 100%; }
+  & .titlebar-tab-close { position: absolute; top: 50%; right: 5px; display: grid; place-items: center; width: 23px; height: 23px; padding: 0; transform: translateY(-40%); border: 0; border-radius: 6px; background: transparent; color: #7b8494; -webkit-app-region: no-drag; }
+  & .titlebar-tab-close:hover { background: #e7e9ef; color: #283446; }
+  & .titlebar-tab-add { align-self: center; display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 28px; margin-left: 1px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: #6f7c8f; -webkit-app-region: no-drag; }
+  & .titlebar-tab-add:hover { background: #e6eaf1; color: var(--accent, #6253df); }
+  & .titlebar-center { flex: 0 0 auto; justify-content: flex-start; gap: 8px; margin: 0 12px 0 4px; font-size: 11px; white-space: nowrap; }
+  & .window-controls { flex: 0 0 auto; }
+  & .app-body-edit { min-width: 0; }
+  & .main-panel-edit { width: 100%; min-width: 0; overflow: hidden; }
+  & .persistent-edit-pdf { flex: 1 1 auto; width: 100%; min-height: 0; }
+}
+:root:root .app-shell.theme-dark {
+  & .titlebar { background: #202329; border-color: #343a44; }
+  & .titlebar-tab { color: #b1bbca; }
+  & .titlebar-tab:hover:not(.is-active) { background: #2a3039; color: #edf1f6; }
+  & .titlebar-tab.is-active, & .titlebar-tab-wrap.is-active .titlebar-tab { background: #252a32; border-color: #3a414c; color: #edf1f6; box-shadow: 0 1px 0 #252a32; }
+  & .titlebar-tab-close { color: #aab4c2; }
+  & .titlebar-tab-close:hover, & .titlebar-tab-add:hover { background: #363b46; color: #e9ecf4; }
+  & .titlebar-tab-add { color: #b1bbca; }
+  & .titlebar-tab:hover:not(.is-active) { color: #edf1f6; }
+}
+@media (max-width: 980px) {
+  :root:root .app-shell {
+    & .titlebar-brand { flex-basis: 178px; width: 178px; }
+    & .titlebar-center { display: none; }
+    & .titlebar-tab-wrap { flex-basis: 210px; }
+  }
+}
+@media (max-width: 680px) {
+  :root:root .app-shell {
+    & .titlebar { gap: 4px; }
+    & .titlebar-brand { flex-basis: 48px; width: 48px; gap: 0; }
+    & .titlebar-brand .brand-wordmark { display: none; }
+    & .titlebar-tabs { gap: 2px; }
+    & .titlebar-tab { flex-basis: 130px; padding-left: 9px; gap: 6px; }
+    & .titlebar-tab-wrap { flex-basis: 165px; min-width: 100px; }
+    & .titlebar-tab-label { font-size: 11px; }
+  }
+}
+@media (max-width: 520px) {
+  :root:root .app-shell {
+    & .titlebar-tab-main { flex-basis: 42px; padding: 0 10px; }
+    & .titlebar-tab-main .titlebar-tab-label { display: none; }
+    & .titlebar-tab-wrap { flex: 1 1 130px; min-width: 82px; }
+    & .titlebar-tab-wrap .titlebar-tab { padding-left: 8px; padding-right: 28px; }
+    & .window-controls button { width: 36px; }
+  }
+}
+
+
+/* Gentle browser-like transition into the persistent Edit PDF tab. */
+.persistent-edit-pdf.is-active { animation: pdf-editor-tab-enter 240ms cubic-bezier(.2,.75,.25,1) both; }
+@keyframes pdf-editor-tab-enter { from { opacity: 0; transform: translateY(7px) scale(.997); filter: blur(1px); } to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); } }
+.reduce-motion .persistent-edit-pdf.is-active { animation: none !important; }
+

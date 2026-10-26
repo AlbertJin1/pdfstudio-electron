@@ -4,7 +4,7 @@ const MONITOR_HOST = 'pdfstudio.shares.zrok.io';
 const CANONICAL_PREFIX = '/pdfstudio-monitor/api';
 const DIRECT_PUBLIC_PREFIX = '/pdfstudio-monitor/public/api';
 
-/** Only the two known deployment paths on the configured HTTPS Monitor host are trusted. */
+/** Only HTTPS URLs on the configured Monitor host and its API path are trusted. */
 function isPdfStudioMonitorApiUrl(value) {
   try {
     const url = value instanceof URL ? value : new URL(String(value));
@@ -20,9 +20,9 @@ function isPdfStudioMonitorApiUrl(value) {
 }
 
 /**
- * The Monitor normally rewrites /api to /public/api using .htaccess. Some hosts serve
- * the public/ directory directly and do not apply the root rewrite. In that case the
- * direct /public/api path is required. Keep both routes constrained to the same host.
+ * The gateway normally uses the /api rewrite. Some hosts expose public/ directly and do not
+ * apply the root rewrite. Try the equivalent /public/api gateway path as a fallback; never
+ * change the host or protocol.
  */
 function monitorApiUrlCandidates(value) {
   let url;

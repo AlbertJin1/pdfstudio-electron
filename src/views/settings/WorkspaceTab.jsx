@@ -6,8 +6,6 @@ export default function WorkspaceTab({ preferences, showInspector, setShowInspec
   return (
     <div className="settings-panel">
                     <div className="settings-panel-title"><span className="settings-symbol settings-symbol-blue"><SlidersHorizontal size={18}/></span><div><h2>Workspace behavior</h2><p>Control page tools and protect against accidental changes.</p></div></div>
-                    <SettingToggle title="Show page preview panel" description="Keep the selected-page preview and page properties visible on the right side of the workspace." checked={showInspector} onChange={setShowInspector}/>
-                    <div className="settings-divider"/>
                     <SettingToggle title="Confirm before deleting pages" description="Ask you to review the number of pages before removing them. Recommended for most users." checked={preferences.confirmDelete} onChange={(value) => setPreference('confirmDelete', value)}/>
                     <div className="settings-divider"/>
                     <SettingToggle title="Show user guide on startup" description="Open the interactive guide when PDF Studio starts. You can always reopen it with the ? button in the top bar." checked={!preferences.hideGuide} onChange={(value) => setPreference('hideGuide', !value)}/>

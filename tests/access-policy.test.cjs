@@ -66,29 +66,30 @@ assert.ok(blankReason.reason.length > 0, 'a lock always has an explanation');
 // ── fetchAccessPolicy with a fake fetch ──
 (async () => {
   const mk = (status, body, contentType = 'application/json') => async () => ({ ok: status >= 200 && status < 300, status, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) });
-  const args = { baseUrl: 'https://pdfstudio.shares.zrok.io/pdfstudio-monitor/api', candidatesFor: monitorApiUrlCandidates, apiKey: 'k', userAgent: 'PdfStudio/test', identity: { installId: ID, version: '3.0.1', hostname: 'PC-1', localIp: '10.0.0.2' } };
+  const args = { baseUrl: 'https://pdfstudio.shares.zrok.io/pdfstudio-monitor/api', candidatesFor: monitorApiUrlCandidates, userAgent: 'PdfStudio/test', identity: { installId: ID, version: '3.0.1', hostname: 'PC-1', localIp: '10.0.0.2' } };
 
   let seen;
   const ok = await policy.fetchAccessPolicy({ ...args, fetchImpl: async (url, init) => { seen = { url, init }; return mk(200, disabledBody)(); } });
   assert.equal(ok.ok, true);
   assert.equal(ok.policy.enabled, false);
   const u = new URL(seen.url);
-  assert.equal(u.pathname, '/pdfstudio-monitor/api/access.php');
+  assert.equal(u.pathname, '/pdfstudio-monitor/api/client-gateway.php');
+  assert.equal(u.searchParams.get('resource'), 'access');
   assert.equal(u.searchParams.get('app'), 'pdfstudio');
   assert.equal(u.searchParams.get('install_id'), ID);
   assert.equal(u.searchParams.get('hostname'), 'PC-1');
-  assert.equal(seen.init.headers['X-Api-Key'], 'k');
+  assert.equal(seen.init.headers['X-Api-Key'], undefined, 'the desktop client never sends the shared Monitor key');
 
   // canonical route 404 -> falls back to the direct /public/api alias
   const urls = [];
   const fallback = await policy.fetchAccessPolicy({ ...args, fetchImpl: async (url) => { urls.push(new URL(url).pathname); return urls.length === 1 ? mk(404, 'Not found')() : mk(200, enabledBody)(); } });
   assert.equal(fallback.ok, true);
-  assert.deepEqual(urls, ['/pdfstudio-monitor/api/access.php', '/pdfstudio-monitor/public/api/access.php']);
+  assert.deepEqual(urls, ['/pdfstudio-monitor/api/client-gateway.php', '/pdfstudio-monitor/public/api/client-gateway.php']);
 
   // tunnel HTML page with HTTP 200 is not a policy
   const html = await policy.fetchAccessPolicy({ ...args, fetchImpl: mk(200, '<html>warning</html>') });
   assert.equal(html.ok, false);
-  // 401 (wrong key) is a failure, not a lock
+  // 401 (gateway configuration/auth failure) is a failure, not a lock
   const unauthorized = await policy.fetchAccessPolicy({ ...args, fetchImpl: mk(401, { ok: false, error: 'Invalid API key.' }) });
   assert.equal(unauthorized.ok, false);
   assert.match(unauthorized.message, /Invalid API key/);
@@ -104,11 +105,11 @@ assert.ok(blankReason.reason.length > 0, 'a lock always has an explanation');
   const hooksDir = path.join(__dirname, '..', 'src', 'hooks');
   const hooks = fs.readdirSync(hooksDir).map((file) => fs.readFileSync(path.join(hooksDir, file), 'utf8')).join('\n');
   for (const channel of ['files:open', 'files:save', 'files:save-batch']) {
-    assert.match(main, new RegExp(`ipcMain\\.handle\\('${channel}'[^\\n]*\\n\\s*assertAccessAllowed\\(\\);`), `${channel} is refused by the main process while locked`);
+    assert.match(main, new RegExp(`handle\\('${channel}'[^\\n]*\\n\\s*assertAccessAllowed\\(\\);`), `${channel} is refused by the main process while locked`);
   }
   assert.match(main, /loadAccessCacheSync\(\);\s*createWindow\(\);\s*startAccessControl\(\);/, 'cached lock is in force before the first window exists');
-  assert.match(main, /ipcMain\.handle\('access:get-state'/);
-  assert.match(main, /ipcMain\.handle\('access:recheck'/);
+  assert.match(main, /handle\('access:get-state'/);
+  assert.match(main, /handle\('access:recheck'/);
   assert.match(preload, /getAccessState/);
   assert.match(preload, /onAccessState/);
   assert.match(hooks, /accessLockedRef\.current\) return;/, 'renderer paths (picker, drop, shortcuts) are guarded');

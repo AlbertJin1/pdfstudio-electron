@@ -1,10 +1,10 @@
-import { BookOpen, Layers3, ShieldCheck, FileOutput, MonitorDown } from 'lucide-react';
+import { BookOpen, Layers3, ShieldCheck, FileOutput, MonitorDown, Star } from 'lucide-react';
 import ActionButton from '../components/common/ActionButton.jsx';
 import Modal from '../components/common/Modal.jsx';
 
 export default function AboutModal({ appVersion, setMode, setSettingsTab, setModal }) {
   return (
-    <Modal title="About PDF Studio" wide onClose={() => setModal(null)} footer={<><ActionButton icon={MonitorDown} className="footer-lead" onClick={() => { setModal(null); setMode('settings'); setSettingsTab('updates'); }}>Updates &amp; downloads</ActionButton><ActionButton variant="primary" onClick={() => setModal(null)}>Done</ActionButton></>}>
+    <Modal title="About PDF Studio" wide onClose={() => setModal(null)} footer={<><ActionButton icon={Star} onClick={() => setModal({ type: 'review' })}>Review PDF Studio</ActionButton><ActionButton icon={MonitorDown} className="footer-lead" onClick={() => { setModal(null); setMode('settings'); setSettingsTab('updates'); }}>Updates &amp; downloads</ActionButton><ActionButton variant="primary" onClick={() => setModal(null)}>Done</ActionButton></>}>
       <div className="about-hero">
         <div className="about-brand-icon"><img src="./icons/pdf-studio.png" alt="" draggable="false" /></div>
         <div className="about-hero-copy">

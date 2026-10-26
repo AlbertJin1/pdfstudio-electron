@@ -3,7 +3,7 @@ import {
   AlignLeft, AlignRight, AlignStartHorizontal, AlignStartVertical, AlignVerticalSpaceBetween, Bold, BringToFront, ChevronLeft, ChevronRight,
   Circle, Copy, Strikethrough, Eraser, FileText, Frame, Grid3x3, Highlighter, ImagePlus, Italic, Lock, Magnet, Minus, MousePointer2, PenLine,
   Pencil, Redo2, Ruler, SendToBack, Signature, Square, Stamp, StickyNote, Trash2, Type, Underline as UnderlineIcon, Undo2, Unlock, ZoomIn, ZoomOut,
-  MoveHorizontal, Replace, Plus, X, Scan,
+  MoveHorizontal, Replace, Plus, X, Scan, PanelLeft, PanelRight,
 } from 'lucide-react';
 import { COMMON_FONTS, FONT_FAMILIES, TEXT_TYPES, findUnsupported } from '../../services/pdf/textMetrics.js';
 import { cx } from '../../utils/cx.js';
@@ -34,24 +34,29 @@ const SIZES = [6, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72];
 
 const Btn = ({ icon: Icon, label, active, ...rest }) => <button type="button" className={cx('ep-icon-btn', active && 'is-active')} title={label} aria-label={label} aria-pressed={active === undefined ? undefined : !!active} {...rest}><Icon size={16} /></button>;
 
-export function ToolRail({ tool, onTool }) {
+export function ToolRail({ tool, onTool, collapsed = false }) {
   const render = (list) => list.map(({ id, label, icon: Icon, hint, key }) => (
     <button type="button" key={id} className={cx('ep-tool', tool === id && 'is-active')} onClick={() => onTool(id)} title={`${hint}${key ? ` (${key})` : ''}`} aria-pressed={tool === id}><Icon size={17} /><span>{label}</span>{key && <kbd>{key}</kbd>}</button>
   ));
   return (
-    <aside className="ep-rail" aria-label="Editing tools">
+    <aside className={cx('ep-rail', collapsed && 'is-collapsed')} aria-label="Editing tools">
       <div className="ep-rail-title">Edit</div>{render(EDIT_TOOLS)}
       <div className="ep-rail-title">Mark up</div>{render(MARKUP_TOOLS)}
     </aside>
   );
 }
 
-export function DocBar({ fileName, dirty, pageNumber, pageCount, onPage, zoomPercent, zoomMode, onZoomStep, onZoomPreset, onFit, canUndo, canRedo, onUndo, onRedo, view, setView }) {
+export function DocBar({ fileName, dirty, pageNumber, pageCount, onPage, zoomPercent, zoomMode, onZoomStep, onZoomPreset, onFit, canUndo, canRedo, onUndo, onRedo, view, setView, panels, onTogglePanel }) {
   const presets = [25, 50, 75, 100, 125, 150, 200, 300, 400];
   const closest = presets.includes(zoomPercent) ? String(zoomPercent) : '';
   return (
     <div className="ep-docbar">
       <div className="ep-docname"><FileText size={15} /><span title={fileName}>{fileName}</span>{dirty && <em>Unsaved</em>}</div>
+      <div className="ep-group ep-panel-toggles" role="group" aria-label="Show or hide editor panels">
+        <Btn icon={PanelLeft} label={panels?.tools ? 'Collapse editing tools' : 'Expand editing tools'} active={!panels?.tools} onClick={() => onTogglePanel?.('tools')} />
+        <Btn icon={FileText} label={panels?.pages ? 'Collapse page thumbnails' : 'Show page thumbnails'} active={!panels?.pages} onClick={() => onTogglePanel?.('pages')} />
+        <Btn icon={PanelRight} label={panels?.properties ? 'Collapse properties panel' : 'Expand properties panel'} active={!panels?.properties} onClick={() => onTogglePanel?.('properties')} />
+      </div>
       <div className="ep-group">
         <Btn icon={ChevronLeft} label="Previous page" onClick={() => onPage(pageNumber - 1)} disabled={pageNumber <= 1} />
         <label className="ep-pagebox"><input aria-label="Current page" type="number" min={1} max={pageCount} value={pageNumber} onChange={(event) => onPage(Number(event.target.value))} /><span>/ {pageCount}</span></label>
@@ -156,7 +161,7 @@ export function SidePanel({ tab, setTab, unit, setUnit, selected, single, onPatc
               {single && ['highlight', 'whiteout', 'rect', 'ellipse', 'image', 'signature', 'imageedit'].includes(single.type) && <label className="ep-field-row">Opacity <b>{Math.round((single.opacity ?? 1) * 100)}%</b><input type="range" min="10" max="100" value={Math.round((single.opacity ?? (single.type === 'highlight' ? 0.34 : 1)) * 100)} onChange={(event) => onPatch({ opacity: Number(event.target.value) / 100 })} /></label>}
               {!single && tool === 'stamp' && <label className="ep-field-row">Stamp<select className="ep-select" value={stampText} onChange={(event) => setStampText(event.target.value)}>{STAMPS.map((s) => <option key={s}>{s}</option>)}</select></label>}
               {single?.type === 'imageedit' && <button type="button" className="ep-btn" onClick={onReplaceImage}><Replace size={14} /> Replace image</button>}
-              {single?.type === 'textedit' && <p className="ep-note">The original text is covered with the page colour and your text is drawn on top.</p>}
+              {single?.type === 'textedit' && <p className="ep-note">Text edits are overlaid on the original PDF. The editor samples the page background and preserves untouched PDF objects.</p>}
             </section>
           )}
           {selected.length > 0 && (

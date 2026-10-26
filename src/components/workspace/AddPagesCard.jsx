@@ -10,7 +10,7 @@ export default function AddPagesCard({ pagesRef, draggingPageId, dropCue, setDro
     }} onDragLeave={(event) => { event.currentTarget.classList.remove('page-add-hover'); setDropCue((cue) => cue?.id === '__end__' ? null : cue); }} onDrop={(event) => {
       const draggedId = event.dataTransfer?.getData('application/x-pdfstudio-page') || draggingPageId;
       event.currentTarget.classList.remove('page-add-hover');
-      if (draggedId && pagesRef.current.length) { event.preventDefault(); event.stopPropagation(); const lastPage = pagesRef.current[pagesRef.current.length - 1]; movePage(draggedId, lastPage.id, 'after'); }
+      if (draggedId && pagesRef.current.length) { event.preventDefault(); event.stopPropagation(); const lastPage = [...pagesRef.current].reverse().find((page) => page.id !== draggedId); if (lastPage) movePage(draggedId, lastPage.id, 'after'); }
       else if (event.dataTransfer?.files?.length) { event.preventDefault(); event.stopPropagation(); handleBrowserFiles([...event.dataTransfer.files]); }
       setDropCue(null);
     }} aria-label="Add PDF or image pages">

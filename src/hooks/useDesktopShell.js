@@ -6,7 +6,7 @@ export function useDesktopShell({ setModal, notify }) {
   const [readyUpdate, setReadyUpdate] = useState(null);
   const [applyingUpdate, setApplyingUpdate] = useState(false);
   const [maximized, setMaximized] = useState(false);
-  const [appVersion, setAppVersion] = useState('3.0.2');
+  const [appVersion, setAppVersion] = useState('3.0.3');
 
   useEffect(() => {
     window.pdfStudio?.version?.().then((version) => setAppVersion(version)).catch(() => {});

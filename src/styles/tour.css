@@ -98,6 +98,6 @@ html.dark .ctx-danger { color: #ff8a9b; }
 .reduce-motion .tour-progress span { animation-timing-function: linear; }
 
 /* ===== Keycap hint inside buttons (Ctrl + O) ===== */
-:root:root .app-shell .action-button .shortcut-hint { display: inline-flex; align-items: center; gap: 3px; margin: 0 -6px 0 6px; padding: 0; border: 0; background: none; opacity: 1; }
+:root:root .app-shell .action-button .shortcut-hint { display: inline-flex; align-items: center; gap: 3px; margin: 0 -2px 0 2px; padding: 0; border: 0; background: none; opacity: 1; flex: 0 0 auto; }
 :root:root .app-shell .action-button .shortcut-hint kbd { display: inline-grid; place-items: center; min-width: 22px; height: 20px; padding: 0 6px; border: 1px solid rgb(255 255 255 / .38); border-bottom-width: 2px; border-radius: 6px; background: rgb(255 255 255 / .16); color: inherit; font-family: var(--font-ui, system-ui, sans-serif); font-size: 11px; font-weight: 650; letter-spacing: .02em; line-height: 1; box-shadow: none; }
 :root:root .app-shell .action-button:not(.action-primary) .shortcut-hint kbd { border-color: var(--btn-border, #d8dde7); background: rgb(31 41 62 / .06); }

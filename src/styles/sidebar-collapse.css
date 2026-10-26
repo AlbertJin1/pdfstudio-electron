@@ -1,0 +1,62 @@
+/* Collapsible sidebar: a 68px icon rail with hover tooltips.
+   Loaded last and scoped with :root:root so it wins over the layered sidebar rules in index.css / ui-refresh.css. */
+
+:root:root .app-shell .sidebar { transition: width .2s cubic-bezier(.22, 1, .36, 1); }
+:root:root .app-shell.reduce-motion .sidebar { transition: none; }
+
+/* Toggle button, always the first row of the sidebar. */
+:root:root .app-shell .sidebar-toggle { --ib: 30px; margin-right: -4px; }
+:root:root .app-shell .sidebar-toggle-row { padding-right: 9px; }
+
+/* ---- Rail ---------------------------------------------------------------- */
+:root:root .app-shell .sidebar.is-collapsed { width: 68px; }
+:root:root .app-shell .sidebar.is-collapsed .sidebar-scroll { padding: 14px 10px; overflow-x: hidden; }
+
+/* Only the toggle remains from the section headings; the dividers keep the groups apart. */
+:root:root .app-shell .sidebar.is-collapsed .section-label:not(.sidebar-toggle-row) { display: none; }
+:root:root .app-shell .sidebar.is-collapsed .sidebar-toggle-row { justify-content: center; padding: 0; margin-bottom: 4px; }
+:root:root .app-shell .sidebar.is-collapsed .sidebar-toggle-row > span { display: none; }
+:root:root .app-shell .sidebar.is-collapsed .sidebar-toggle { margin: 0; --ib: 40px; }
+:root:root .app-shell .sidebar.is-collapsed .sidebar-divider { margin: 12px 8px; }
+
+:root:root .app-shell .sidebar.is-collapsed .nav-item { width: 44px; height: 44px; min-height: 44px; margin: 0 auto 4px; padding: 0; gap: 0; justify-content: center; }
+:root:root .app-shell .sidebar.is-collapsed .nav-item > span:not(.nav-active-indicator) { display: none; }
+:root:root .app-shell .sidebar.is-collapsed .nav-item svg { width: 19px; height: 19px; }
+:root:root .app-shell .sidebar.is-collapsed .nav-item.nav-active::before { left: -10px; }
+:root:root .app-shell .sidebar.is-collapsed .nav-item:hover { transform: none; }
+
+
+:root:root .app-shell .sidebar.is-collapsed .empty-docs-link { width: 44px; height: 44px; min-height: 44px; margin: 0 auto; padding: 0; justify-content: center; font-size: 0; }
+:root:root .app-shell .sidebar.is-collapsed .empty-docs-link span,
+:root:root .app-shell .sidebar.is-collapsed .empty-docs-link svg:last-child { display: none; }
+
+:root:root .app-shell .sidebar.is-collapsed .document-list { display: grid; gap: 6px; justify-items: center; }
+:root:root .app-shell .sidebar.is-collapsed .document-list-item { width: 44px; height: 44px; padding: 0; margin: 0 auto; justify-content: center; overflow: hidden; cursor: pointer; }
+:root:root .app-shell .sidebar.is-collapsed .document-list-item .file-type-mini { margin: 0; }
+:root:root .app-shell .sidebar.is-collapsed .document-label,
+:root:root .app-shell .sidebar.is-collapsed .document-remove { display: none; }
+
+:root:root .app-shell .sidebar.is-collapsed .quick-nav { width: 44px; height: 44px; min-height: 44px; margin: 0 auto 4px; padding: 0; justify-content: center; }
+:root:root .app-shell .sidebar.is-collapsed .quick-nav > span:not(.quick-icon) { display: none; }
+
+:root:root .app-shell .sidebar.is-collapsed .sidebar-footer { padding: 10px 8px; }
+:root:root .app-shell .sidebar.is-collapsed .privacy-card { justify-content: center; padding: 8px 0; }
+:root:root .app-shell .sidebar.is-collapsed .privacy-card > div:not(.privacy-icon),
+:root:root .app-shell .sidebar.is-collapsed .privacy-check { display: none; }
+:root:root .app-shell .sidebar.is-collapsed .account-row { display: flex; justify-content: center; gap: 0; min-height: 48px; padding: 6px 0; margin-top: 8px; }
+:root:root .app-shell .sidebar.is-collapsed .account-meta,
+:root:root .app-shell .sidebar.is-collapsed .account-settings { display: none; }
+
+/* ---- Tooltip (portaled to <body>, so it is styled independently of the theme scope) --------------- */
+.rail-tooltip {
+  position: fixed; z-index: 2147483000; transform: translateY(-50%);
+  display: inline-flex; align-items: center; gap: 8px; max-width: 260px;
+  padding: 6px 10px; border-radius: 8px; pointer-events: none;
+  background: #1f2433; color: #f4f6fb; box-shadow: 0 8px 24px -6px rgb(10 14 30 / .45), 0 0 0 1px rgb(255 255 255 / .06);
+  font: 600 12.5px/1.25 var(--font-ui, 'Inter Variable', 'Segoe UI', system-ui, sans-serif);
+  animation: rail-tip-in .12s ease-out both;
+}
+.rail-tooltip kbd { padding: 2px 5px; border-radius: 5px; background: rgb(255 255 255 / .14); font: inherit; font-size: 11px; font-weight: 600; color: #cfd5e6; }
+.rail-tooltip::before { content: ''; position: absolute; left: -4px; top: 50%; width: 8px; height: 8px; margin-top: -4px; transform: rotate(45deg); border-radius: 2px; background: inherit; }
+@keyframes rail-tip-in { from { opacity: 0; margin-left: -4px; } to { opacity: 1; margin-left: 0; } }
+@media (prefers-reduced-motion: reduce) { .rail-tooltip { animation: none; } }

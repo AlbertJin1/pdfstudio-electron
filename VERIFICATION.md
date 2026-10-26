@@ -96,3 +96,71 @@ Targeted mocked updater integration tests passed for Windows (legacy `action=lat
 - The last answer is cached in `monitor-access.json` (user-data folder) and loaded synchronously before the first window is created, so a disabled device stays locked after a restart or while the Monitor is unreachable. Network errors, 401/404/5xx and tunnel HTML pages never change the current decision; only a valid policy can lock or unlock.
 - Enforcement is in the main process: `files:open`, `files:save` and `files:save-batch` refuse while locked. The renderer shows a full-screen lock screen (administrator's reason, computer name, device id, who/when, offline note, "Check again", "Quit PDF Studio"), makes the application shell inert, and also guards the picker, drag-and-drop and shortcuts. Telemetry continues while locked so the administrator still sees the device.
 - Tests: `npm run test:access` (policy parsing, cache, back-off, fail-safe transitions, route fallback, wiring checks). Also verified end to end against the real Monitor code on PostgreSQL (new device enabled -> admin disables -> reinstall with a new id stays disabled -> admin enables), and the main process was exercised with a stubbed Electron (cached lock at startup, IPC refusals, live lock/unlock, monitor-down behaviour). A full GUI run requires building and launching the Electron package.
+
+## In-app Edit PDF tabs (2026-10-26)
+
+- Replaced the renderer's `editor:open` launch path with in-app mode navigation; the preload no longer exposes the separate-window `openEditor` method.
+- Added browser-style title-bar tabs (PDF Studio and Edit PDF), a plus button to open the editor, active-state indicators, and a close-tab action.
+- The Edit PDF route hides the standard application sidebar and secondary topbar to give the editor full workspace width while keeping the main title bar and minimize/maximize/close controls.
+- Added tab-title and dirty-state callbacks, a per-tab unsaved-edit confirmation, `Ctrl+W` support for closing the Edit PDF tab, and a main-window close guard for unsaved edits.
+- Added `public/editor-tabs-compat.js` and copied it into the prebuilt `dist` output so the previous renderer bundle can show an in-app tab instead of a detached editor window.
+- Validation: `node --check` passed for the compatibility script, preload, and main process; TypeScript JSX transpile diagnostics reported no syntax errors for `src/App.jsx`, `src/components/layout/TitleBar.jsx`, and `src/views/EditPdfView.jsx`; access policy and monitor telemetry regression tests passed.
+- Production Vite build not run: `node_modules/.bin/vite` was unavailable, offline npm install reported a missing cache entry, and the online npm install request timed out.
+
+
+## Edit tab and page-reordering UX update
+
+- The page-route `AnimatePresence` subtree is now not mounted while Edit PDF is active, preventing the Overview/Home view from remaining under the editor. The editor stays mounted in its own persistent panel so switching tabs preserves state.
+- Page reorder now shows a page thumbnail placeholder and a numbered destination slot before/after the hovered page, including an end-of-list slot. The destination number accounts for removing the dragged page from its original position.
+- The native drag source stays mounted but is removed from grid flow during drag; a live cloned page follows the cursor with direction- and speed-responsive tilt/sway.
+- Drop placement is determined from the pointer's actual side at release time to avoid stale drop-cue state. Dropping on Add Pages now moves the page after the last page other than itself.
+- JSX syntax checks passed for the touched files. `scripts/test-access-policy.cjs` and `scripts/test-monitor-telemetry.cjs` passed.
+- Full Vite build could not be run in this packaging environment because the archive's `node_modules/pdfjs-dist/package.json` and Vite executable are not installed; run `npm install` followed by `npm start` on the Windows development machine to verify the production build.
+
+
+## Page reorder lag optimization
+
+- Replaced native page `dragover` sorting with pointer-event tracking and requestAnimationFrame rendering.
+- Removed per-event CSS transition and box-shadow updates from the drag preview.
+- Memoized page cards and limited drop-cue state changes to actual destination changes.
+- Disabled Motion layout/hover animations while a reorder is active and removed placeholder spring animations during drag.
+- Checked JSX syntax for the modified workspace components with TypeScript's JSX parser.
+- `npm run test:access` passed: access-policy and Monitor telemetry regression tests.
+- A full Vite/Electron production build was not run in this environment because project dependencies are not installed locally.
+
+
+## Merge/export enhancement notes
+
+- Removed the redundant workspace Live Preview/Page Details inspector and the related Add text/Cover area toolbar shortcuts.
+- Export modal now offers per-page original sizing or fitted A3/A4/A5/Folio (8.5 × 13 in)/Letter/Legal sizes, preset/custom diagonal watermarks with angle/opacity/color controls, page numbers, AES-256 open-password protection, lossless QPDF compression, and explicit compact/smallest raster modes.
+- The original browser-worker integration triggered a TypeError because the package’s Node-oriented WASM runtime was being resolved through Vite. The current fix moves QPDF/WASM into `electron/pdf-toolkit-worker.mjs`, a dedicated Node worker thread, and exposes a constrained `files:save-finalized-pdf` IPC operation. The final output is saved by the main process, avoiding a second large buffer round-trip through the renderer.
+- Compact/smallest modes intentionally flatten page content to JPEG images; text selection, links, vector editability and form fields are not preserved in those modes.
+- A fresh Vite/Electron build was not run in this environment because dependencies are not present and package registry DNS is unavailable.
+
+
+## Workspace inspector removal and merge/export options (2026-10-27)
+
+- Removed the right-side Live Preview / Page Details inspector from the page workspace, making the page grid use the available width. Removed its Add text overlay and Cover area toolbar shortcuts; separate in-document editing features are unaffected.
+- Merge & export now supports preserved source page sizes or fitting pages to A3/A4/A5/Folio (8.5 × 13 in)/Letter/Legal, page numbers, diagonal preset/custom watermark with color/opacity/angle, optional AES-256 open-password protection, and a lossless QPDF optimization pass.
+- Added explicit Compact and Smallest JPEG-raster modes. The UI warns that they flatten text, links, annotations, vectors and form fields into pixels.
+- QPDF WebAssembly password/compression operations run in a Node worker thread so they do not execute on the Electron main or renderer UI thread. `pdfstudio@0.4.0` remains a production dependency and must be installed by `npm install` before building.
+- Validation: TypeScript JSX parser checked all 54 JSX/TSX files with zero syntax errors; `node --check` passed for compose/export/worker files; package.json and package-lock dependency entries agree; access-policy and Monitor telemetry regression tests passed. ZIP integrity is verified after packaging.
+- Build caveat: a full Vite/Electron production build and PDF round-trip tests could not be run here because package registry access is unavailable and dependencies are not installed in this environment. On Windows, update the source files, run `npm install`, then `npm start` to rebuild and validate the live app.
+
+
+## Folio sizing and export-worker correction (2026-10-27)
+
+- Added Folio paper size to Merge & Export: 8.5 × 13 inches, represented as 612 × 936 PDF points.
+- Fixed export-finalization routing: the Vite renderer no longer imports `pdfstudio` into a browser worker. This removes the Node `node:module` / `node:fs/promises` externalization path that could surface as `TypeError: t is not a function` in the renderer worker callback.
+- Added `electron/pdf-toolkit-worker.mjs`, which runs `createPdfToolkit()` in a dedicated Node worker thread, where the package can use Node's filesystem and module resolution correctly. Compression and AES-256 encryption remain off the UI thread.
+- Added allow-listed `saveFinalizedPdf` preload bridge and main-process `files:save-finalized-pdf` handler. It opens the native save dialog first, processes only when requested, writes only after successful finalization, enforces the existing 2 GB file-size cap, and avoids returning the finished PDF to the renderer before sending it back for saving.
+- Source validation: `node --check` passed for `electron/main.cjs`, `electron/preload.cjs`, `electron/pdf-toolkit-worker.mjs`, `src/services/pdf/compose.js`, and `src/hooks/useExporters.js`; TypeScript's parser passed on `src/modals/ExportModal.jsx` and `src/hooks/useExporters.js`.
+- Access-policy and Monitor telemetry regression tests passed. Confirmed there are no remaining renderer-side imports of `pdfstudio`.
+- The full Vite build and real QPDF password/compression round-trip were not executable in this packaging environment because project dependencies are not installed locally. Verify `npm start` and test both a lossless export and an AES-256 password export on Windows.
+
+
+## App review integration note
+- Review prompt logic and persistent per-installation state were added to the Electron app, without changing the Monitor project.
+- The uploaded Monitor 2.4.18 gateway explicitly rejects `review` as a telemetry event; therefore its server-side submission cannot succeed through that gateway until review forwarding is enabled there. Failed submissions are not marked as complete.
+- PDF save IPC now opens the destination folder after a successful save.
+- Export watermark now uses bold Helvetica, uppercase text, a page-diagonal-based font size, and a higher-opacity default.

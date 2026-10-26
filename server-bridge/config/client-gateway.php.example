@@ -1,0 +1,9 @@
+<?php
+declare(strict_types=1);
+
+/** Optional server-only route override. The gateway uses the Monitor's canonical API route by default.
+ * Do not put the shared API key here: the gateway reads cfg('api_key') from the Monitor configuration.
+ */
+return [
+    'upstream_api_base' => (string) (getenv('PDFSTUDIO_MONITOR_API_BASE') ?: 'https://pdfstudio.shares.zrok.io/pdfstudio-monitor/api'),
+];

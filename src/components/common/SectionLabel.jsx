@@ -1,1 +1,1 @@
-export default function SectionLabel({ children, trailing }) { return <div className="section-label"><span>{children}</span>{trailing}</div>; }
+export default function SectionLabel({ children, trailing, className = '' }) { return <div className={className ? `section-label ${className}` : 'section-label'}><span>{children}</span>{trailing}</div>; }

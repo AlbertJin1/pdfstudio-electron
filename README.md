@@ -1,6 +1,6 @@
 # PDF Studio — Windows desktop app
 
-**PDF Studio 3.0.2** is an Electron desktop rebuild of the original PDF Studio, for **Windows only**. The new app uses Electron + Node.js for native desktop capabilities, React for the interface, Tailwind CSS for styling utilities, PDF.js for PDF rendering, and `pdf-lib` for page composition and export.
+**PDF Studio 3.0.3** is an Electron desktop rebuild of the original PDF Studio, for **Windows only**. The new app uses Electron + Node.js for native desktop capabilities, React for the interface, Tailwind CSS for styling utilities, PDF.js for PDF rendering, and `pdf-lib` for page composition and export.
 
 It can be run as a desktop app during development and is packaged as a single no-install Windows portable `.exe`. There are no macOS or Linux builds.
 
@@ -51,12 +51,13 @@ If you ever need to launch Electron directly without rebuilding, use `npx electr
 
 ### PDF and conversion actions
 
-- Dedicated Edit PDF workspace with PDF.js page preview, page navigation, zoom, and tools for text, typed/drawn signatures, images, highlight, underline, strikeout, freehand ink, rectangles, ovals, lines, sticky notes, status stamps, and whiteout.
+- Dedicated Edit PDF workspace with PDF.js page preview, page navigation, zoom, independent collapsible tools/page-thumbnail/properties panels, and tools for existing-text edits, new text, signatures, images, highlight, underline, strikeout, freehand ink, rectangles, ovals, lines, sticky notes, status stamps, and whiteout.
 - Select, move, resize, recolor, restyle, and delete placed items; Ctrl+Z / Ctrl+Y undo and redo editor changes. Save As writes a new edited PDF and leaves the original file unchanged.
 - Combine multiple PDFs and images into a single PDF.
 - Export the current page order, selected pages, rotations and added overlay objects.
 - Export page ranges as separate PDFs, split into single-page PDFs, or split into groups of N pages.
-- Add text overlays, optional page numbers, and text watermarks.
+- Merge/export options: preserve each page size or fit all pages to A3/A4/A5/Folio (8.5 × 13 in)/Letter/Legal; diagonal DRAFT, CONFIDENTIAL, INTERNAL USE ONLY or custom watermarks; optional AES-256 open-password protection; lossless QPDF optimization or explicitly lossy compact raster export.
+- Export applies page numbers and configurable diagonal text watermarks on every page; legacy overlay objects already present in the workspace are also included.
 - Export PDF pages to PNG or JPEG.
 - Convert selectable PDF text to editable DOCX paragraphs with page breaks.
 - Import `.docx` by converting its readable content to PDF in a hidden Electron print window; layout fidelity depends on the source document.
@@ -69,7 +70,7 @@ If you ever need to launch Electron directly without rebuilding, use `npx electr
 - The About dialog presents the app purpose, key capabilities, local-processing model, platform, version, and a distinct developer signature for **Jessie Albert Regualos**.
 - Appearance settings include six accent presets (Violet, Ocean blue, Teal, Emerald, Rose, Amber), light/dark mode, Standard/Large/Extra large text, compact/comfortable density, high contrast, and reduced motion. Preferences persist locally.
 - Keyboard-shortcut help renders Ctrl keycaps with accessible screen-reader labels.
-- Motion for React (the maintained successor to Framer Motion) powers page transitions, settings-tab changes, shared active-navigation movement, staggered dashboard cards, page/document list layout changes, dialog enter/exit, inspector panels, loading overlays, toast notifications, and update-status/progress transitions. Buttons and tool cards use spring-based hover and press feedback. Animations are intentionally short and restrained rather than decorative. The in-app Reduce motion option and the operating-system accessibility preference are respected.
+- Motion for React (the maintained successor to Framer Motion) powers page transitions, settings-tab changes, shared active-navigation movement, staggered dashboard cards, page/document list layout changes, dialog enter/exit, editor properties panels, loading overlays, toast notifications, and update-status/progress transitions. Buttons and tool cards use spring-based hover and press feedback. Animations are intentionally short and restrained rather than decorative. The in-app Reduce motion option and the operating-system accessibility preference are respected.
 - The Updates & downloads center silently checks for updates after launch, downloads new packages in the background, verifies the published SHA-256, and offers Update now / Update later when a package is ready. The service URL and credentials remain in the Electron main process and are not shown in the UI.
 - Desktop usage reporting starts as soon as Electron is ready and sends `open`, `heartbeat`, and `close` events to Universal App Monitor. It supports both `/pdfstudio-monitor/api/` and `/pdfstudio-monitor/public/api/` deployments, validates the JSON acknowledgement, retries transient network failures, and writes rejected-report details to `monitor-usage.log` in the app user-data folder.
 
@@ -81,12 +82,13 @@ The renderer uses the `motion` package with imports from `motion/react`. This is
 
 This is a functional Electron rebuild and does not include every feature of the earlier C# app.
 
-- The Edit PDF tools add content overlays to the existing page. The current editor does not rewrite embedded PDF text objects in-place; to visually replace wording, use Whiteout and then add new text.
-- Whiteout is a visual cover, **not secure/certified redaction**. The covered text or images remain in the underlying PDF content and may still be extractable. Do not rely on it to remove confidential data.
+- Existing PDF text edits are applied as carefully aligned cover-and-replacement overlays. The source PDF is never mutated, and untouched page objects are preserved, but the editor does not yet rewrite arbitrary embedded PDF text operators in-place. The editor measures source text runs, keeps selection bounds tied to the source glyph box, applies the detected bold/italic flags in the live input, and resizes the replacement box to fit changed text. Complex backgrounds, transparency, rotated/skewed text, unusual encodings, and heavily subsetted fonts may still need manual review after export.
+- Whiteout and existing-text cover patches are visual overlays, **not secure/certified redaction**. Covered text or images can remain in the underlying PDF content and may still be extractable. Do not rely on them to remove confidential data.
+- If Arial, Calibri, or Times New Roman cannot be found locally, the desktop editor may silently cache an SIL Open Font License metric-compatible substitute (Arimo, Carlito, or Tinos) under the per-user PDF Studio data folder, without installing a Windows font. Downloading requires an internet connection; if unavailable, the editor falls back to a built-in PDF font. Other missing font families are not downloaded from arbitrary sites.
 - PDF-to-Word exports selectable text into regular DOCX paragraphs with page breaks. It does not yet match the legacy app’s advanced table reconstruction, image placement, and OCR fallback; scanned PDFs without text layers may produce little or no text.
 - Word-to-PDF is based on DOCX-to-HTML conversion and Chromium printing. Documents with complex layouts, custom fonts, or special floating objects may not look exactly the same as in Word.
-- PDF export uses object streams, but does not promise a smaller file size; it does not yet expose a dedicated image-downsampling compression engine.
-- PDF encryption on output, permission restrictions, true redaction, signature library management, OCR customization, device access control, and the full legacy editor are not migrated in this release. The Electron app now uses the legacy Monitor for anonymous session reporting and verified staged updates. Update installation is explicitly user-approved; it is never run automatically without the Update now action.
+- PDF export offers no additional compression, lossless QPDF stream optimization, and two explicitly lossy compact modes. Lossless compression may not shrink image-heavy PDFs. Compact modes rasterize page content to JPEG and can reduce file size, but text, links, annotations, vector graphics and form fields are no longer individually selectable/editable. Always compare output quality before sharing.
+- Merge/export now supports optional AES-256 open-password encryption using QPDF WebAssembly inside a dedicated Electron Node worker thread, plus lossless PDF stream optimization. Separate owner-password and granular print/copy/edit permission controls are not exposed in the UI yet. Secure/certified redaction, signature library management, OCR customization, device access control, and the full legacy editor are not migrated in this release. QPDF processing runs off the Electron UI thread and saves the finalized PDF directly from the main process to avoid sending the large output buffer through the renderer twice. The Electron app uses the legacy Monitor for session reporting and verified staged updates. Update installation is explicitly user-approved; it is never run automatically without the Update now action.
 - Some encrypted or malformed PDFs may be exported as page images if PDF.js can render them but `pdf-lib` cannot copy their original structure. Those output pages will not retain selectable text.
 - TIFF/GIF/WebP support for image embedding relies on Chromium decoding the imported image; unsupported inputs should be converted to PNG/JPEG first.
 
@@ -97,6 +99,7 @@ PDFStudio-Windows/
 ├── electron/                   # Main process (Node / Electron)
 │   ├── main.cjs                # Window, dialogs, local file operations, DOCX → PDF, updater
 │   ├── preload.cjs             # Small allow-listed IPC surface (context isolation enabled)
+│   ├── pdf-toolkit-worker.mjs  # QPDF/WASM compression and AES-256 encryption off the UI thread
 │   └── services/
 │       ├── access-policy.cjs   # Monitor enable / disable decision logic
 │       └── monitor-api.cjs     # Monitor endpoint validation helpers
@@ -156,9 +159,9 @@ The updater uses a hardcoded Monitor API endpoint matching the legacy C# client.
 
 `https://pdfstudio.shares.zrok.io/pdfstudio-monitor/api`
 
-Like `Services/UsageTracker.cs` / `Services/UpdateService.cs` in the legacy client, Electron requests `GET /update.php?action=latest&version=<current-version>` with the `X-Api-Key` header and `ngrok-skip-browser-warning: 1`. The API key is intentionally the matching client-side key configured as `api_key` in the Monitor's `config/config.php`; changing the Monitor key requires updating both clients. The Electron main process only sends that header to the configured HTTPS Monitor API path and does not forward it to unrelated redirect hosts.
+Electron communicates with the Monitor through the server-side gateway in `server-bridge/public/api/client-gateway.php`. The desktop source and packaged EXE do not contain, load, decrypt, or send the shared Monitor API key. The gateway injects the server-side `X-Api-Key` only when proxying a small allowlist of Monitor operations; it also validates requests, enforces size/method restrictions and basic rate limits, verifies HTTPS, and never follows upstream redirects with the server key attached.
 
-Windows uses the existing legacy-compatible `action=latest` / `action=download` release channel. The update UI shows only generic checking, download, and readiness states. It does not display the endpoint, API key, server link, or external release-page URL.
+**Deployment requirement:** before using remote updates, access control, or telemetry with this build, deploy Monitor 2.4.18 (which includes the updated gateway) to the existing Monitor installation. The gateway uses the same server-side `MONITOR_API_KEY` as Monitor's protected APIs and defaults to the canonical HTTPS API route; no separate gateway config file is required. Full instructions are in [`server-bridge/README.md`](server-bridge/README.md). Until the gateway is deployed/configured, local PDF features continue to work, but Monitor-backed features will report that the gateway is unavailable. Windows still uses the existing legacy-compatible `action=latest` / `action=download` release behavior through the gateway. Update UI messages do not expose the API key or external release URL.
 
 New packages are downloaded to the app’s private update-staging directory in the background, verified against the published SHA-256, and persisted across restarts. When a verified package is ready, the user is prompted to choose Update now or Update later. The package is never executed without the user choosing Update now.
 ## Installation and application icon
@@ -172,3 +175,25 @@ The desktop app icon is a hand-authored vector asset at `public/icons/pdf-studio
 #### Renderer app-icon asset paths
 
 The titlebar and About dialog refer to `./icons/pdf-studio.png` relative to `dist/index.html`, and favicon links are also relative. This is intentional: packaged Electron windows load the renderer with `file://`, where root-absolute `/icons/...` paths can resolve outside the app bundle. Vite's `base: './'` and the relative paths keep these icons working in development and packaged builds.
+
+## Edit PDF as an in-app tab
+
+The Edit PDF workspace now opens as a browser-style tab in the main frameless title bar rather than creating a second Electron window. The Edit PDF tab can be switched to/from the main workspace, shows the current PDF filename, has a dedicated close control, and asks before discarding unsaved edits. While Edit PDF is active, the app's outer navigation/sidebar is hidden so the editor uses the available workspace width; the shared title bar and native-feeling window controls remain visible. `public/editor-tabs-compat.js` is a no-op when the current React title bar is present and provides a compatibility tab strip for the bundled `dist` renderer.
+
+To create a clean distributable on Windows, install dependencies from this project folder and run `npm run build:win`. The supplied patch archive contains the updated source and compatibility runtime. A fresh Vite production rebuild could not be run in the current editing environment because package dependencies were unavailable locally and the npm registry request timed out; run the build command after `npm ci` on a connected build machine before publishing a release.
+
+
+### Page reorder performance (3.0.3 patch)
+
+Page reordering uses pointer events and requestAnimationFrame rather than the browser's throttled HTML5 dragover loop. The floating preview updates only through compositor-friendly transforms; page tiles are memoized, Motion layout animation is disabled during active reorder, and the destination placeholder stays static while dragging. Drag from a page card (or its grip); controls on the tile remain clickable.
+
+
+## Review prompt and submission integration
+
+- PDF Studio tracks cumulative active usage in `%AppData%\PDF Studio\review-state.json`; after 30 minutes of usage it considers a randomized review prompt. Prompt history and the user's choice to snooze or stop prompts are stored per Windows user installation. Successful submission suppresses future prompts. The About dialog also provides a manual `Review PDF Studio` action.
+- Review payloads use the existing server-side Monitor gateway; the app does not contain the Monitor API key and does not modify the Monitor project.
+- **Known server integration constraint:** the supplied Monitor 2.4.18 `public/api/client-gateway.php` currently permits only `open`, `heartbeat`, and `close` for the `telemetry` resource, while `public/api/index.php` already supports the `review` event. As a result, review submission through this gateway returns `Unsupported telemetry event` until the deployed gateway forwards the existing review event. The app will show the rejection and will not falsely record the review as submitted. The Monitor source/ZIP has intentionally been left unchanged per request.
+
+## Review prompt and offline submission
+
+PDF Studio saves pending review submissions in a Windows-user-encrypted local outbox and retries delivery automatically with backoff. A pending or server-acknowledged review suppresses future automatic review prompts. See [Review offline queue](docs/REVIEW-OFFLINE-QUEUE.md) for persistence, privacy, recovery behavior, and the current Monitor gateway compatibility requirement.

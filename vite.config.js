@@ -9,6 +9,12 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: false,
+    // Electron 45 ships a current Chromium, so no legacy transpilation or polyfills are needed.
+    target: 'chrome140',
+    cssMinify: true,
+    reportCompressedSize: false,
+    // fontkit and the PDF engines are lazy chunks that load on demand, so their size is not a startup cost.
+    chunkSizeWarningLimit: 800,
     // Keep the default 500 kB warning meaningful: heavyweight document operations are
     // lazy-loaded, while UI libraries are split into stable cacheable vendor chunks.
     rolldownOptions: {
@@ -42,7 +48,6 @@ export default defineConfig({
               name: 'pdf-lib-vendor',
               test: /node_modules[\\/]pdf-lib(?:[\\/]|$)/,
               minSize: 20_000,
-              maxSize: 450_000,
               priority: 17,
             },
             {

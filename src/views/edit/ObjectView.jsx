@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef } from 'react';
-import { TEXT_TYPES, resolveText } from '../../services/pdf/textMetrics.js';
+import { TEXT_TYPES, layoutItem, resolveText } from '../../services/pdf/textMetrics.js';
 import { cx } from '../../utils/cx.js';
 
 const ALL_HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
@@ -25,14 +25,17 @@ function Strokes({ item, scale }) {
 function EditableText({ item, scale, editing, onTextChange, onFinish, onFormatKey }) {
   const ref = useRef(null);
   const t = resolveText(item);
+  const textLayout = layoutItem(item);
   useEffect(() => {
     if (!editing || !ref.current) return;
     ref.current.focus();
+    // Editing an existing PDF text object should replace the text on first typing, not silently append.
+    // The user can click at a specific caret position or press an arrow key to make a partial edit.
     const end = ref.current.value.length;
-    ref.current.setSelectionRange(end, end);
+    ref.current.setSelectionRange(0, end);
   }, [editing]);
   const style = {
-    fontFamily: t.cssFamily, fontSize: `${t.size * scale}px`, lineHeight: `${t.size * t.lineHeight * scale}px`,
+    fontFamily: t.cssFamily, fontSize: `${t.size * scale}px`, lineHeight: `${t.size * t.lineHeight * scale}px`, minHeight: `${Math.max(Number(item.h) || 0, textLayout.autoH) * scale}px`,
     fontWeight: t.cssBold ? 700 : 400, fontStyle: t.cssItalic ? 'italic' : 'normal', textAlign: t.align, textDecoration: [t.underline && 'underline', t.strike && 'line-through'].filter(Boolean).join(' ') || 'none', fontSynthesis: 'none',
     padding: `${t.pad * scale}px`, color: item.color || '#000',
     whiteSpace: t.reflow ? 'pre-wrap' : 'pre', overflowWrap: t.reflow ? 'anywhere' : 'normal',

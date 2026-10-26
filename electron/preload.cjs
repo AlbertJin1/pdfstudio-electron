@@ -1,14 +1,19 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('pdfStudio', Object.freeze({
+  notifyReady: () => ipcRenderer.invoke('app:renderer-ready'),
   openFiles: (options) => ipcRenderer.invoke('files:open', options),
-  openEditor: (payload) => ipcRenderer.invoke('editor:open', payload),
   getEditorInit: () => ipcRenderer.invoke('editor:init'),
   closeEditor: () => ipcRenderer.invoke('editor:close'),
   setEditorTitle: (title) => ipcRenderer.invoke('editor:set-title', title),
   findFont: (query) => ipcRenderer.invoke('fonts:find', query),
   saveFile: (payload) => ipcRenderer.invoke('files:save', payload),
+  saveFinalizedPdf: (payload) => ipcRenderer.invoke('files:save-finalized-pdf', payload),
   saveBatch: (files) => ipcRenderer.invoke('files:save-batch', files),
+  maybePromptReview: () => ipcRenderer.invoke('review:maybe-prompt'),
+  markReviewPromptShown: () => ipcRenderer.invoke('review:prompt-shown'),
+  deferReview: (choice) => ipcRenderer.invoke('review:defer', choice),
+  submitReview: (payload) => ipcRenderer.invoke('review:submit', payload),
   getAccessState: () => ipcRenderer.invoke('access:get-state'),
   recheckAccess: () => ipcRenderer.invoke('access:recheck'),
   onAccessState: (callback) => {

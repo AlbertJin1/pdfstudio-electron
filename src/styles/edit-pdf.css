@@ -28,9 +28,9 @@
 .ep-empty-points { display: flex; gap: 18px; color: var(--muted); font-size: 12px; }
 .ep-empty-points span { display: inline-flex; align-items: center; gap: 6px; }
 
-.ep-shell { display: grid; grid-template-columns: 148px 96px minmax(0, 1fr) 286px; flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.ep-shell { --ep-tools-width: 148px; --ep-pages-width: 96px; --ep-properties-width: 286px; display: grid; grid-template-columns: var(--ep-tools-width) var(--ep-pages-width) minmax(0, 1fr) var(--ep-properties-width); flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
 .ep-rail, .ep-pages, .ep-side { display: flex; flex-direction: column; min-height: 0; background: var(--surface); }
-.ep-rail { padding: 8px; gap: 2px; overflow-y: auto; border-right: 1px solid var(--line); }
+.ep-rail { padding: 8px; gap: 2px; overflow-y: auto; border-right: 1px solid var(--line); min-width: 0; transition: padding .16s ease; }
 .ep-rail-title { padding: 9px 9px 4px; color: var(--muted); font-size: 11.5px; font-weight: 650; }
 .ep-tool { display: flex; align-items: center; gap: 9px; min-height: 34px; padding: 0 9px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-soft); font-size: 12.5px; text-align: left; }
 .ep-tool span { flex: 1; min-width: 0; white-space: nowrap; }
@@ -50,6 +50,9 @@
 
 .ep-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .ep-docbar, .ep-formatbar { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; padding: 5px 10px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.ep-panel-toggles { padding-right: 8px; border-right: 1px solid var(--line); }
+.ep-docbar { min-height: 44px; }
+.ep-formatbar { min-height: 42px; }
 .ep-docname { display: flex; align-items: center; gap: 7px; min-width: 0; max-width: 200px; font-size: 12.5px; font-weight: 600; }
 .ep-docname span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ep-docname em { padding: 1px 6px; border-radius: 8px; background: #fff3d6; color: #8a5a00; font-size: 10.5px; font-style: normal; }
@@ -185,10 +188,37 @@
 .ep-inline-field input { width: 38px; height: 28px; padding: 2px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); }
 .ep-signature-canvas { width: 100%; aspect-ratio: 680 / 220; border: 1px dashed var(--line-strong); border-radius: 10px; background: repeating-linear-gradient(transparent 0 calc(100% - 1px), var(--line) calc(100% - 1px)) , var(--surface-alt); touch-action: none; cursor: crosshair; }
 
-@media (max-width: 1280px) { .ep-shell { grid-template-columns: 132px 84px minmax(0, 1fr) 250px; } .ep-header p { display: none; } }
-@media (max-width: 1040px) { .ep-shell { grid-template-columns: 120px minmax(0, 1fr) 240px; } .ep-pages { display: none; } }
-@media (max-width: 800px) { .ep-view { overflow: auto; padding: 10px; } .ep-shell { display: flex; flex-direction: column; overflow: visible; } .ep-canvas-area { min-height: 480px; } .ep-rail { flex-direction: row; overflow-x: auto; } }
+@media (max-width: 1280px) { .ep-shell { --ep-tools-width: 132px; --ep-pages-width: 84px; --ep-properties-width: 250px; } .ep-header p { display: none; } }
+@media (max-width: 1040px) { .ep-shell { --ep-tools-width: 120px; --ep-pages-width: 0px; --ep-properties-width: 240px; } .ep-pages { display: none; } .ep-shell.is-pages-open { --ep-pages-width: 84px; } .ep-shell.is-pages-open > .ep-pages { display: flex; } }
+@media (max-width: 800px) { .ep-view { overflow: auto; padding: 10px; } .ep-shell { display: flex; flex-direction: column; overflow: visible; } .ep-canvas-area { min-height: 480px; } .ep-rail { flex-direction: row; overflow-x: auto; } .ep-pages { max-height: 180px; } .ep-pages-list { flex-direction: row; } .ep-page-btn { min-width: 72px; } }
 @media (prefers-reduced-motion: reduce) { .ep-view * { transition: none !important; } }
+
+
+/* Independent panel collapse controls for the dedicated Edit PDF window. */
+.ep-shell.is-tools-collapsed { --ep-tools-width: 54px; }
+.ep-shell.is-pages-collapsed { --ep-pages-width: 0px; }
+.ep-shell.is-pages-collapsed > .ep-pages { display: none !important; }
+.ep-shell.is-properties-collapsed { --ep-properties-width: 0px; }
+.ep-shell.is-properties-collapsed > .ep-side { display: none !important; }
+.ep-shell.is-tools-collapsed > .ep-rail { padding: 8px 5px; align-items: stretch; }
+.ep-shell.is-tools-collapsed .ep-rail-title,
+.ep-shell.is-tools-collapsed .ep-tool span,
+.ep-shell.is-tools-collapsed .ep-tool kbd { display: none; }
+.ep-shell.is-tools-collapsed .ep-tool { justify-content: center; padding: 0; min-width: 0; }
+.ep-panel-toggles .ep-icon-btn { width: 28px; height: 28px; }
+.ep-panel-toggles .ep-icon-btn:focus-visible,
+.ep-icon-btn:focus-visible,
+.ep-tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (max-width: 1040px) {
+  .ep-shell.is-pages-open:not(.is-pages-collapsed) { --ep-pages-width: 84px; }
+  .ep-shell.is-pages-open:not(.is-pages-collapsed) > .ep-pages { display: flex; }
+}
+@media (max-width: 800px) {
+  .ep-shell.is-tools-collapsed > .ep-rail { flex-direction: row; }
+  .ep-shell.is-tools-collapsed .ep-tool { min-width: 40px; }
+  .ep-shell.is-pages-collapsed > .ep-pages,
+  .ep-shell.is-properties-collapsed > .ep-side { display: none !important; }
+}
 
 /* Stand-alone Edit PDF window */
 .ep-window { height: 100vh; width: 100vw; }

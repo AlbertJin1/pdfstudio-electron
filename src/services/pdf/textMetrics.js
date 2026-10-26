@@ -39,15 +39,15 @@ export function familyFromName(real = '') {
 
 const quote = (name) => `"${String(name).replace(/"/g, '')}"`;
 
-/** Resolve the CSS font stack and style flags for an item. A font that pdf.js loaded from the PDF already has its own weight and slant. */
+/** Resolve the preview font. PDF.js's fontRef (for example `g_d0_f1`) is an internal object id,
+ * not a CSS family name; treating it as one used to suppress bold/italic and silently render regular text. */
 export function cssFontOf(item, t) {
   const base = FONT_FAMILIES[t.family] || FONT_FAMILIES.helvetica;
-  const sameAsOriginal = !!item.fontRef && !!t.bold === !!item.origBold && !!t.italic === !!item.origItalic;
   const stack = [];
-  if (sameAsOriginal) stack.push(quote(item.fontRef));
-  if (item.fontName) stack.push(quote(item.fontName));
+  // Only a real family name belongs in CSS. Never use PDF.js's synthetic fontRef as a browser family.
+  if (item.fontName && !/^g_[a-z0-9]+_f\d+$/i.test(item.fontName)) stack.push(quote(item.fontName));
   stack.push(base.css);
-  return { cssFamily: stack.join(', '), cssBold: sameAsOriginal ? false : t.bold, cssItalic: sameAsOriginal ? false : t.italic };
+  return { cssFamily: stack.join(', '), cssBold: !!t.bold, cssItalic: !!t.italic };
 }
 
 export function textWidth(text, style, size) {

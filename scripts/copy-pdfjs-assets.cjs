@@ -12,6 +12,15 @@ if (!fs.existsSync(packageRoot)) {
   process.exit(0);
 }
 
+// Skip the copy when the installed pdfjs-dist version was already prepared (saves seconds on every start/build).
+const pdfjsVersion = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8')).version;
+const stampFile = path.join(destinationRoot, '.prepared-version');
+const complete = fs.existsSync(path.join(destinationRoot, workerFile)) && folders.some((f) => fs.existsSync(path.join(destinationRoot, f)));
+if (complete && fs.existsSync(stampFile) && fs.readFileSync(stampFile, 'utf8').trim() === pdfjsVersion && !process.argv.includes('--force')) {
+  console.log(`[pdf-studio] PDF.js ${pdfjsVersion} assets are up to date.`);
+  process.exit(0);
+}
+
 fs.mkdirSync(destinationRoot, { recursive: true });
 let copied = 0;
 for (const folder of folders) {
@@ -32,4 +41,5 @@ if (!fs.existsSync(workerSource)) {
   fs.copyFileSync(workerSource, path.join(destinationRoot, workerFile));
   console.log(`[pdf-studio] Copied PDF.js worker to public/pdfjs/${workerFile}.`);
 }
+if (!process.exitCode) fs.writeFileSync(stampFile, pdfjsVersion);
 console.log(`[pdf-studio] Prepared ${copied} PDF.js runtime asset folders in public/pdfjs.`);

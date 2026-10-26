@@ -1,5 +1,5 @@
 import { normalizeBytes } from '../../utils/files.js';
-import { TEXT_TYPES, baselineOf, isEncodable, layoutItem } from './textMetrics.js';
+import { TEXT_TYPES, baselineOf, findUnsupported, isEncodable, layoutItem } from './textMetrics.js';
 
 const SAFE_COLOR = '#202939';
 const REPLACEMENTS = { '\u2212': '-', '\u00a0': ' ', '\u2022': '\u2022', '\u2192': '->', '\u2190': '<-', '\u2713': 'v', '\u2714': 'v', '\u2610': '[ ]' };
@@ -42,25 +42,53 @@ export async function exportEditedPdf(sourceBytes, pdfJsDocument, annotationsByP
   };
   const imageCache = new Map();
 
-  // Real fonts: when the document's font is installed, embed that exact font so edited text looks identical.
+  // Embed an original embedded font where available. If it is a PDF subset and lacks newly
+  // typed characters, fall back to an installed font or the allow-listed open-font cache.
   let fontkitReady = false;
   const customFonts = new Map();
   const finder = metadata.findFont;
-  const getCustomFont = async (layout) => {
-    if (!layout.fontName || typeof finder !== 'function') return null;
-    const key = `${layout.fontName}|${layout.bold ? 1 : 0}|${layout.italic ? 1 : 0}`;
-    if (customFonts.has(key)) return customFonts.get(key);
-    let result = null;
-    try {
-      const bytes = await finder({ family: layout.fontName, bold: layout.bold, italic: layout.italic });
-      if (bytes && bytes.length) {
+  const isFontProgram = (bytes) => {
+    if (!bytes || bytes.length < 4) return false;
+    const signature = String.fromCharCode(...bytes.slice(0, 4));
+    return signature === '\u0000\u0001\u0000\u0000' || signature === 'OTTO' || signature === 'true' || signature === 'typ1';
+  };
+  const getCustomFont = async (layout, item, pdfJsPage, text) => {
+    if (!layout.fontName) return null;
+    const key = `${item.fontRef || ''}|${layout.fontName}|${layout.bold ? 1 : 0}|${layout.italic ? 1 : 0}`;
+    const required = [...String(text || '')].filter((ch) => ch !== '\n').map((ch) => ch.codePointAt(0));
+    const sufficient = (entry) => entry && required.every((code) => entry.chars.has(code));
+    if (sufficient(customFonts.get(key))) return customFonts.get(key);
+    const embedIfSufficient = async (bytes) => {
+      if (!isFontProgram(bytes)) return null;
+      try {
         if (!fontkitReady) { const mod = await import('@pdf-lib/fontkit'); output.registerFontkit(mod.default || mod); fontkitReady = true; }
         const font = await output.embedFont(bytes, { subset: true });
-        result = { font, chars: new Set(font.getCharacterSet()) };
+        const entry = { font, chars: new Set(font.getCharacterSet()) };
+        return sufficient(entry) ? entry : null;
+      } catch (error) {
+        console.warn('Could not embed a source font program', layout.fontName, error?.message || error);
+        return null;
       }
-    } catch (error) { console.warn('Could not embed the original font', layout.fontName, error); }
-    customFonts.set(key, result);
-    return result;
+    };
+
+    // PDF.js may have decoded the exact embedded font for this text object.
+    try {
+      if (item.fontRef && pdfJsPage.commonObjs.has(item.fontRef)) {
+        const fontObject = pdfJsPage.commonObjs.get(item.fontRef);
+        const exact = await embedIfSufficient(fontObject?.data);
+        if (exact) { customFonts.set(key, exact); return exact; }
+      }
+    } catch { /* use the installed/managed font lookup below */ }
+
+    if (typeof finder === 'function') {
+      try {
+        const result = await finder({ family: layout.fontName, bold: layout.bold, italic: layout.italic });
+        const bytes = result?.bytes || result;
+        const compatible = await embedIfSufficient(bytes);
+        if (compatible) { customFonts.set(key, compatible); return compatible; }
+      } catch (error) { console.warn('Could not embed the requested font', layout.fontName, error?.message || error); }
+    }
+    return null;
   };
 
   for (const [pageKey, items] of Object.entries(annotationsByPage || {})) {
@@ -110,8 +138,12 @@ export async function exportEditedPdf(sourceBytes, pdfJsDocument, annotationsByP
         if (item.type === 'stamp') page.drawRectangle({ x: b.x, y: b.y, width: b.width, height: b.height, borderColor: color, borderWidth: lineWidth, opacity: 0.96 });
         if (item.type === 'note') page.drawRectangle({ x: b.x, y: b.y, width: b.width, height: b.height, color: rgb(1, 0.96, 0.72), borderColor: rgb(0.91, 0.78, 0.35), borderWidth: 0.7, opacity: 0.98 });
         if (!rawText.trim()) continue;
-        const custom = await getCustomFont(layout);
-        const canUseCustom = custom && [...rawText].every((ch) => ch === '\n' || custom.chars.has(ch.codePointAt(0)));
+        const custom = await getCustomFont(layout, item, pdfJsPage, rawText);
+        const canUseCustom = !!custom;
+        const unsupported = canUseCustom ? [] : findUnsupported(rawText);
+        if (unsupported.length) {
+          throw new Error(`Cannot safely export “${unsupported.slice(0, 5).join('')}” in “${layout.fontName || layout.family}”. The source font is not available or does not contain these characters. Choose an installed font or a supported open font before saving.`);
+        }
         const font = canUseCustom ? custom.font : await getFont(layout.family, layout.bold, layout.italic);
         const inner = w - 2 * layout.pad;
         const totalH = layout.lines.length * layout.lineH;

@@ -1,11 +1,11 @@
 'use strict';
 
 /**
- * Device access policy for PDF Studio (client side of pdfstudio-monitor /api/access.php).
+ * Device access policy for PDF Studio (client side of pdfstudio-monitor /api/client-gateway.php).
  *
  * Contract (see pdfstudio-monitor/ACCESS_CONTROL.md):
  *   - unknown / new devices are ENABLED by default and the app never waits for the server to start;
- *   - the client polls the monitor (about every 30 seconds) with the shared X-Api-Key;
+ *   - the client polls the monitor gateway (about every 30 seconds); the shared API key remains server-side;
  *   - a "disabled" answer locks the app immediately, and that denied state is cached on disk so the
  *     device stays locked when the monitor is unreachable or the app is restarted offline;
  *   - an "enabled" answer from the monitor unlocks a running copy on the next successful poll;
@@ -24,7 +24,7 @@ function cleanText(value, max) {
 }
 
 /**
- * Validates an api/access.php GET answer. Returns null for anything that is not a well-formed policy,
+ * Validates a gateway access-policy GET answer. Returns null for anything that is not a well-formed policy,
  * so an HTML tunnel page, an error body or a half-written response can never lock or unlock the app.
  */
 function parsePolicyResponse(result) {
@@ -110,13 +110,13 @@ async function fetchAccessPolicy({
   fetchImpl = fetch,
   baseUrl,
   candidatesFor,
-  apiKey,
   userAgent,
   identity,
   timeoutMs = 8000,
 }) {
-  const url = new URL(`${String(baseUrl).replace(/\/+$/, '')}/access.php`);
-  url.search = buildPolicyQuery(identity).toString();
+  const url = new URL(`${String(baseUrl).replace(/\/+$/, '')}/client-gateway.php`);
+  url.searchParams.set('resource', 'access');
+  for (const [key, value] of buildPolicyQuery(identity).entries()) url.searchParams.set(key, value);
   const candidates = typeof candidatesFor === 'function' ? candidatesFor(url) : [url];
   let lastMessage = 'The monitor could not be reached.';
   let lastStatus = 0;
@@ -131,7 +131,6 @@ async function fetchAccessPolicy({
           'User-Agent': userAgent,
           'ngrok-skip-browser-warning': '1',
           Accept: 'application/json',
-          'X-Api-Key': apiKey,
         },
         signal: AbortSignal.timeout(timeoutMs),
       });
