@@ -176,7 +176,7 @@ button, input, select, textarea { font-family: inherit; }
 /* ---- 4. Modal / dialog system ------------------------------------------ */
 :root:root .app-shell {
   & .modal-backdrop {
-    position: fixed; inset: 0; z-index: 100;
+    position: fixed; inset: 0; z-index: var(--z-modal);
     display: flex; align-items: center; justify-content: center;
     padding: clamp(12px, 4vh, 40px) clamp(12px, 4vw, 40px);
     background: rgb(14 18 30 / .46);
@@ -748,3 +748,94 @@ button, input, select, textarea { font-family: inherit; }
 @keyframes pdf-editor-tab-enter { from { opacity: 0; transform: translateY(7px) scale(.997); filter: blur(1px); } to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); } }
 .reduce-motion .persistent-edit-pdf.is-active { animation: none !important; }
 
+
+/* ---- Branded identity, compact RSC mark, and developer hover motion ---- */
+:root:root .app-shell {
+  & .sidebar-rsc-brand {
+    display: flex; align-items: center; justify-content: center; min-width: 0;
+    margin-top: 7px; padding: 4px 5px 0; opacity: .92;
+    transition: opacity .2s ease, transform .24s cubic-bezier(.2,.8,.2,1);
+  }
+  & .sidebar-rsc-brand:hover { opacity: 1; transform: translateY(-1px); }
+  & .sidebar-rsc-brand img { display: block; width: min(122px, 100%); height: auto; max-height: 42px; object-fit: contain; }
+  & .sidebar-rsc-brand .rsc-logo-dark { display: none; }
+  &.theme-dark .sidebar-rsc-brand .rsc-logo-light { display: none; }
+  &.theme-dark .sidebar-rsc-brand .rsc-logo-dark { display: block; }
+
+  & .about-branding-strip {
+    display: flex; align-items: center; gap: 15px; min-width: 0;
+    margin: 0 0 15px; padding: 10px 13px; border: 1px solid var(--line);
+    border-radius: var(--r-lg); background: var(--surface-alt, var(--surface));
+  }
+  &.theme-dark .about-branding-strip { border-color: #363d48; background: #1e2128; }
+  & .about-branding-label { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; color: var(--muted); font-size: calc(11px * var(--ui-scale)); font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
+  & .about-branding-glyph { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; color: var(--accent); background: var(--accent-soft); }
+  & .about-branding-logo { flex: 0 1 auto; min-width: 0; display: grid; place-items: center; }
+  & .about-branding-logo img { display: block; max-width: 100%; height: auto; object-fit: contain; user-select: none; pointer-events: none; }
+  & .about-itrs-logo { width: 80px; flex-shrink: 0; }
+  & .about-itrs-logo img { width: 100%; max-height: 44px; }
+  & .about-rsc-logo { width: 178px; }
+  & .about-rsc-logo img { width: 100%; max-height: 60px; }
+  & .about-branding-logo .itrs-logo-dark, & .about-branding-logo .rsc-logo-dark { display: none; }
+  &.theme-dark .about-branding-logo .itrs-logo-light, &.theme-dark .about-branding-logo .rsc-logo-light { display: none; }
+  &.theme-dark .about-branding-logo .itrs-logo-dark, &.theme-dark .about-branding-logo .rsc-logo-dark { display: block; }
+  & .about-branding-divider { align-self: stretch; width: 1px; flex: 0 0 1px; background: var(--line); }
+
+  & .developer-signature-card {
+    isolation: isolate; position: relative; overflow: hidden;
+    transition: transform .28s cubic-bezier(.2,.8,.2,1), box-shadow .28s ease, border-color .28s ease, background .28s ease;
+  }
+  & .developer-signature-card::before {
+    content: ''; position: absolute; z-index: -1; inset: -1px auto -1px -60%; width: 48%; pointer-events: none;
+    background: linear-gradient(105deg, transparent 0%, rgb(255 255 255 / .04) 24%, rgb(255 255 255 / .62) 50%, rgb(255 255 255 / .05) 75%, transparent 100%);
+    transform: skewX(-16deg); opacity: 0;
+  }
+  & .developer-signature-card:hover, & .developer-signature-card:focus-visible {
+    transform: translateY(-3px); box-shadow: 0 15px 30px -20px rgb(23 132 91 / .5), 0 0 0 1px rgb(23 132 91 / .08);
+    border-color: rgb(23 132 91 / .48); outline: none;
+  }
+  & .developer-signature-card:hover::before, & .developer-signature-card:focus-visible::before { opacity: 1; animation: developer-sheen .82s cubic-bezier(.2,.65,.25,1) both; }
+  & .developer-monogram { position: relative; display: grid; place-items: center; transform-origin: 50% 65%; transition: transform .38s cubic-bezier(.2,.9,.25,1.3), box-shadow .28s ease; }
+  & .developer-monogram > span { position: relative; z-index: 1; }
+  & .developer-monogram > i { position: absolute; right: -4px; top: -6px; color: #a5edcf; font-size: 13px; font-style: normal; opacity: 0; transform: translate(-5px, 5px) rotate(-35deg) scale(.25); }
+  & .developer-signature-card:hover .developer-monogram, & .developer-signature-card:focus-visible .developer-monogram { transform: rotate(-7deg) scale(1.07); box-shadow: 0 8px 15px rgb(15 70 51 / .22); }
+  & .developer-signature-card:hover .developer-monogram > i, & .developer-signature-card:focus-visible .developer-monogram > i { animation: developer-spark-pop .52s cubic-bezier(.16,.85,.3,1.5) .08s both; }
+  & .developer-role { display: flex; align-items: center; gap: 6px; }
+  & .developer-role > svg:first-child { flex: 0 0 auto; color: #17794f; }
+  & .developer-role-spark { margin-left: 1px; color: #1c9b68; opacity: 0; transform: rotate(-35deg) scale(.6); transition: opacity .2s ease, transform .3s cubic-bezier(.2,.8,.3,1.3); }
+  & .developer-signature-card:hover .developer-role-spark, & .developer-signature-card:focus-visible .developer-role-spark { opacity: 1; transform: rotate(0) scale(1); }
+  &.theme-dark .developer-role > svg:first-child { color: #8fdcb7; }
+  &.theme-dark .developer-role-spark { color: #a9f1cf; }
+}
+@keyframes developer-sheen { 0% { transform: translateX(0) skewX(-16deg); } 100% { transform: translateX(410%) skewX(-16deg); } }
+@keyframes developer-spark-pop { 0% { opacity: 0; transform: translate(-5px, 5px) rotate(-35deg) scale(.25); } 65% { opacity: 1; transform: translate(1px, -2px) rotate(15deg) scale(1.25); } 100% { opacity: 1; transform: translate(0, 0) rotate(0) scale(1); } }
+:root:root .app-shell.theme-dark .developer-signature-card::before { background: linear-gradient(105deg, transparent, rgb(169 241 207 / .04) 24%, rgb(169 241 207 / .38) 50%, rgb(169 241 207 / .04) 75%, transparent); }
+:root:root .app-shell.theme-dark .developer-signature-card:hover,
+:root:root .app-shell.theme-dark .developer-signature-card:focus-visible { border-color: rgb(114 216 167 / .45); box-shadow: 0 15px 30px -20px rgb(0 0 0 / .75), 0 0 0 1px rgb(114 216 167 / .1); }
+:root:root .app-shell .sidebar.is-collapsed .sidebar-rsc-brand { margin-top: 4px; padding: 2px 0 0; }
+:root:root .app-shell .sidebar.is-collapsed .sidebar-rsc-brand img { width: 34px; max-height: 12px; }
+@media (max-width: 680px) {
+  :root:root .app-shell {
+    & .about-branding-strip { gap: 9px; padding: 9px; }
+    & .about-branding-label { font-size: 10px; }
+    & .about-branding-label > span:last-child { display: none; }
+    & .about-itrs-logo { width: 58px; }
+    & .about-rsc-logo { width: 128px; }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root:root .app-shell .developer-signature-card,
+  :root:root .app-shell .developer-monogram,
+  :root:root .app-shell .sidebar-rsc-brand { transition: none !important; }
+  :root:root .app-shell .developer-signature-card:hover::before,
+  :root:root .app-shell .developer-signature-card:focus-visible::before,
+  :root:root .app-shell .developer-signature-card:hover .developer-monogram > i,
+  :root:root .app-shell .developer-signature-card:focus-visible .developer-monogram > i { animation: none !important; }
+}
+
+:root:root .app-shell.reduce-motion .developer-signature-card,
+:root:root .app-shell.reduce-motion .developer-signature-card::before,
+:root:root .app-shell.reduce-motion .developer-monogram,
+:root:root .app-shell.reduce-motion .developer-monogram > i,
+:root:root .app-shell.reduce-motion .developer-role-spark,
+:root:root .app-shell.reduce-motion .sidebar-rsc-brand { animation: none !important; transition: none !important; }

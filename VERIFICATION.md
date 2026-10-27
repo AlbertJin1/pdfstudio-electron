@@ -164,3 +164,30 @@ Targeted mocked updater integration tests passed for Windows (legacy `action=lat
 - The uploaded Monitor 2.4.18 gateway explicitly rejects `review` as a telemetry event; therefore its server-side submission cannot succeed through that gateway until review forwarding is enabled there. Failed submissions are not marked as complete.
 - PDF save IPC now opens the destination folder after a successful save.
 - Export watermark now uses bold Helvetica, uppercase text, a page-diagonal-based font size, and a higher-opacity default.
+
+
+## PDF-to-Word and dedicated compression follow-up (2026-10-27)
+
+- PDF-to-Word now defaults to **Editable Word document**: normal Word paragraphs, native tables for clearly ruled grids (including some merged cells), separate image assets for detected photos/logos, and retained source page dimensions. **Layout-preserving** remains available for fixed-position text over original page artwork; **Visual replica** keeps pages as images. The semantic detector is geometry-based and cannot reliably infer every borderless or complex table. Scan-only pages may remain page images when no reliable native text layer is available.
+- Fidelity boundary: this is a local hybrid conversion, not the Adobe Acrobat Pro conversion engine. It does not semantically reconstruct every table/chart/vector/hyperlink/form, and scanned-page text needs OCR. Complex backgrounds may cause artefacts in the edit-oriented mode; use Visual replica where appearance matters more than editability.
+- Standalone Compress PDF includes lossless-only optimization, High quality / Recommended / Smaller file / Smallest file presets, percent-or-MB target mode with measured output and best-effort refinement, resolution and JPEG quality controls, color/grayscale/monochrome modes, metadata and annotation rendering controls, and optional AES-256 output password protection. Lossy raster modes explicitly warn that text selection, hyperlinks, forms, vector objects, bookmarks, and digital signatures are not preserved. Lossless-only mode preserves the original when the local optimizer cannot safely reduce it instead of silently rasterizing it.
+- Added source-policy regression checks and expanded compression unit checks, including PDF headers preceded by a short prefix and optimizer failure in lossless-only mode. `npm run test:pdf` and `npm run test:access` passed. Node syntax checks passed for touched service/Electron/test files; JSX and CSS parsing are checked separately.
+- A full Vite/Windows package build and generated DOCX rendering round-trip could not be verified in this environment because the npm registry request timed out and the project dependencies were not fully installed. On the Windows development machine, run `npm ci`, `npm run test:pdf`, `npm run test:access`, `npm run web:build`, and `npm run build:win` before releasing.
+
+
+## PDF-to-Word image-size preservation follow-up (2026-10-27)
+
+- Compared the supplied four-page Netskope procedure PDF and both DOCX conversions. On PDF page 1, the two source screenshot placements are approximately 275 × 223 pt and 430 × 177 pt; the earlier Editable conversion wrote them at approximately 114 × 92 pt and 223 × 92 pt because the external-image builder imposed a 92 pt maximum height.
+- Removed the arbitrary 92 pt limit for external image groups and the 150/180 pt default height limits for inline/cell image groups. Source PDF placement dimensions are now retained in Word when they fit. If an image group exceeds available page/cell width, it is scaled proportionally to fit; its original aspect ratio is maintained.
+- Added regression assertions using the supplied PDF's image sizes and a width-overflow case. `npm run test:pdf` passed after the changes.
+- A fresh production DOCX conversion and Electron 45 runtime verification are still outstanding in this workspace because the installed dependency tree is incomplete (`pdfjs-dist` is unavailable); the test validates the generated Word image extents from the production layout helpers, not a fresh full GUI conversion. On Windows, run `npm ci`, `npm run test:pdf`, `npm run web:build`, and compare the regenerated Editable DOCX against the PDF and Acrobat DOCX before release.
+
+## Startup splash and About branding update (October 27, 2026)
+
+- Added the supplied ITRS mark as local PNG assets in `public/branding/` and `electron/branding/`. The white variant preserves the source transparency and is used on dark surfaces.
+- Added an animated ITRS mark to the Electron splash, including an entrance reveal, a subtle ambient glow, and a periodic glint. The splash CSP now allows only same-origin/local image assets as needed. Reduced-motion preferences switch the animation off and preserve a stable logo.
+- Added theme-switched ITRS and RSC logo treatments to the About dialog and a compact RSC logo to the main sidebar footer. The light/dark RSC marks swap automatically with the workspace theme.
+- Updated the About dialog's developer signature area with the requested `IT Specialist - WVM` role and a hover sheen / monogram sparkle animation. Motion is disabled for reduced-motion settings.
+- Added `npm run test:branding` for splash assets, theme variants, logo dimensions, role text and animation selectors.
+- Verified `npm run test:branding`, `npm run test:pdf`, `npm run test:access`, HTML parsing, JSX transpilation checks for changed components, and PostCSS parsing for changed styles.
+- A fresh Vite production build and Electron visual launch remain unverified in this environment because the installed dependencies are incomplete (`vite` and `pdfjs-dist` are missing locally). Reinstall dependencies on Windows with `npm ci`, then run `npm run test:branding`, `npm run check`, and `npm start` to verify the final packaged splash, About dialog, and theme switching.

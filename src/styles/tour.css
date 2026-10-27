@@ -1,4 +1,4 @@
-.tour-root { position: fixed; inset: 0; z-index: 140; font-family: var(--font-ui, system-ui, sans-serif); }
+.tour-root { position: fixed; inset: 0; z-index: var(--z-tour); font-family: var(--font-ui, system-ui, sans-serif); }
 .tour-blocker { position: absolute; inset: 0; background: transparent; cursor: default; }
 .tour-dim { position: absolute; inset: 0; background: rgba(14,17,28,.58); backdrop-filter: blur(2px); }
 .tour-spotlight { position: absolute; border-radius: 14px; pointer-events: none; box-shadow: 0 0 0 9999px rgba(14,17,28,.58), 0 0 0 2px #fff, 0 0 0 5px rgb(var(--fill-rgb, 103 87 217) / .85); transition: left .22s ease, top .22s ease, width .22s ease, height .22s ease; animation: tourPulse 2s ease-in-out infinite; }
@@ -50,7 +50,7 @@
 .tour-anchor{display:inline-flex}
 
 /* ===== Page context menu ===== */
-.page-ctx-menu { position: fixed; z-index: 160; min-width: 224px; padding: 6px; border-radius: 12px; background: #fff; color: #263044; border: 1px solid #dfe3ee; box-shadow: 0 18px 44px rgba(12,16,30,.28), 0 2px 6px rgba(12,16,30,.1); animation: ctxIn .13s cubic-bezier(.22,1,.36,1); transform-origin: top left; font-size: 13px; }
+.page-ctx-menu { position: fixed; z-index: var(--z-menu); min-width: 224px; padding: 6px; border-radius: 12px; background: #fff; color: #263044; border: 1px solid #dfe3ee; box-shadow: 0 18px 44px rgba(12,16,30,.28), 0 2px 6px rgba(12,16,30,.1); animation: ctxIn .13s cubic-bezier(.22,1,.36,1); transform-origin: top left; font-size: 13px; }
 @keyframes ctxIn { from { opacity: 0; transform: scale(.94) translateY(-4px); } }
 .ctx-title { padding: 6px 10px 5px; font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #7b839a; }
 .ctx-sep { height: 1px; margin: 5px 4px; background: #e7eaf2; }

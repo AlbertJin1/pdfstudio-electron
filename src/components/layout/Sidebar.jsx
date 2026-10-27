@@ -165,6 +165,10 @@ export default function Sidebar({ pages, documents, mode, appVersion, currentDoc
       <div className="sidebar-footer">
         <div className="privacy-card" {...tip('Your files stay yours: processed on this device')}><div className="privacy-icon"><ShieldCheck size={17} /></div><div><strong>Your files stay yours</strong><p>Processed on this device. No uploads.</p></div><CheckCircle2 size={15} className="privacy-check" /></div>
         <button type="button" className="account-row" onClick={() => setMode('settings')} aria-label="Open PDF Studio settings" title={collapsed ? undefined : 'Open settings'} {...tip('PDF Studio settings')}><span className="account-avatar" aria-hidden="true">JA</span><span className="account-meta"><strong>PDF Studio</strong><small>Personal workspace · v{appVersion}</small></span><Settings2 size={16} className="account-settings" aria-hidden="true" /></button>
+        <div className="sidebar-rsc-brand" aria-label="Robinsons Supermarket, Robinsons Easymart, and Shopwise">
+          <img className="rsc-logo-light" src="./branding/rsc-logo.png" alt="Robinsons Supermarket, Robinsons Easymart, and Shopwise" draggable="false" />
+          <img className="rsc-logo-dark" src="./branding/rsc-logo-dark.png" alt="Robinsons Supermarket, Robinsons Easymart, and Shopwise" draggable="false" />
+        </div>
       </div>
     </motion.aside>
     <RailTooltip tip={railTip} />

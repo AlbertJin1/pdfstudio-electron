@@ -9,6 +9,8 @@ const { Worker } = require('node:worker_threads');
 const { isPdfStudioMonitorApiUrl, monitorApiUrlCandidates } = require('./services/monitor-api.cjs');
 const accessPolicy = require('./services/access-policy.cjs');
 const reviewQueuePolicy = require('./review-queue-policy.cjs');
+const ocrService = require('./ocr-service.cjs');
+const ghostscriptCompression = require('./services/ghostscript-compression.cjs');
 
 // All settings, caches and staged updates live in the per-user app-data folder (%AppData%\PDF Studio), so the
 // portable EXE never creates any folder next to itself. The folder name is set explicitly because the package name
@@ -2087,10 +2089,20 @@ handle('files:open', async (event, options) => {
   assertAccessAllowed();
   const parent = BrowserWindow.fromWebContents(event.sender) || mainWindow;
   const pdfOnly = Boolean(options && options.pdfOnly);
+  // accept: 'images' (Images to PDF) | 'pdf' (PDF tools) | anything else = every supported type.
+  const accept = pdfOnly ? 'pdf-single' : (options && options.accept) || 'all';
+  const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff'];
+  const dialogSpec = {
+    'pdf-single': { title: 'Select a PDF file', multi: false, filters: [{ name: 'PDF documents', extensions: ['pdf'] }] },
+    pdf: { title: 'Select PDF files', multi: true, filters: [{ name: 'PDF documents', extensions: ['pdf'] }] },
+    images: { title: 'Select images to convert to PDF', multi: true, filters: [{ name: 'Images', extensions: IMAGE_EXTS }] },
+    all: { title: 'Add documents to PDF Studio', multi: true, filters: [{ name: 'Supported documents', extensions: ['pdf', ...IMAGE_EXTS, 'docx'] }] },
+  }[accept] || null;
+  const spec = dialogSpec || { title: 'Add documents to PDF Studio', multi: true, filters: [{ name: 'Supported documents', extensions: ['pdf', ...IMAGE_EXTS, 'docx'] }] };
   const picked = await dialog.showOpenDialog(parent, {
-    title: pdfOnly ? 'Open a PDF to edit' : 'Add documents to PDF Studio',
-    properties: pdfOnly ? ['openFile'] : ['openFile', 'multiSelections'],
-    filters: pdfOnly ? [{ name: 'PDF document', extensions: ['pdf'] }] : [{ name: 'Supported documents', extensions: ['pdf', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff', 'docx'] }],
+    title: spec.title,
+    properties: spec.multi ? ['openFile', 'multiSelections'] : ['openFile'],
+    filters: spec.filters,
   });
   if (picked.canceled) return [];
   const output = [];
@@ -2135,6 +2147,86 @@ handle('files:save', async (event, { name, data, filters }) => {
   await fs.writeFile(result.filePath, toSafeBuffer(data));
   await openExportFolder(result.filePath);
   return { canceled: false, filePath: result.filePath };
+});
+
+function hasPdfHeader(data) {
+  const source = toSafeBuffer(data);
+  const marker = Buffer.from('%PDF-', 'ascii');
+  const offset = source.indexOf(marker);
+  return offset >= 0 && offset <= 1023;
+}
+
+handle('pdf:compression-engine-info', async () => {
+  assertAccessAllowed();
+  const info = await ghostscriptCompression.getGhostscriptInfo();
+  // Do not expose full local paths to renderer UI; the renderer only needs availability/version.
+  return { available: Boolean(info.available), engine: info.engine || null, version: info.version || null, reason: info.reason || null };
+});
+
+handle('pdf:smart-compress', async (_event, payload) => {
+  assertAccessAllowed();
+  if (!payload || typeof payload !== 'object' || !payload.data) throw new TypeError('No PDF data was supplied for smart compression.');
+  const source = toSafeBuffer(payload.data);
+  if (!hasPdfHeader(source)) throw new TypeError('Choose a valid PDF file to compress.');
+  const options = payload.options && typeof payload.options === 'object' ? payload.options : {};
+  // Missing Ghostscript is an expected, optional-engine state. Report it as data so Electron does not
+  // log "Error occurred in handler" for every attempt; the renderer falls back to the built-in optimizer.
+  const engine = await ghostscriptCompression.getGhostscriptInfo();
+  if (!engine.available) return { unavailable: true, code: 'PDFSTUDIO_GHOSTSCRIPT_UNAVAILABLE', reason: engine.reason || 'Ghostscript is unavailable.' };
+  const result = await ghostscriptCompression.compressWithGhostscript(source, {
+    preset: String(options.preset || 'balanced'),
+    resolutionDpi: options.resolutionDpi,
+    quality: options.quality,
+    colorMode: ['color', 'grayscale'].includes(options.colorMode) ? options.colorMode : 'color',
+    preserveMetadata: options.preserveMetadata !== false,
+    includeAnnotations: options.includeAnnotations !== false,
+    password: String(options.password || ''),
+    imageObjectCount: Number.isFinite(Number(options.imageObjectCount)) ? Number(options.imageObjectCount) : undefined,
+    duplicateImageEstimate: Number.isFinite(Number(options.duplicateImageEstimate)) ? Number(options.duplicateImageEstimate) : undefined,
+    detectDuplicateImages: options.detectDuplicateImages !== false,
+    imageFilterMode: ['auto', 'jpeg'].includes(options.imageFilterMode) ? options.imageFilterMode : undefined,
+    timeoutMs: options.timeoutMs,
+  });
+  if (!hasPdfHeader(result.bytes)) throw new Error('The smart optimizer returned an invalid PDF document.');
+  return { bytes: result.bytes, engine: result.engine, version: result.version, warnings: result.warnings };
+});
+
+handle('pdf:optimize', async (_event, payload) => {
+  assertAccessAllowed();
+  if (!payload || typeof payload !== 'object' || !payload.data) throw new TypeError('No PDF data was supplied for optimization.');
+  const source = toSafeBuffer(payload.data);
+  if (!hasPdfHeader(source)) throw new TypeError('Choose a valid PDF file to optimize.');
+  // QPDF/WASM runs in the existing worker thread so lossless optimization never blocks Electron's UI thread.
+  const optimized = toSafeBuffer(await finalizePdfInWorker(source, { compress: true }));
+  if (!hasPdfHeader(optimized)) throw new Error('The PDF optimizer returned an invalid document.');
+  return new Uint8Array(optimized);
+});
+
+handle('pdf:lock', async (_event, payload) => {
+  assertAccessAllowed();
+  if (!payload || typeof payload !== 'object' || !payload.data) throw new TypeError('No PDF data was supplied for password protection.');
+  const source = toSafeBuffer(payload.data);
+  if (!hasPdfHeader(source)) throw new TypeError('Choose a valid PDF file to protect.');
+  const password = String(payload.password || '');
+  if (password.length < 8 || password.length > 1024) throw new TypeError('Use an output password between 8 and 1024 characters.');
+  // Passwords are passed only through the isolated Electron IPC to the local PDF toolkit worker;
+  // they are never written to logs or persistent settings.
+  const protectedPdf = toSafeBuffer(await finalizePdfInWorker(source, { password }));
+  if (!hasPdfHeader(protectedPdf)) throw new Error('The PDF toolkit returned an invalid protected document.');
+  return new Uint8Array(protectedPdf);
+});
+
+handle('pdf:ocr-image', async (_event, payload) => {
+  assertAccessAllowed();
+  if (!payload || typeof payload !== 'object' || !payload.image) throw new TypeError('No image was supplied for OCR.');
+  const image = toSafeBuffer(payload.image);
+  if (image.length > 25 * 1024 * 1024) throw new RangeError('The rendered page is too large for OCR.');
+  return ocrService.recognizeImage(image, {
+    language: String(payload.language || 'eng'),
+    resourcesPath: process.resourcesPath,
+    projectRoot: app.getAppPath(),
+    timeoutMs: payload.timeoutMs,
+  });
 });
 
 handle('files:save-finalized-pdf', async (event, payload) => {

@@ -202,6 +202,7 @@ function App() {
     setSplitRanges,
     doExportPdf,
     convertToWord,
+    compressPdfFile,
     convertToImages,
     splitPdf,
   } = useExporters({ pages, selectedPages, documents, sourcesRef, notify, setModal, setIsLoading, setLoadingLabel, imageFormat, imageQuality });
@@ -259,9 +260,18 @@ function App() {
     notify('Settings restored to their defaults.', 'success');
   }, [notify, restoreDefaultPreferences]);
 
+  // PDF to Word always opens its dialog; the dialog itself lets the user convert the open workspace or
+  // click/drag-drop a different PDF (which never enters the workspace).
+  const startWordConversion = useCallback(() => {
+    if (accessLockedRef.current) return;
+    setModal({ type: 'word' });
+  }, [accessLockedRef, setModal]);
+
   const startTool = (tool) => {
-  if (tool.action === 'word') { if (!pages.length) chooseFiles(); else setModal({ type: 'word' }); }
-  else if (tool.action === 'images') { if (!pages.length) chooseFiles(); else setModal({ type: 'images' }); }
+  if (tool.action === 'word') startWordConversion();
+  else if (tool.action === 'images') { if (!pages.length) chooseFiles('pdf'); else setModal({ type: 'images' }); }
+  else if (tool.action === 'imagesToPdf') { setMode('workspace'); chooseFiles('images'); }
+  else if (tool.action === 'compress') setModal({ type: 'compress' });
   else { setMode(tool.mode || 'workspace'); if (!pages.length && tool.mode !== 'edit') chooseFiles(); }
   };
 
@@ -279,7 +289,7 @@ function App() {
     {mode !== 'edit' && <AnimatePresence mode="wait" initial={false}>
     {mode === 'home' && <HomeView key="home" pages={pages} documents={documents} setMode={setMode} setModal={setModal} chooseFiles={chooseFiles} startTool={startTool} />}
     {mode === 'workspace' && <WorkspaceView key="workspace" pages={pages} pagesRef={pagesRef} sourcesRef={sourcesRef} selectedIds={selectedIds} activeId={activeId} search={search} showInspector={showInspector} draggingPageId={draggingPageId} landedId={landedId} dropCue={dropCue} previewZoom={previewZoom} suppressPageClickUntil={suppressPageClickUntil} historyRef={historyRef} redoRef={redoRef} activePage={activePage} filteredPages={filteredPages} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setSearch={setSearch} setModal={setModal} setShowInspector={setShowInspector} setDraggingPageId={setDraggingPageId} setDropCue={setDropCue} setPreviewZoom={setPreviewZoom} commitPages={commitPages} undo={undo} redo={redo} chooseFiles={chooseFiles} handleBrowserFiles={handleBrowserFiles} selectPage={selectPage} requestDeleteSelected={requestDeleteSelected} rotateSelected={rotateSelected} duplicateSelected={duplicateSelected} addBlankPage={addBlankPage} movePage={movePage} duplicateSelected={duplicateSelected} requestDeleteSelected={requestDeleteSelected} />}
-    {mode === 'convert' && <ConvertView key="convert" pages={pages} setModal={setModal} chooseFiles={chooseFiles} />}
+    {mode === 'convert' && <ConvertView key="convert" pages={pages} setModal={setModal} chooseFiles={chooseFiles} startWord={startWordConversion} />}
     {mode === 'history' && <HistoryView key="history" pages={pages} documents={documents} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setMode={setMode} chooseFiles={chooseFiles} />}
     {mode === 'settings' && <SettingsView key="settings" mode={mode} preferences={preferences} settingsTab={settingsTab} dark={dark} updateState={updateState} readyUpdate={readyUpdate} imageFormat={imageFormat} imageQuality={imageQuality} showInspector={showInspector} appVersion={appVersion} setSettingsTab={setSettingsTab} setDark={setDark} setModal={setModal} setImageFormat={setImageFormat} setImageQuality={setImageQuality} setShowInspector={setShowInspector} setPreference={setPreference} resetPreferences={resetPreferences} checkForUpdates={checkForUpdates} />}
     </AnimatePresence>}
@@ -288,7 +298,7 @@ function App() {
     </motion.div>
     <LoadingOverlay isLoading={isLoading} loadingLabel={loadingLabel} />
     <Toast toast={toast} setToast={setToast} />
-    <ModalHost hideGuide={preferences.hideGuide} setHideGuide={setHideGuide} pages={pages} mode={mode} guideStep={guideStep} setGuideStep={setGuideStep} chooseFiles={chooseFiles} readyUpdate={readyUpdate} applyingUpdate={applyingUpdate} modal={modal} textValue={textValue} textColor={textColor} textSize={textSize} coverColor={coverColor} exportTitle={exportTitle} exportAuthor={exportAuthor} exportPageNumbers={exportPageNumbers} exportWatermarkMode={exportWatermarkMode} exportWatermark={exportWatermark} exportWatermarkOpacity={exportWatermarkOpacity} exportWatermarkAngle={exportWatermarkAngle} exportWatermarkColor={exportWatermarkColor} exportPaperSize={exportPaperSize} exportCompression={exportCompression} exportPassword={exportPassword} splitMode={splitMode} splitEvery={splitEvery} splitRanges={splitRanges} imageFormat={imageFormat} imageQuality={imageQuality} appVersion={appVersion} selectedPages={selectedPages} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setMode={setMode} setSettingsTab={setSettingsTab} setModal={setModal} setTextValue={setTextValue} setTextColor={setTextColor} setTextSize={setTextSize} setCoverColor={setCoverColor} setExportTitle={setExportTitle} setExportAuthor={setExportAuthor} setExportPageNumbers={setExportPageNumbers} setExportWatermarkMode={setExportWatermarkMode} setExportWatermark={setExportWatermark} setExportWatermarkOpacity={setExportWatermarkOpacity} setExportWatermarkAngle={setExportWatermarkAngle} setExportWatermarkColor={setExportWatermarkColor} setExportPaperSize={setExportPaperSize} setExportCompression={setExportCompression} setExportPassword={setExportPassword} setSplitMode={setSplitMode} setSplitEvery={setSplitEvery} setSplitRanges={setSplitRanges} setImageFormat={setImageFormat} setImageQuality={setImageQuality} deleteSelected={deleteSelected} requestDeleteSelected={requestDeleteSelected} rotateSelected={rotateSelected} duplicateSelected={duplicateSelected} addTextOverlay={addTextOverlay} addCoverOverlay={addCoverOverlay} doExportPdf={doExportPdf} convertToWord={convertToWord} convertToImages={convertToImages} splitPdf={splitPdf} deferReadyUpdate={deferReadyUpdate} applyReadyUpdate={applyReadyUpdate} notify={notify} />
+    <ModalHost hideGuide={preferences.hideGuide} setHideGuide={setHideGuide} pages={pages} mode={mode} guideStep={guideStep} setGuideStep={setGuideStep} chooseFiles={chooseFiles} readyUpdate={readyUpdate} applyingUpdate={applyingUpdate} modal={modal} textValue={textValue} textColor={textColor} textSize={textSize} coverColor={coverColor} exportTitle={exportTitle} exportAuthor={exportAuthor} exportPageNumbers={exportPageNumbers} exportWatermarkMode={exportWatermarkMode} exportWatermark={exportWatermark} exportWatermarkOpacity={exportWatermarkOpacity} exportWatermarkAngle={exportWatermarkAngle} exportWatermarkColor={exportWatermarkColor} exportPaperSize={exportPaperSize} exportCompression={exportCompression} exportPassword={exportPassword} splitMode={splitMode} splitEvery={splitEvery} splitRanges={splitRanges} imageFormat={imageFormat} imageQuality={imageQuality} appVersion={appVersion} selectedPages={selectedPages} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setMode={setMode} setSettingsTab={setSettingsTab} setModal={setModal} setTextValue={setTextValue} setTextColor={setTextColor} setTextSize={setTextSize} setCoverColor={setCoverColor} setExportTitle={setExportTitle} setExportAuthor={setExportAuthor} setExportPageNumbers={setExportPageNumbers} setExportWatermarkMode={setExportWatermarkMode} setExportWatermark={setExportWatermark} setExportWatermarkOpacity={setExportWatermarkOpacity} setExportWatermarkAngle={setExportWatermarkAngle} setExportWatermarkColor={setExportWatermarkColor} setExportPaperSize={setExportPaperSize} setExportCompression={setExportCompression} setExportPassword={setExportPassword} setSplitMode={setSplitMode} setSplitEvery={setSplitEvery} setSplitRanges={setSplitRanges} setImageFormat={setImageFormat} setImageQuality={setImageQuality} deleteSelected={deleteSelected} requestDeleteSelected={requestDeleteSelected} rotateSelected={rotateSelected} duplicateSelected={duplicateSelected} addTextOverlay={addTextOverlay} addCoverOverlay={addCoverOverlay} doExportPdf={doExportPdf} convertToWord={convertToWord} compressPdfFile={compressPdfFile} convertToImages={convertToImages} splitPdf={splitPdf} deferReadyUpdate={deferReadyUpdate} applyReadyUpdate={applyReadyUpdate} notify={notify} />
     </motion.div>
     <AnimatePresence>{access.locked && <AccessLockScreen key="access-lock" access={access} checking={accessChecking} notice={accessNotice} dark={dark} onRecheck={recheckAccess} onQuit={quitFromLock} />}</AnimatePresence>
     </MotionConfig>

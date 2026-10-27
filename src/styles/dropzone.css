@@ -1,0 +1,114 @@
+/* ==========================================================================
+   File drop UI: PdfSourcePicker (dropzone + selected-file card) and the
+   full-dialog drop overlay rendered by <Modal onDropFiles>.
+   Loaded after ui-refresh.css and scoped the same way so it wins without !important.
+   ========================================================================== */
+
+@keyframes dz-overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes dz-icon-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+
+:root:root .app-shell {
+  /* ---- Full-dialog drop overlay ---------------------------------------- */
+  & .modal-card { position: relative; }
+  & .modal-drop-overlay {
+    position: absolute; inset: 0; z-index: 30;
+    display: flex; padding: 12px;
+    pointer-events: none; /* drag events keep reaching the dialog underneath */
+    background: color-mix(in srgb, var(--surface, #fff) 80%, transparent);
+    backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+    animation: dz-overlay-in .14s ease-out both;
+  }
+  & .modal-drop-overlay-inner {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+    padding: 24px; text-align: center;
+    border: 2px dashed rgb(var(--fill-rgb) / .75); border-radius: var(--r-lg);
+    background: rgb(var(--fill-rgb) / .08);
+    color: var(--fill);
+  }
+  & .modal-drop-overlay-inner svg { animation: dz-icon-bob 1.1s ease-in-out infinite; }
+  & .modal-drop-overlay-inner strong { color: var(--ink); font-size: calc(17px * var(--ui-scale)); font-weight: 700; letter-spacing: -.01em; }
+  & .modal-drop-overlay-inner span { color: var(--muted); font-size: calc(13px * var(--ui-scale)); line-height: 1.5; }
+  & .modal-drop-overlay[data-state="invalid"] .modal-drop-overlay-inner {
+    border-color: rgb(var(--danger-rgb) / .75); background: rgb(var(--danger-rgb) / .07); color: var(--danger);
+  }
+
+  /* ---- Source picker ---------------------------------------------------- */
+  & .pdf-source { margin: 0 0 16px; }
+
+  & .pdf-dropzone {
+    width: 100%;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    padding: 30px 20px 24px;
+    border: 2px dashed var(--line-strong, var(--line)); border-radius: var(--r-lg);
+    background: color-mix(in srgb, var(--surface, #fff) 96%, var(--ink, #25283d) 4%);
+    color: var(--ink); text-align: center; cursor: pointer;
+    transition: border-color .16s ease, background-color .16s ease, box-shadow .16s ease;
+  }
+  & .pdf-dropzone:hover:not(:disabled), & .pdf-dropzone:focus-visible {
+    border-color: rgb(var(--fill-rgb) / .75); background: rgb(var(--fill-rgb) / .06); outline: none;
+  }
+  & .pdf-dropzone:focus-visible { box-shadow: 0 0 0 3px rgb(var(--fill-rgb) / .25); }
+  & .pdf-dropzone:disabled { cursor: progress; opacity: .7; }
+  & .pdf-dropzone-icon {
+    display: grid; place-items: center; width: 54px; height: 54px; margin-bottom: 4px;
+    border-radius: 50%; background: rgb(var(--fill-rgb) / .12); color: var(--fill);
+    transition: transform .18s var(--ease-out, ease-out);
+  }
+  & .pdf-dropzone:hover:not(:disabled) .pdf-dropzone-icon { transform: translateY(-2px); }
+  & .pdf-dropzone strong { font-size: calc(15px * var(--ui-scale)); font-weight: 700; letter-spacing: -.01em; }
+  & .pdf-dropzone-hint { color: var(--muted); font-size: calc(13px * var(--ui-scale)); }
+  & .pdf-dropzone-link { color: var(--fill); font-weight: 650; text-decoration: underline; text-underline-offset: 2px; }
+  & .pdf-dropzone-chip {
+    margin-top: 8px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted);
+    font-size: calc(11.5px * var(--ui-scale)); font-weight: 600;
+  }
+
+  & .pdf-source-card {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--line); border-radius: var(--r-lg);
+    background: color-mix(in srgb, var(--surface, #fff) 96%, var(--ink, #25283d) 4%);
+  }
+  & .pdf-source-card[data-selected="true"] { border-color: rgb(var(--fill-rgb) / .35); background: rgb(var(--fill-rgb) / .05); }
+  & .pdf-source-icon {
+    flex: 0 0 auto; display: grid; place-items: center; width: 40px; height: 40px;
+    border-radius: var(--r-md); background: rgb(var(--fill-rgb) / .12); color: var(--fill);
+  }
+  & .pdf-source-copy { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  & .pdf-source-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-size: calc(13.5px * var(--ui-scale)); font-weight: 650; }
+  & .pdf-source-copy span { color: var(--muted); font-size: calc(12px * var(--ui-scale)); line-height: 1.4; }
+  & .pdf-source-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+  & .pdf-source-tip { margin: 8px 2px 0; color: var(--muted); font-size: calc(12px * var(--ui-scale)); }
+
+  & .pdf-source-message {
+    display: flex; align-items: flex-start; gap: 8px; margin-top: 10px;
+    padding: 9px 12px; border-radius: var(--r-md);
+    font-size: calc(12.5px * var(--ui-scale)); line-height: 1.5;
+  }
+  & .pdf-source-message > svg { flex: 0 0 auto; margin-top: 2px; }
+  & .pdf-source-message.is-error { border: 1px solid rgb(var(--danger-rgb) / .3); background: rgb(var(--danger-rgb) / .08); color: var(--danger); }
+  & .pdf-source-message.is-notice { border: 1px solid var(--line); background: color-mix(in srgb, var(--surface, #fff) 94%, var(--ink, #25283d) 6%); color: var(--muted); }
+
+  &.theme-dark .pdf-dropzone, &.theme-dark .pdf-source-card { background: #1d2026; border-color: #3d4452; }
+  &.theme-dark .pdf-source-card[data-selected="true"] { background: rgb(var(--fill-rgb) / .12); border-color: rgb(var(--fill-rgb) / .5); }
+  &.theme-dark .pdf-dropzone:hover:not(:disabled), &.theme-dark .pdf-dropzone:focus-visible { background: rgb(var(--fill-rgb) / .14); }
+  &.theme-dark .pdf-dropzone-icon, &.theme-dark .pdf-source-icon { background: rgb(var(--fill-rgb) / .22); color: #fff; }
+  &.theme-dark .modal-drop-overlay { background: color-mix(in srgb, #23262d 82%, transparent); }
+  &.theme-dark .modal-drop-overlay-inner { color: #fff; }
+  &.theme-dark .pdf-source-message.is-error { color: #ff8da0; }
+  &.theme-dark .pdf-dropzone-link { color: #cfc8ff; }
+
+  /* Narrow dialogs: the selected-file card stacks so the file name keeps room. */
+  @container dialog (max-width: 520px) {
+    & .pdf-source-card { flex-wrap: wrap; }
+    & .pdf-source-copy { flex-basis: calc(100% - 56px); }
+    & .pdf-source-actions { width: 100%; }
+    & .pdf-source-actions .action-button { flex: 1; }
+    & .pdf-dropzone { padding: 24px 14px 20px; }
+  }
+
+  &.reduce-motion .modal-drop-overlay, &.reduce-motion .modal-drop-overlay-inner svg { animation: none; }
+  &.reduce-motion .pdf-dropzone-icon { transition: none; }
+}

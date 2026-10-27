@@ -32,3 +32,7 @@ The monitor requires the exe to identify itself as product `PDF Studio`.
 - `run-dev.bat` / `npm run dev` starts the app in development mode.
 
 `release.bat` expects `publish_to_monitor.ps1` and `CHANGELOG.md` in this folder (next to `release.bat`).
+
+## UI branding regression checks
+
+Run `npm run test:branding` to verify that the ITRS splash assets and animations, the theme-switched RSC marks in the sidebar and About dialog, and the developer role/hover treatment remain wired correctly. The supplied ITRS/RSC PNG assets live under `public\branding` for the renderer and `electron\branding` for the native startup splash.

@@ -35,7 +35,7 @@ const STEPS = [
     tips: ['Right-click style page menus can export just the selected pages.'] },
   { id: 'convert', icon: WandSparkles, title: 'Convert and split', mode: 'convert', targets: ['.conversion-grid'],
     body: 'Turn a PDF into Word, export pages as PNG or JPG, or split a document by individual pages, fixed groups, or custom ranges.',
-    tips: ['PDF to Word extracts selectable text; complex layouts may need cleanup.'] },
+    tips: ['PDF to Word defaults to a normal editable Word document with paragraphs, detected native tables, and separate images. Use Layout-preserving to keep fixed page positioning, or Visual replica to keep each page as an image. Scanned and complex content may still need review.', 'Compress PDF analyzes resources, attempts vector-preserving image-aware optimization, checks the output structure, previews page quality, and reports actual savings. Target-size search is bounded; whole-page raster fallback is explicitly opt-in and loses editable structure. Metadata and interactive features may change during a PDF rewrite.'] },
   { id: 'history', icon: History, title: 'Review your loaded sources', mode: 'history', targets: ['.sidebar .nav-item:nth-of-type(5)'],
     body: 'Recent sources lists the files in this session with type, size and page count, and jumps back to any of them.',
     tips: ['This is the current session only, not a cloud history.'] },

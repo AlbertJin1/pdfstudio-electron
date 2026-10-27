@@ -6,6 +6,8 @@ import './styles/ui-refresh.css';
 import './styles/edit-pdf.css';
 import './styles/tour.css';
 import './styles/sidebar-collapse.css';
+import './styles/loader.css';
+import './styles/dropzone.css';
 
 // The Edit PDF window and the main window share one HTML entry; each loads only its own code.
 const App = lazy(() => import('./App.jsx'));

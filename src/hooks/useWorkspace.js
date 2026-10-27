@@ -3,6 +3,12 @@ import { createPageThumbnail, loadPdfSource } from '../services/pdf/index.js';
 import { normalizeBytes } from '../utils/files.js';
 import { uid } from '../utils/id.js';
 
+const FILE_ACCEPT = {
+  all: '.pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.docx',
+  pdf: '.pdf,application/pdf',
+  images: '.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,image/*',
+};
+
 export function useWorkspace({ notify, setMode, setIsLoading, setLoadingLabel, setModal, confirmDelete, accessLockedRef, fileInputRef }) {
   const [pages, setPages] = useState([]);
   const pagesRef = useRef([]);
@@ -146,14 +152,17 @@ export function useWorkspace({ notify, setMode, setIsLoading, setLoadingLabel, s
     }
   }, [notify]);
 
-  const chooseFiles = useCallback(async () => {
+  // chooseFiles('images' | 'pdf') narrows the picker; used directly as an onClick it gets an event, which falls back to 'all'.
+  const chooseFiles = useCallback(async (accept) => {
     if (accessLockedRef.current) return;
+    const kind = accept === 'images' || accept === 'pdf' ? accept : 'all';
     try {
       if (window.pdfStudio?.openFiles) {
-        const items = await window.pdfStudio.openFiles();
+        const items = await window.pdfStudio.openFiles({ accept: kind });
         await addImportedItems(items);
-      } else {
-        fileInputRef.current?.click();
+      } else if (fileInputRef.current) {
+        fileInputRef.current.accept = FILE_ACCEPT[kind];
+        fileInputRef.current.click();
       }
     } catch (error) { notify(error?.message || 'Unable to open the file picker.', 'error'); }
   }, [addImportedItems, notify]);

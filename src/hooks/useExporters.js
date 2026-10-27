@@ -1,8 +1,10 @@
 import { useCallback, useState } from 'react';
 import { composePdf, loadPdfSource, pdfToDocx, renderPdfImages } from '../services/pdf/index.js';
 import { rasterizePdfForCompression } from '../services/pdf/rasterize.js';
+import { compressPdf as compressStandalonePdf, validateCompressionIntegrity } from '../services/pdf/compress.js';
 import { saveInBrowser } from '../utils/download.js';
 import { uid } from '../utils/id.js';
+import { formatBytes } from '../utils/format.js';
 
 export function useExporters({ pages, selectedPages, documents, sourcesRef, notify, setModal, setIsLoading, setLoadingLabel, imageFormat, imageQuality }) {
   const [exportTitle, setExportTitle] = useState('');
@@ -80,18 +82,137 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
   }, [documents, exportAuthor, exportCompression, exportPageNumbers, exportPaperSize, exportPassword, exportTitle, exportWatermark, exportWatermarkAngle, exportWatermarkColor, exportWatermarkMode, exportWatermarkOpacity, notify, pages, selectedPages, setIsLoading, setLoadingLabel, setModal, sourcesRef]);
 
 
-  const convertToWord = useCallback(async () => {
-    if (!pages.length) return notify('Open a PDF before converting it to Word.', 'info');
-    setIsLoading(true); setLoadingLabel('Extracting text and preparing DOCX');
+  const convertToWord = useCallback(async (request = 'editable') => {
+    const conversionOptions = typeof request === 'string' ? { mode: request } : (request && typeof request === 'object' ? request : {});
+    const conversionMode = ['visual', 'layout'].includes(conversionOptions.mode) ? conversionOptions.mode : 'editable';
+    const standalone = conversionOptions.file?.bytes ? conversionOptions.file : null; // PDF picked directly for Word: never enters the workspace
+    if (!standalone && !pages.length) return notify('Open a PDF before converting it to Word.', 'info');
+    setIsLoading(true); setLoadingLabel('Reading PDF layout and text');
     try {
-      const pdfBytes = await composePdf(pages, sourcesRef.current, { title: 'Converted PDF', author: exportAuthor });
-      const docxBytes = await pdfToDocx(pdfBytes);
-      const baseName = (exportTitle || 'PDF-Studio-converted').replace(/[\\/:*?"<>|]/g, '-').slice(0, 100);
-      const result = window.pdfStudio?.saveFile ? await window.pdfStudio.saveFile({ name: `${baseName}.docx`, data: docxBytes, filters: [{ name: 'Word document', extensions: ['docx'] }] }) : await saveInBrowser(docxBytes, `${baseName}.docx`, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-      if (!result?.canceled) { setModal(null); notify('Editable Word document exported. Complex layouts and images may need manual adjustment.'); }
+      const pdfBytes = standalone ? standalone.bytes.slice() : await composePdf(pages, sourcesRef.current, { title: 'Converted PDF', author: exportAuthor });
+      const conversion = await pdfToDocx(pdfBytes, undefined, {
+        mode: conversionMode,
+        ocrEnabled: conversionOptions.ocrEnabled !== false,
+        ocrLanguage: conversionOptions.ocrLanguage || 'eng',
+        onProgress: ({ page, pages: total, phase, profile }) => setLoadingLabel(phase === 'building' ? 'Building native Word elements' : phase === 'ocr' ? `OCR · page ${page} of ${total}` : phase === 'validation' ? 'Verifying Word package and text' : (profile || `Reconstructing page ${page} of ${total}`)),
+      });
+      const baseName = (standalone ? standalone.name.replace(/\.[^.]+$/, '') : exportTitle || (documents.length === 1 ? documents[0].name.replace(/\.[^.]+$/, '') : 'PDF-Studio-converted')).replace(/[\\/:*?"<>|]/g, '-').slice(0, 100);
+      const result = window.pdfStudio?.saveFile ? await window.pdfStudio.saveFile({ name: `${baseName}.docx`, data: conversion.bytes, filters: [{ name: 'Word document', extensions: ['docx'] }] }) : await saveInBrowser(conversion.bytes, `${baseName}.docx`, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      if (!result?.canceled) {
+        setModal(null);
+        const quality = conversion.quality || {};
+        const needsReview = conversion.mode !== 'visual'
+          && (conversion.pagesWithoutText || conversion.pagesWithPartialText || quality.warnings?.length);
+        if (conversion.mode !== 'visual') console.info('PDF to Word quality report', quality);
+        notify(
+          needsReview ? (conversion.mode === 'layout' ? 'Saved as layout-preserving Word. Review the result in Word.' : 'Saved as Word. Some content may need review in Word.') : 'Saved as Word document.',
+          needsReview ? 'info' : 'success',
+        );
+      }
     } catch (error) { console.error(error); notify(error?.message || 'PDF-to-Word conversion failed.', 'error'); }
     finally { setIsLoading(false); setLoadingLabel('Preparing your workspace'); }
-  }, [exportAuthor, exportTitle, notify, pages]);
+  }, [documents, exportAuthor, exportTitle, notify, pages, setIsLoading, setLoadingLabel, setModal, sourcesRef]);
+
+  const compressPdfFile = useCallback(async ({ file, preset = 'balanced', targetBytes = null, password = '', resolutionDpi, quality, colorMode, preserveMetadata, includeAnnotations, allowRasterFallback = false, imageObjectCount, duplicateImageEstimate, detectDuplicateImages, outputPassword = '', previewOnly = false, preparedResult = null } = {}) => {
+    if (!file?.bytes?.length) return notify('Choose a PDF file before starting compression.', 'info');
+    const originalName = String(file.name || 'document.pdf').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '-').slice(0, 100) || 'document';
+    setIsLoading(true);
+    setLoadingLabel(previewOnly ? 'Analyzing and preparing compression preview' : 'Analyzing PDF size and compression options');
+    try {
+      let compressed;
+      // Probe once; with no Ghostscript the smart path is skipped entirely (no failed IPC calls, no noisy logs).
+      let smartAvailable = Boolean(window.pdfStudio?.smartCompressPdf);
+      if (smartAvailable && window.pdfStudio?.getPdfCompressionEngineInfo) {
+        try { smartAvailable = Boolean((await window.pdfStudio.getPdfCompressionEngineInfo())?.available); } catch { smartAvailable = false; }
+      }
+      if (preparedResult?.bytes?.byteLength) {
+        compressed = { ...preparedResult, bytes: preparedResult.bytes instanceof Uint8Array ? preparedResult.bytes.slice() : new Uint8Array(preparedResult.bytes) };
+      } else {
+        compressed = await compressStandalonePdf(file.bytes, {
+          preset,
+          targetBytes,
+          password,
+          resolutionDpi,
+          quality,
+          colorMode,
+          preserveMetadata,
+          includeAnnotations,
+          allowRasterFallback,
+          imageObjectCount,
+          duplicateImageEstimate,
+          detectDuplicateImages,
+          losslessOptimize: window.pdfStudio?.optimizePdf ? async (bytes) => window.pdfStudio.optimizePdf({ data: bytes }) : undefined,
+          smartOptimize: smartAvailable ? async (bytes, profile) => {
+            const result = await window.pdfStudio.smartCompressPdf({ data: bytes, options: profile });
+            if (result?.unavailable) throw new Error(result.reason || 'Ghostscript is unavailable.');
+            return result;
+          } : undefined,
+          onProgress: (progress) => {
+            if (progress.phase === 'smart' || progress.phase === 'attempt' || progress.phase === 'refine' || progress.phase === 'raster') {
+              setLoadingLabel(`${progress.phase === 'raster' ? 'Raster fallback' : progress.phase === 'smart' ? 'Smart optimization' : 'Trying'}: ${progress.profile || 'compression'} (${progress.attempt || 1}/${progress.attempts || 1})`);
+            } else if (progress.phase === 'images') {
+              const item = progress.imageIndex && progress.totalImages ? ` · image ${progress.imageIndex}/${progress.totalImages}` : '';
+              setLoadingLabel(`Recompressing embedded images: ${progress.profile || 'image optimization'}${item}`);
+            } else if (progress.phase === 'rendering') {
+              setLoadingLabel(`Compressing page ${progress.page || 1} of ${progress.pages || '?'} · ${progress.profile || 'optimizing'}`);
+            } else if (progress.phase === 'analysis') {
+              setLoadingLabel(`Analyzing page ${progress.page || 1} of ${progress.pages || '?'}`);
+            } else {
+              setLoadingLabel(`Preparing ${progress.profile || 'PDF compression'}`);
+            }
+          },
+        });
+      }
+
+      if (previewOnly) return { canceled: false, ...compressed, previewOnly: true, name: `${originalName}-compressed.pdf` };
+
+      if (outputPassword) {
+        if (!window.pdfStudio?.lockPdf) throw new Error('Password protection requires the PDF Studio desktop app.');
+        setLoadingLabel('Applying AES-256 password protection');
+        const protectedBytes = await window.pdfStudio.lockPdf({ data: compressed.bytes, password: outputPassword });
+        compressed.bytes = protectedBytes instanceof Uint8Array ? protectedBytes : new Uint8Array(protectedBytes);
+        compressed.outputSize = compressed.bytes.byteLength;
+        compressed.reachedTarget = targetBytes ? compressed.outputSize <= targetBytes : true;
+        compressed.unchanged = compressed.outputSize >= compressed.originalSize;
+        compressed.reductionPercent = Math.max(0, (1 - compressed.outputSize / compressed.originalSize) * 100);
+        if (targetBytes) compressed.targetDifferenceBytes = compressed.outputSize - targetBytes;
+        compressed.profile = `${compressed.profile} + AES-256 protection`;
+        if (['Ghostscript pdfwrite', 'Built-in PDF image-object optimizer'].includes(compressed.engine)) {
+          setLoadingLabel('Validating protected PDF structure');
+          const finalIntegrity = await validateCompressionIntegrity(file.bytes, compressed.bytes, { password, outputPassword });
+          compressed.integrity = finalIntegrity;
+          if (!finalIntegrity.valid) throw new Error(`The compressed output did not pass integrity validation: ${finalIntegrity.errors.join(' ')}`);
+        }
+      }
+      const outputName = `${originalName}-compressed.pdf`;
+      const result = window.pdfStudio?.saveFile
+        ? await window.pdfStudio.saveFile({ name: outputName, data: compressed.bytes, filters: [{ name: 'PDF document', extensions: ['pdf'] }] })
+        : await saveInBrowser(compressed.bytes, outputName, 'application/pdf');
+      if (result?.canceled) return { canceled: true };
+      setModal(null);
+      const reduction = Math.max(0, (1 - compressed.outputSize / compressed.originalSize) * 100);
+      const savedBytes = Math.max(0, compressed.originalSize - compressed.outputSize);
+      const sizeMessage = `${formatBytes(compressed.originalSize)} → ${formatBytes(compressed.outputSize)}${reduction > 0 ? ` (${reduction.toFixed(1)}% smaller; saved ${formatBytes(savedBytes)})` : ' (no size reduction was possible without changing the encoding)'}`;
+      const warning = (compressed.warnings || []).filter(Boolean).join(' ');
+      if (targetBytes && !compressed.reachedTarget) {
+        notify(`Compressed PDF saved${result?.filePath ? ` to ${result.filePath}` : ''}: ${sizeMessage}, but the requested ${formatBytes(targetBytes)} target could not be reached. ${warning}`, 'info');
+      } else if (compressed.unchanged) {
+        const note = compressed.warning ? ` ${compressed.warning}` : ' No size reduction was possible with this profile, so the original encoding was kept.';
+        notify(`PDF copy saved. ${sizeMessage}.${note}`, 'info');
+      } else {
+        notify(`Compressed PDF saved${result?.filePath ? ` to ${result.filePath}` : ''}. ${sizeMessage}. ${compressed.engine ? `Engine: ${compressed.engine}. ` : ''}${warning}`, 'success');
+      }
+      return { canceled: false, ...compressed, filePath: result?.filePath };
+    } catch (error) {
+      console.error(error);
+      const message = /password/i.test(error?.message || '') ? 'This PDF is password-protected. Check the password and try again.' : (error?.message || 'PDF compression failed.');
+      notify(message, 'error');
+      return { error };
+    } finally {
+      setIsLoading(false);
+      setLoadingLabel('Preparing your workspace');
+    }
+  }, [notify, setIsLoading, setLoadingLabel, setModal]);
 
   const convertToImages = useCallback(async () => {
     if (!pages.length) return notify('Open a document before exporting images.', 'info');
@@ -183,6 +304,7 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
     setSplitRanges,
     doExportPdf,
     convertToWord,
+    compressPdfFile,
     convertToImages,
     splitPdf,
   };
