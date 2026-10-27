@@ -1,6 +1,6 @@
 # PDF Studio — Windows desktop app
 
-**PDF Studio 3.0.4** is an Electron desktop rebuild of the original PDF Studio, for **Windows only**. The new app uses Electron + Node.js for native desktop capabilities, React for the interface, Tailwind CSS for styling utilities, PDF.js for PDF rendering, and `pdf-lib` for page composition and export.
+**PDF Studio 3.0.6** is an Electron desktop rebuild of the original PDF Studio, for **Windows only**. The new app uses Electron + Node.js for native desktop capabilities, React for the interface, Tailwind CSS for styling utilities, PDF.js for PDF rendering, and `pdf-lib` for page composition and export.
 
 It can be run as a desktop app during development and is packaged as a single no-install Windows portable `.exe`. There are no macOS or Linux builds.
 
@@ -23,7 +23,7 @@ The production frontend uses feature-based code splitting. PDF.js, `pdf-lib`, an
 
 ## Build the Windows release
 
-Run `build_publish.bat` or `npm run build` (alias of `npm run build:win`). To build **and** upload the build as the latest release, run `release.bat` ( `release.bat noupload` builds only, `release.bat -Force` uploads even if the monitor already has the identical exe).
+Run `build_publish.bat` or `npm run build` (alias of `npm run build:win`). To build and publish, run `release.bat` and choose public zrok or the local Monitor (`192.168.254.110:8080`). The release script validates product/version metadata, compresses the EXE into a ZIP when smaller, uploads resumable chunks, verifies hashes, and safely falls back to the raw EXE if ZIP support is unavailable. Use `release.bat noupload` to build only, `release.bat local -Force` to force replacement, or `release.bat local -NoZip` to skip ZIP packaging.
 
 | Command | Output |
 |---|---|
@@ -179,7 +179,7 @@ The Motion animation dependency is pinned to the published `13.5.0` package set 
 
 The desktop app icon is a hand-authored vector asset at `public/icons/pdf-studio.svg`, with PNG and ICO exports generated from that same source. The Windows executable and taskbar use the ICO; the in-app brand uses the PNG. Electron windows and the in-app brand/About view use the same icon.
 
-The source archive omits generated `dist/` output to avoid shipping an outdated renderer bundle. Run `npm ci` and then `npm run web:build` before `npm run start:fast`; `npm run build:win` performs the frontend build automatically. Ghostscript accelerates object-aware compression when a complete, appropriately licensed runtime is installed or staged under `resources/ghostscript`; it is no longer required for basic embedded-image recompression.
+The source archive omits generated `dist/` output to avoid shipping an outdated renderer bundle. Run `npm ci` and then `npm run web:build` before `npm run start:fast`; `npm run build:win` performs the frontend build automatically. Ghostscript accelerates object-aware compression when a complete, appropriately licensed runtime is installed or staged under `resources/ghostscript`; it is no longer required for basic embedded-image recompression. The portable Windows build now uses maximum compression and stages optional runtime assets with a size-conscious policy: English + Traditional Chinese OCR models by default (if Tesseract is staged), no native Ghostscript by default because the bundled WASM engine is available, and an opt-in `PDFSTUDIO_OCR_LANGS=all` / `PDFSTUDIO_BUNDLE_NATIVE_GHOSTSCRIPT=1` for full-resource builds. The build reports staged runtime sizes so a large language collection or duplicated native engine is visible before release.
 
 
 
@@ -208,3 +208,7 @@ Page reordering uses pointer events and requestAnimationFrame rather than the br
 ## Review prompt and offline submission
 
 PDF Studio saves pending review submissions in a Windows-user-encrypted local outbox and retries delivery automatically with backoff. A pending or server-acknowledged review suppresses future automatic review prompts. See [Review offline queue](docs/REVIEW-OFFLINE-QUEUE.md) for persistence, privacy, recovery behavior, and the current Monitor gateway compatibility requirement.
+
+## Startup splash reliability
+
+The desktop splash remains visible until its animation and progress meter complete, then opens PDF Studio after the renderer reports readiness. Renderer load failures are reported through a restricted preload bridge and shown as diagnostics instead of exposing an empty window. Startup watchdog and state checks are available through `npm run test:startup`.

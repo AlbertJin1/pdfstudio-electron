@@ -30,7 +30,7 @@ This is a server-enforced staged release path, not remote control over an alread
    npm run build:win
    ```
 
-4. Upload the newly built `publish/PdfStudio.exe` to the Monitor as version `3.0.4`. The Monitor release workflow should build/cache the ZIP package and content-defined delta manifest. Verify the uploaded release size and SHA-256.
+4. Publish the newly built `publish/PdfStudio.exe` with `release.bat`. Choose the public zrok URL or local Monitor URL. The release script uploads a compressed ZIP when smaller and supported; Monitor validates the ZIP and the EXE SHA-256, stores the portable EXE, and prepares the content-defined delta manifest. Verify the published version, size, and SHA-256 on the Monitor.
 5. Keep the release `2.8.15` downloadable before publishing 3.0.4 or any later 3.x release.
 6. Test these version routes against the deployed Monitor: `2.8.14` -> `2.8.15`; `2.8.15` -> latest 3.x; `3.0.3` -> `3.0.4`. The 3.0.3-to-3.0.4 bootstrap will use its old full-EXE transfer; then publish a later V3 release and verify a 3.0.4 client uses `action=manifest` and POST `action=delta` when the payload is smaller than the ZIP fallback.
 

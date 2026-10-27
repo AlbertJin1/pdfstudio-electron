@@ -1,6 +1,6 @@
 {
   "name": "pdf-studio-windows",
-  "version": "3.0.4",
+  "version": "3.0.6",
   "private": true,
   "description": "PDF Studio — a modern, local-first Windows PDF workspace built with Electron, React, Node.js and Tailwind CSS.",
   "author": "Jessie Albert Regualos",
@@ -14,7 +14,7 @@
     "web:dev": "npm run prepare:pdfjs-assets && vite --host 127.0.0.1",
     "web:build": "npm run prepare:pdfjs-assets && vite build",
     "build": "npm run build:win",
-    "prebuild:win": "node scripts/check-no-real-env.cjs && node scripts/release-tool.cjs clean",
+    "prebuild:win": "node scripts/release-tool.cjs clean && node scripts/prepare-bundled-resources.cjs",
     "build:win": "npm run web:build && electron-builder --win portable --x64",
     "postbuild:win": "node scripts/release-tool.cjs finalize",
     "check": "npm run web:build",
@@ -24,7 +24,11 @@
     "test:branding": "node tests/branding-ui.test.cjs",
     "test:theme-ux": "node tests/theme-ux.test.cjs",
     "test:workspace-ui": "node tests/workspace-ui.test.cjs",
-    "test:update": "node tests/portable-update-engine.test.cjs"
+    "test:update": "node tests/portable-update-engine.test.cjs",
+    "test:release-script": "node tests/release-script.test.cjs",
+    "prepare:bundle-resources": "node scripts/prepare-bundled-resources.cjs",
+    "test:build-size": "node tests/build-size-policy.test.cjs",
+    "test:startup": "node tests/startup-splash.test.cjs"
   },
   "dependencies": {
     "@jspawn/ghostscript-wasm": "0.0.2",
@@ -90,7 +94,7 @@
       "executableName": "PdfStudio",
       "artifactName": "PdfStudio.exe",
       "requestedExecutionLevel": "asInvoker",
-      "compression": "store",
+      "compression": "maximum",
       "electronLanguages": [
         "en-US"
       ],
@@ -108,14 +112,14 @@
         ]
       },
       {
-        "from": "resources/ocr",
+        "from": "build-resources/ocr",
         "to": "ocr",
         "filter": [
           "**/*"
         ]
       },
       {
-        "from": "resources/ghostscript",
+        "from": "build-resources/ghostscript",
         "to": "ghostscript",
         "filter": [
           "**/*"

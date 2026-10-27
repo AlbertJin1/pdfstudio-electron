@@ -1821,7 +1821,22 @@ let startupFailureShown = false;
 async function showStartupFailure(window, { heading, message, details = '' }) {
   if (!window || window.isDestroyed() || startupFailureShown) return;
   startupFailureShown = true;
-  revealMainWindow();
+  clearStartupWatchdog();
+  // If a renderer crash arrives during the finishing animation, cancel the pending reveal and
+  // route the transition through the diagnostic page instead of exposing a damaged renderer.
+  if (!mainRevealed) {
+    if (startupRevealTimer) clearTimeout(startupRevealTimer);
+    if (startupHideTimer) clearTimeout(startupHideTimer);
+    if (startupSplashGateTimer) clearTimeout(startupSplashGateTimer);
+    startupRevealTimer = null;
+    startupHideTimer = null;
+    startupSplashGateTimer = null;
+    startupRevealRequested = false;
+    startupRevealReason = 'failure';
+  }
+  // If the decorative splash itself never became visible, do not wait for its animation.
+  // The main diagnostic page is more useful than a hidden window behind a failed splash.
+  if (splashWindow && !splashWindow.isDestroyed() && !splashShownAt) splashWindow.destroy();
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDF Studio startup problem</title>
     <style>
       :root{color-scheme:light}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f5f6fb;color:#20223a;font:15px/1.55 Inter,Segoe UI,Arial,sans-serif;padding:28px}
@@ -1837,9 +1852,13 @@ async function showStartupFailure(window, { heading, message, details = '' }) {
     <div class="muted">PDF Studio ${escapeHtml(app.getVersion())} · ${escapeHtml(process.platform)} · ${escapeHtml(process.arch)}</div></main></body></html>`;
   console.error('[PDF Studio startup]', heading, message, details);
   try {
+    // Load the diagnostic page before revealing the main window. This prevents the splash
+    // from fading onto an empty renderer while the failure page is still being created.
     await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
   } catch (error) {
     console.error('[PDF Studio] Failed to display startup diagnostics:', error);
+  } finally {
+    revealMainWindow('failure');
   }
 }
 
@@ -2111,19 +2130,45 @@ async function findInstalledFont({ family, bold, italic }) {
 }
 
 // ───────────────────────── Startup splash ─────────────────────────
-const SPLASH_MIN_MS = 2300;
+// The splash animation is allowed to finish before the main app is shown. Renderer readiness
+// and renderer failure both use the same transition, so neither path can leave the splash stuck.
+const SPLASH_MIN_MS = 2850;
+const SPLASH_READY_HOLD_MS = 620; // lets the final progress segment complete before fading
+const STARTUP_WATCHDOG_MS = 22000;
+const SPLASH_VISIBILITY_WATCHDOG_MS = 6500;
 let splashWindow = null;
 let splashShownAt = 0;
+let splashCreatedAt = 0;
 let splashLoaded = false;
 let splashState = { step: 1, version: '', leaving: false };
 let mainRevealed = false;
+let startupUiReady = false;
+let startupRevealRequested = false;
+let startupRevealReason = 'ready';
+let startupRevealTimer = null;
+let startupHideTimer = null;
+let startupSplashGateTimer = null;
+let startupWatchdogTimer = null;
+
+function clearStartupWatchdog() {
+  if (startupWatchdogTimer) clearTimeout(startupWatchdogTimer);
+  startupWatchdogTimer = null;
+}
 
 function sendSplash(patch) {
   Object.assign(splashState, patch);
-  if (splashWindow && !splashWindow.isDestroyed() && splashLoaded) splashWindow.webContents.send('splash:update', splashState);
+  if (splashWindow && !splashWindow.isDestroyed() && splashLoaded) {
+    try { splashWindow.webContents.send('splash:update', splashState); } catch { /* splash is closing */ }
+  }
 }
+
 function createSplashWindow() {
   splashState.version = app.getVersion();
+  splashState.step = 1;
+  splashState.leaving = false;
+  splashLoaded = false;
+  splashShownAt = 0;
+  splashCreatedAt = Date.now();
   splashWindow = new BrowserWindow({
     width: 560, height: 360, show: false, frame: false, transparent: true, hasShadow: false,
     resizable: false, maximizable: false, minimizable: false, fullscreenable: false, skipTaskbar: true,
@@ -2136,25 +2181,106 @@ function createSplashWindow() {
   });
   splashWindow.setMenuBarVisibility(false);
   splashWindow.webContents.once('did-finish-load', () => { splashLoaded = true; sendSplash({}); });
-  splashWindow.once('ready-to-show', () => { if (!splashWindow.isDestroyed()) { splashShownAt = Date.now(); splashWindow.show(); } });
-  splashWindow.on('closed', () => { splashWindow = null; });
-  splashWindow.loadFile(path.join(__dirname, 'splash.html')).catch(() => { if (splashWindow && !splashWindow.isDestroyed()) splashWindow.destroy(); });
+  splashWindow.once('ready-to-show', () => {
+    if (splashWindow && !splashWindow.isDestroyed()) {
+      splashShownAt = Date.now();
+      splashWindow.show();
+      // If the renderer completed before the custom splash became visible, start the reveal
+      // clock only now so the animation is never skipped.
+      scheduleStartupReveal();
+    }
+  });
+  splashWindow.on('closed', () => {
+    splashWindow = null;
+    splashLoaded = false;
+    splashShownAt = 0;
+    splashCreatedAt = 0;
+    if (startupSplashGateTimer) clearTimeout(startupSplashGateTimer);
+    startupSplashGateTimer = null;
+    scheduleStartupReveal();
+  });
+  splashWindow.loadFile(path.join(__dirname, 'splash.html')).catch((error) => {
+    console.error('[PDF Studio] Startup splash failed to load:', error);
+    if (splashWindow && !splashWindow.isDestroyed()) splashWindow.destroy();
+    else scheduleStartupReveal();
+  });
 }
-/** Shows the main window once the UI is mounted (or on failure/timeout) and fades the splash out over it. */
-function revealMainWindow() {
-  if (mainRevealed) return;
-  mainRevealed = true;
-  sendSplash({ step: 4 });
-  const wait = splashShownAt ? Math.max(350, SPLASH_MIN_MS - (Date.now() - splashShownAt)) : 0;
-  setTimeout(() => {
-    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
-    sendSplash({ leaving: true });
-    setTimeout(() => { if (splashWindow && !splashWindow.isDestroyed()) splashWindow.destroy(); }, 450);
-    setTimeout(runBackgroundStartup, 1500).unref?.();
-  }, wait);
+
+/** Schedule the single exit transition after the splash has had time to finish its animations. */
+function scheduleStartupReveal() {
+  if (mainRevealed || !startupRevealRequested || startupRevealTimer || startupHideTimer) return;
+  const currentSplash = splashWindow && !splashWindow.isDestroyed() ? splashWindow : null;
+  // Wait for the splash to paint, but bound the wait in case Chromium never emits ready-to-show.
+  if (currentSplash && !splashShownAt) {
+    if (!startupSplashGateTimer) {
+      const elapsed = splashCreatedAt ? Date.now() - splashCreatedAt : SPLASH_VISIBILITY_WATCHDOG_MS;
+      const gateWait = Math.max(25, SPLASH_VISIBILITY_WATCHDOG_MS - elapsed);
+      startupSplashGateTimer = setTimeout(() => {
+        startupSplashGateTimer = null;
+        if (splashWindow && !splashWindow.isDestroyed() && !splashShownAt) {
+          console.error('[PDF Studio] Splash did not become visible before its startup safety limit.');
+          splashWindow.destroy();
+        }
+        scheduleStartupReveal();
+      }, gateWait);
+    }
+    return;
+  }
+  if (startupSplashGateTimer) clearTimeout(startupSplashGateTimer);
+  startupSplashGateTimer = null;
+  const remaining = currentSplash
+    ? Math.max(0, SPLASH_MIN_MS - (Date.now() - splashShownAt))
+    : 0;
+  startupRevealTimer = setTimeout(() => {
+    startupRevealTimer = null;
+    if (mainRevealed) return;
+    // Mark the last step only after the animation's minimum duration has elapsed.
+    sendSplash({ step: 4 });
+    startupHideTimer = setTimeout(() => {
+      startupHideTimer = null;
+      if (mainRevealed) return;
+      mainRevealed = true;
+      clearStartupWatchdog();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+      }
+      sendSplash({ leaving: true });
+      setTimeout(() => {
+        if (splashWindow && !splashWindow.isDestroyed()) splashWindow.destroy();
+      }, 450);
+      // Background network work must never block the initial interface paint.
+      if (startupRevealReason === 'ready') setTimeout(runBackgroundStartup, 1500).unref?.();
+    }, currentSplash ? SPLASH_READY_HOLD_MS : 0);
+  }, remaining);
 }
+
+/** Called once the renderer is mounted, or once a useful startup diagnostic has loaded. */
+function revealMainWindow(reason = 'ready') {
+  if (mainRevealed || startupRevealRequested) return;
+  startupRevealRequested = true;
+  startupRevealReason = reason === 'failure' ? 'failure' : 'ready';
+  clearStartupWatchdog();
+  scheduleStartupReveal();
+}
+
+handle('app:renderer-startup-error', async (event, report = {}) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || startupUiReady || startupFailureShown) return true;
+  const heading = typeof report.heading === 'string' ? report.heading.slice(0, 120) : 'The interface did not start';
+  const message = typeof report.message === 'string' ? report.message.slice(0, 500) : 'PDF Studio could not finish loading its interface.';
+  const details = typeof report.details === 'string' ? report.details.slice(0, 3000) : '';
+  await showStartupFailure(mainWindow, { heading, message, details });
+  return true;
+});
+
 handle('app:renderer-ready', (event) => {
-  if (mainWindow && event.sender === mainWindow.webContents) revealMainWindow();
+  if (mainWindow && event.sender === mainWindow.webContents && !startupFailureShown) {
+    startupUiReady = true;
+    clearStartupWatchdog();
+    sendSplash({ step: 3 });
+    revealMainWindow('ready');
+  }
   return true;
 });
 
@@ -2183,8 +2309,20 @@ handle('app:set-unsaved', (event, value) => {
 });
 
 function createWindow() {
-  // Each newly created window gets its own chance to display a startup diagnostic.
+  // Reset startup state before creating a new renderer. Never expose a blank window just
+  // because a fixed timer elapsed; timeouts load a diagnostic page through the normal splash exit.
   startupFailureShown = false;
+  startupUiReady = false;
+  mainRevealed = false;
+  startupRevealRequested = false;
+  startupRevealReason = 'ready';
+  if (startupRevealTimer) clearTimeout(startupRevealTimer);
+  if (startupHideTimer) clearTimeout(startupHideTimer);
+  if (startupSplashGateTimer) clearTimeout(startupSplashGateTimer);
+  startupRevealTimer = null;
+  startupHideTimer = null;
+  startupSplashGateTimer = null;
+  clearStartupWatchdog();
   mainWindow = new BrowserWindow({
     icon: getAppIconPath(),
     width: 1360,
@@ -2211,7 +2349,15 @@ function createWindow() {
   // The window stays hidden behind the splash until the renderer reports that the UI is mounted.
   mainWindow.webContents.once('did-start-loading', () => sendSplash({ step: 2 }));
   mainWindow.webContents.once('dom-ready', () => sendSplash({ step: 3 }));
-  setTimeout(revealMainWindow, 15000).unref?.();
+  // A hung or failed frontend gets an explicit diagnostic instead of opening a blank app.
+  startupWatchdogTimer = setTimeout(() => {
+    if (startupUiReady || startupFailureShown || !mainWindow || mainWindow.isDestroyed()) return;
+    void showStartupFailure(mainWindow, {
+      heading: 'PDF Studio took too long to start',
+      message: 'The interface did not report that it was ready before the startup safety limit.',
+      details: `Startup timeout: ${STARTUP_WATCHDOG_MS / 1000} seconds\nCheck the application files and system resources, then restart PDF Studio.`,
+    });
+  }, STARTUP_WATCHDOG_MS);
   mainWindow.on('focus', recheckAccessSoon);
   mainWindow.on('focus', () => { void flushPendingReviews(); });
   mainWindow.on('maximize', () => mainWindow.webContents.send('window:maximized', true));
@@ -2235,15 +2381,32 @@ function createWindow() {
   });
 
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-    if (!isMainFrame || startupFailureShown || String(validatedURL || '').startsWith('data:')) return;
+    if (mainRevealed || !isMainFrame || startupFailureShown || String(validatedURL || '').startsWith('data:')) return;
+    // -3 is ERR_ABORTED and is common when navigation is intentionally replaced by a diagnostic.
+    if (errorCode === -3) return;
     void showStartupFailure(mainWindow, {
       heading: 'The application page failed to load',
       message: 'Electron reported a renderer page-loading error.',
       details: `${validatedURL || '(unknown URL)'}\n${errorCode}: ${errorDescription}`,
     });
   });
+  mainWindow.webContents.on('render-process-gone', (_event, details = {}) => {
+    if (mainRevealed || startupFailureShown || !mainWindow || mainWindow.isDestroyed()) return;
+    void showStartupFailure(mainWindow, {
+      heading: 'PDF Studio stopped while starting',
+      message: 'The application renderer exited before startup could complete.',
+      details: `Reason: ${String(details.reason || 'unknown')}\nExit code: ${String(details.exitCode ?? 'unknown')}`,
+    });
+  });
 
-  loadRenderer(mainWindow).catch((error) => console.error('[pdf-studio] Renderer load failed:', error));
+  loadRenderer(mainWindow).catch((error) => {
+    console.error('[pdf-studio] Renderer load failed:', error);
+    void showStartupFailure(mainWindow, {
+      heading: 'Could not finish starting PDF Studio',
+      message: 'An unexpected error occurred while opening the application interface.',
+      details: String(error?.stack || error?.message || error).slice(0, 3000),
+    });
+  });
 }
 
 app.whenReady().then(() => {
@@ -2257,11 +2420,8 @@ app.whenReady().then(() => {
   createWindow();
   startAccessControl();
   startReviewOutboxService();
-  // The access check stays on the launch path on purpose: it is one small async request, and the cached lock is
-  // already in force. The update-package hash and the telemetry are not needed for the first frame and used to
-  // compete with the renderer for disk and CPU, so they start once the window is shown (runBackgroundStartup).
-  // The timer is only a safety net for machines where ready-to-show never fires.
-  setTimeout(runBackgroundStartup, 6000).unref?.();
+  // Keep disk-intensive update validation and telemetry off the startup path. They start only
+  // after the main interface has actually been shown by scheduleStartupReveal().
 });
 
 let backgroundStartupDone = false;

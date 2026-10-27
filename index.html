@@ -73,8 +73,20 @@
           }
           const details = panel.querySelector('#pdfstudio-startup-detail');
           if (detail && details) { details.textContent = String(detail); details.style.display = 'block'; }
+          // Tell Electron to replace the splash with its native diagnostic screen. Without this
+          // bridge, the HTML error panel can remain hidden behind the separate splash window.
+          try {
+            const bridge = window.pdfStudio;
+            if (typeof bridge?.reportStartupError === 'function') {
+              Promise.resolve(bridge.reportStartupError({
+                heading: 'The interface did not start',
+                message: 'PDF Studio could not finish loading its interface.',
+                details: String(detail || 'A renderer startup error occurred.').slice(0, 3000),
+              })).catch(() => {});
+            }
+          } catch (_) {}
         };
-        const watchdog = window.setTimeout(() => showStartupError('The React interface did not render within 15 seconds.'), 15000);
+        const watchdog = window.setTimeout(() => showStartupError('The React interface did not render within 18 seconds.'), 18000);
         window.addEventListener('error', (event) => {
           if (!hasUi()) showStartupError(event.message || 'A script or resource failed to load.');
         });

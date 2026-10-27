@@ -4,14 +4,16 @@
 
 - `package.json` parses; `npm start` now builds the Vite frontend before launching Electron, fixing the reported `ERR_FILE_NOT_FOUND` for `dist/index.html`. The only release target is the Windows `portable` EXE.
 - Electron checks that the frontend HTML exists and displays an actionable startup diagnostics page instead of an empty white window if the page is missing or cannot load.
-- The renderer includes a startup watchdog for frontend script/load failures that prevent React from mounting.
+- The renderer reports failed startup to Electron through a narrow preload IPC bridge; the main process loads a diagnostic page before removing the splash, with a 22-second native watchdog as a final safety net.
+- The branded splash now completes its entrance/progress animation before the main app is shown; update validation and telemetry only begin after the main window is visible.
+- `node tests/startup-splash.test.cjs` checks the ready/error handshake, delayed splash exit, diagnostics-first failure path, and startup watchdog.
 - `node --check electron/main.cjs`, `package.json` parsing, and the inline startup-watchdog JavaScript syntax check passed.
 - Build and publish scripts point to the Windows portable artifact and do not publish an NSIS setup executable.
 - Electron main process stores user data in `%AppData%\PDF Studio` and never creates a folder beside the portable EXE.
 
 ## Required on-machine validation
 
-Static source validation was performed for this startup fix, but this environment has not verified a real Electron bundle build because this checkout does not include `node_modules`. On the target Windows machine, run `npm install`, then `npm start`; `npm start` now builds the frontend automatically. Verify that `dist/index.html` is generated before Electron opens. Also run `npm run check`. Before production release, build on Windows with Node.js/npm; verify `publish\PdfStudio.exe` (built by `build_publish.bat`) reports `ProductName=PDF Studio` and `FileVersion=3.0.0.x`; confirm no installer/UAC appears; and upload the actual portable EXE to the monitor.
+Static source validation was performed for this startup fix, but this environment has not verified a real Electron bundle build because this checkout does not include `node_modules`. On the target Windows machine, run `npm install`, then `npm start`; `npm start` now builds the frontend automatically. Verify that `dist/index.html` is generated before Electron opens. Also run `npm run check`. Before production release, build on Windows with Node.js/npm; verify `publish\PdfStudio.exe` (built by `build_publish.bat`) reports `ProductName=PDF Studio` and `FileVersion=3.0.6`; confirm no installer/UAC appears; and upload the actual portable EXE to the monitor.
 ## UI/UX and settings update
 
 - JSX syntax verified with the TypeScript TSX parser; no syntax diagnostics.

@@ -16,13 +16,18 @@ How "only one file" is guaranteed: `npm run build:win` first empties `publish\`,
 
 ## Release — `release.bat`
 
-Run `release.bat` to build and upload the build as the latest release:
+Run `release.bat` to build and publish a V3 release. It prompts you to choose the public zrok Monitor or your local Monitor host:
 
-- builds with `build_publish.bat`, then shows the version inside the exe (the monitor reads it from there) next to `package.json`;
-- uploads `publish\PdfStudio.exe` with the version's `CHANGELOG.md` notes through `publish_to_monitor.ps1`. New version = uploaded; same version but a changed exe = overwritten; identical = skipped.
-- `release.bat noupload` builds only; `release.bat -Force` uploads even if the monitor has the identical exe.
+- Public: `https://pdfstudio.shares.zrok.io/pdfstudio-monitor`
+- Local: `http://192.168.254.110:8080/pdfstudio-monitor` (trusted LAN only; HTTP does not encrypt the API key)
+- validates the EXE product name and embedded version against `package.json` before publishing;
+- reads matching release notes from `CHANGELOG.md`, then packages `PdfStudio.exe` into a ZIP when it makes the upload smaller and the Monitor confirms ZIP support;
+- uploads resumable 4 MB chunks, verifies SHA-256, and falls back to the raw EXE if the ZIP is not smaller or the Monitor does not support ZIP packages;
+- publishes a new version, replaces the same version if its EXE changed, and skips the binary upload when the exact EXE is already present.
 
-The monitor requires the exe to identify itself as product `PDF Studio`.
+Commands: `release.bat public`, `release.bat local`, `release.bat local -Force`, `release.bat local -NoZip`, and `release.bat noupload`. The API key is read from `PDFSTUDIO_MONITOR_KEY`, a local ignored `monitor-key.txt`, or a secure prompt; do not commit the key.
+
+The monitor requires the EXE to identify itself as product `PDF Studio`.
 
 ## Notes
 
