@@ -9,7 +9,7 @@ declare(strict_types=1);
  * from a non-public server config file or the server environment. Never copy the key into Electron.
  *
  * Deliberately exposes only four read/report operations: update metadata, update download,
- * access-policy lookup, and validated usage telemetry. It is not a generic proxy.
+ * access-policy lookup, and validated usage telemetry (open / heartbeat / close sessions and product reviews). It is not a generic proxy.
  */
 
 header('Cache-Control: no-store, private, max-age=0');
@@ -31,6 +31,16 @@ function gateway_clean_string(mixed $value, int $maxLength): string
     $text = trim((string)$value);
     $text = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $text) ?? '';
     return substr($text, 0, $maxLength);
+}
+
+/** Free-text cleaner for review fields: keeps line breaks and tabs, strips other control characters, cuts by characters. */
+function gateway_clean_text(mixed $value, int $maxLength): string
+{
+    if (!is_scalar($value)) return '';
+    $text = str_replace(["\r\n", "\r"], "\n", (string)$value);
+    $text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+/u', '', $text) ?? '';
+    $text = trim($text);
+    return function_exists('mb_substr') ? mb_substr($text, 0, $maxLength) : substr($text, 0, $maxLength);
 }
 
 function gateway_valid_version(string $value): bool
@@ -301,13 +311,42 @@ switch ($resource) {
         $body = json_decode($rawBody, true);
         if (!is_array($body)) gateway_json_error(400, 'Telemetry payload must be a JSON object.');
         $event = gateway_clean_string($body['event'] ?? '', 16);
-        if (!in_array($event, ['open', 'heartbeat', 'close'], true)) gateway_json_error(400, 'Unsupported telemetry event.');
+        if (!in_array($event, ['open', 'heartbeat', 'close', 'review'], true)) gateway_json_error(400, 'Unsupported telemetry event.');
         $installId = gateway_clean_string($body['install_id'] ?? '', 64);
         if (!gateway_valid_install_id($installId)) gateway_json_error(400, 'A valid installation identifier is required.');
-        $sessionId = gateway_clean_string($body['session_id'] ?? '', 64);
-        if (preg_match('/^[a-f0-9]{32}$/i', $sessionId) !== 1) gateway_json_error(400, 'Invalid telemetry session identifier.');
         $version = gateway_clean_string($body['version'] ?? '', 96);
         if (!gateway_valid_version($version)) gateway_json_error(400, 'Invalid application version.');
+        if ($event === 'review') {
+            // Product reviews: rating 1-5, optional name (defaults to the PC name) and feedback text.
+            $rating = filter_var($body['rating'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 5]]);
+            if ($rating === false) gateway_json_error(400, 'Please choose a rating from 1 to 5 stars.');
+            $hostname = gateway_clean_string($body['hostname'] ?? '', 64);
+            $os = gateway_clean_string($body['os'] ?? '', 120);
+            $localIp = gateway_clean_string($body['local_ip'] ?? '', 64);
+            if ($localIp !== '' && filter_var($localIp, FILTER_VALIDATE_IP) === false) $localIp = '';
+            $reviewName = gateway_clean_string($body['name'] ?? '', 60);
+            if ($reviewName === '') $reviewName = $hostname;
+            $requestBody = json_encode([
+                'event' => 'review',
+                'app' => 'pdfstudio',
+                'install_id' => strtolower($installId),
+                'version' => ltrim($version, 'vV'),
+                'os' => $os,
+                'hostname' => $hostname,
+                'local_ip' => $localIp,
+                'rating' => (int)$rating,
+                'name' => $reviewName,
+                'message' => gateway_clean_text($body['message'] ?? '', 1500),
+            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+            if (!is_string($requestBody)) gateway_json_error(400, 'Review could not be serialized.');
+            gateway_rate_limit_or_reject('review-install-' . strtolower($installId), 10, 3600);
+            $upstreamPath = '';
+            $upstreamQuery = [];
+            $rateLimit = ['review', 60, 60];
+            break;
+        }
+        $sessionId = gateway_clean_string($body['session_id'] ?? '', 64);
+        if (preg_match('/^[a-f0-9]{32}$/i', $sessionId) !== 1) gateway_json_error(400, 'Invalid telemetry session identifier.');
         $startedAt = filter_var($body['started_at'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
         $seconds = filter_var($body['seconds'] ?? 0, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0, 'max_range' => 31536000]]);
         if ($startedAt === false || $seconds === false) gateway_json_error(400, 'Invalid telemetry timing values.');

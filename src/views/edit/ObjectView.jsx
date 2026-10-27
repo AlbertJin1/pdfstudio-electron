@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef } from 'react';
-import { TEXT_TYPES, layoutItem, resolveText } from '../../services/pdf/textMetrics.js';
+import { TEXT_RENDER_STYLE, TEXT_TYPES, layoutItem, resolveText } from '../../services/pdf/textMetrics.js';
 import { cx } from '../../utils/cx.js';
 
 const ALL_HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
@@ -27,25 +27,39 @@ function EditableText({ item, scale, editing, onTextChange, onFinish, onFormatKe
   const t = resolveText(item);
   const textLayout = layoutItem(item);
   useEffect(() => {
-    if (!editing || !ref.current) return;
-    ref.current.focus();
+    const el = ref.current;
+    if (!editing || !el) return;
+    // preventScroll: focusing must never scroll the page stage, which would look like the text jumping.
+    el.focus({ preventScroll: true });
     // Editing an existing PDF text object should replace the text on first typing, not silently append.
     // The user can click at a specific caret position or press an arrow key to make a partial edit.
-    const end = ref.current.value.length;
-    ref.current.setSelectionRange(0, end);
+    el.setSelectionRange(0, el.value.length);
+    el.scrollLeft = 0; el.scrollTop = 0;
   }, [editing]);
-  const style = {
-    fontFamily: t.cssFamily, fontSize: `${t.size * scale}px`, lineHeight: `${t.size * t.lineHeight * scale}px`, minHeight: `${Math.max(Number(item.h) || 0, textLayout.autoH) * scale}px`,
-    fontWeight: t.cssBold ? 700 : 400, fontStyle: t.cssItalic ? 'italic' : 'normal', textAlign: t.align, textDecoration: [t.underline && 'underline', t.strike && 'line-through'].filter(Boolean).join(' ') || 'none', fontSynthesis: 'none',
+  // Static text and the textarea share ONE style object, so entering edit mode cannot move or re-flow the glyphs.
+  const boxH = Math.max(Number(item.h) || 0, textLayout.autoH);
+  const common = {
+    ...TEXT_RENDER_STYLE,
+    fontFamily: t.cssFamily, fontSize: `${t.size * scale}px`, lineHeight: `${t.size * t.lineHeight * scale}px`,
+    fontWeight: t.cssBold ? 700 : 400, fontStyle: t.cssItalic ? 'italic' : 'normal', textAlign: t.align,
+    textDecoration: [t.underline && 'underline', t.strike && 'line-through'].filter(Boolean).join(' ') || 'none',
+    letterSpacing: item.type === 'stamp' ? '.06em' : 'normal',
     padding: `${t.pad * scale}px`, color: item.color || '#000',
     whiteSpace: t.reflow ? 'pre-wrap' : 'pre', overflowWrap: t.reflow ? 'anywhere' : 'normal',
+    minHeight: `${boxH * scale}px`,
   };
   if (editing) {
+    const middle = t.valign === 'middle';
+    // A textarea cannot vertically centre its text, so give it the same top offset the centred static text has.
+    const style = { ...common, ...(middle ? { paddingTop: `${(t.pad + Math.max(0, (Number(item.h) - textLayout.autoH) / 2)) * scale}px` } : null) };
+    // Leave a few px of room at the right so the end-of-text caret never makes the field scroll sideways.
+    if (!t.reflow && t.align === 'left') style.width = 'calc(100% + 4px)';
+    const keepStill = (event) => { const el = event.currentTarget; if (el.scrollLeft || el.scrollTop) { el.scrollLeft = 0; el.scrollTop = 0; } };
     return <textarea ref={ref} className="ep-text-input" style={style} wrap={t.reflow ? 'soft' : 'off'} spellCheck value={item.text || ''} placeholder="Type here" aria-label="Edit text"
-      onChange={(event) => onTextChange(item.id, event.target.value)} onBlur={onFinish}
+      onChange={(event) => onTextChange(item.id, event.target.value)} onBlur={onFinish} onScroll={keepStill}
       onKeyDown={(event) => { event.stopPropagation(); const k = event.key.toLowerCase(); if ((event.ctrlKey || event.metaKey) && !event.shiftKey && ['b', 'i', 'u'].includes(k)) { event.preventDefault(); onFormatKey?.(k); return; } if (event.key === 'Escape' || (event.key === 'Enter' && (event.ctrlKey || event.metaKey))) { event.preventDefault(); event.currentTarget.blur(); } }} />;
   }
-  return <div className={cx('ep-text', t.valign === 'middle' && 'is-middle')} style={style}>{item.text}</div>;
+  return <div className={cx('ep-text', t.valign === 'middle' && 'is-middle')} style={common}>{item.text}</div>;
 }
 
 function ObjectView({ item, scale, selected, editing, interactive, showHandles, onTextChange, onFinish, onFormatKey }) {

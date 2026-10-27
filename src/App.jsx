@@ -51,13 +51,20 @@ function App() {
     setEditorTabTitle('Edit PDF');
     setModeRaw((current) => current === 'edit' ? (previousModeRef.current || 'home') : current);
   }, [editorDirty]);
-  // If the entire application is closed while a background Edit PDF tab has unsaved edits, ask before exit.
+  // If the whole application is closed while an Edit PDF tab has unsaved edits, ask before exit. In the desktop app the
+  // main process owns that prompt (it reliably closes the window once the user confirms); the browser build falls back to
+  // the standard `beforeunload` guard.
+  const hasUnsaved = editorTabOpen && editorDirty;
   useEffect(() => {
-    if (!editorTabOpen || !editorDirty) return undefined;
+    if (window.pdfStudio?.setUnsavedChanges) {
+      window.pdfStudio.setUnsavedChanges(hasUnsaved).catch(() => {});
+      return () => { window.pdfStudio.setUnsavedChanges(false).catch(() => {}); };
+    }
+    if (!hasUnsaved) return undefined;
     const guard = (event) => { event.preventDefault(); event.returnValue = ''; };
     window.addEventListener('beforeunload', guard);
     return () => window.removeEventListener('beforeunload', guard);
-  }, [editorTabOpen, editorDirty]);
+  }, [hasUnsaved]);
   const [modal, setModal] = useState(null);
   const [settingsTab, setSettingsTab] = useState('appearance');
   const [guideStep, setGuideStep] = useState(0);

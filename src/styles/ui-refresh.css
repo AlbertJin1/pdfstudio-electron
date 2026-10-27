@@ -357,20 +357,6 @@ button, input, select, textarea { font-family: inherit; }
     & .workspace-heading { margin-bottom: 12px; }
   }
 
-  /* ≤ 1100px: sidebar becomes an icon rail */
-  @media (max-width: 900px) {
-    & .sidebar { width: 68px; }
-    & .sidebar-scroll { padding: 14px 10px; }
-    & .document-list { display: grid; gap: 6px; justify-items: center; }
-    & .document-list-item { width: 44px; height: 44px; padding: 0; margin: 0 auto; justify-content: center; overflow: hidden; }
-    & .document-list-item .file-type-mini { margin: 0; }
-    & .empty-docs-link { width: 44px; height: 44px; margin: 0 auto; }
-    & .quick-nav { width: 44px; height: 44px; margin: 0 auto; padding: 0; }
-    & .nav-item { width: 44px; height: 44px; margin: 0 auto 4px; }
-    & .nav-item.nav-active::before { left: -10px; }
-    & .section-label { justify-content: center; }
-  }
-
   /* ≤ 760px: single-column content, comfortable touch-size controls */
   @media (max-width: 760px) {
     & .home-view, & .conversion-view, & .history-view, & .settings-view { padding: 16px clamp(12px, 3.5vw, 20px) 28px; }
@@ -504,21 +490,6 @@ button, input, select, textarea { font-family: inherit; }
 :root:root .app-shell.theme-dark .account-row {
   color: #e7eaf0;
 }
-@media (max-width: 900px) {
-  :root:root .app-shell .sidebar-footer { padding: 8px; }
-  :root:root .app-shell .account-row {
-    display: flex;
-    justify-content: center;
-    gap: 0;
-    min-height: 48px;
-    padding: 6px 0;
-    margin-top: 8px;
-  }
-  :root:root .app-shell .account-avatar { flex: 0 0 34px; }
-  :root:root .app-shell .account-meta,
-  :root:root .app-shell .account-settings { display: none; }
-}
-
 /* ---- In-app interactive user guide ------------------------------------- */
 :root:root .app-shell .guide-layout {
   display: grid;

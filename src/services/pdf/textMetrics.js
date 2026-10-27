@@ -12,9 +12,22 @@ export const AUTO_SIZE_TYPES = new Set(['text', 'textedit']);
 
 let measureContext;
 function getContext() {
-  if (!measureContext && typeof document !== 'undefined') measureContext = document.createElement('canvas').getContext('2d');
+  if (!measureContext && typeof document !== 'undefined') {
+    measureContext = document.createElement('canvas').getContext('2d');
+    // Measure exactly the way the editor draws text (see TEXT_RENDER_STYLE): no hinting-based advance rounding.
+    try { measureContext.textRendering = 'geometricPrecision'; measureContext.fontKerning = 'normal'; } catch { /* older engines keep their defaults */ }
+  }
   return measureContext;
 }
+
+/** Applied to BOTH the static text and the editing textarea so switching between them cannot change glyph
+ * advances. A textarea resets text-rendering/letter-spacing/etc. to the user-agent defaults while a div inherits
+ * the app's global values, which is what used to nudge the text when a box went into edit mode. */
+export const TEXT_RENDER_STYLE = {
+  textRendering: 'geometricPrecision', fontKerning: 'normal', letterSpacing: 'normal', wordSpacing: 'normal',
+  textIndent: 0, textTransform: 'none', fontFeatureSettings: 'normal', fontVariantLigatures: 'normal', fontSynthesis: 'none',
+  WebkitFontSmoothing: 'antialiased', tabSize: 8,
+};
 
 /** Fonts commonly installed with Windows/Office. Export embeds the real font file when it can be found. */
 export const COMMON_FONTS = [

@@ -548,6 +548,8 @@ const DEFAULT_REVIEW_STATE = Object.freeze({
   reviewStatus: 'none',
   pendingReviewId: '',
   lastReviewId: '',
+  lastReviewVersion: '',
+  usageSecondsAtReview: 0,
 });
 let cachedReviewState = null;
 let reviewStateLoadPromise = null;
@@ -601,7 +603,13 @@ async function loadReviewState() {
         reviewStatus: ['pending', 'submitted'].includes(saved?.reviewStatus) ? saved.reviewStatus : (Number(saved?.submittedAt) > 0 ? 'submitted' : 'none'),
         pendingReviewId: typeof saved?.pendingReviewId === 'string' ? saved.pendingReviewId.slice(0, 64) : '',
         lastReviewId: typeof saved?.lastReviewId === 'string' ? saved.lastReviewId.slice(0, 64) : '',
+        lastReviewVersion: typeof saved?.lastReviewVersion === 'string' ? saved.lastReviewVersion.slice(0, 32) : '',
+        usageSecondsAtReview: Math.max(0, Number(saved?.usageSecondsAtReview) || 0),
       };
+      // Earlier builds switched the prompt off for good after a review. A reviewer is now only paused for a while,
+      // so that legacy flag no longer means "never ask" (an explicit opt-out is made without a review on record).
+      if (cachedReviewState.submittedAt > 0 && cachedReviewState.neverAskAgain) cachedReviewState.neverAskAgain = false;
+      if (cachedReviewState.submittedAt > 0 && !cachedReviewState.usageSecondsAtReview) cachedReviewState.usageSecondsAtReview = cachedReviewState.totalUsageSeconds;
     } catch {
       cachedReviewState = { ...DEFAULT_REVIEW_STATE };
       if (reviewStateReadBlocked) {
@@ -615,17 +623,15 @@ async function loadReviewState() {
     try {
       const queued = await readReviewOutbox();
       const pending = queued.find((item) => item && typeof item.id === 'string' && item.payload && typeof item.payload === 'object');
-      if (pending && !cachedReviewState.submittedAt) {
+      if (pending && pending.id !== cachedReviewState.lastReviewId) {
         cachedReviewState.reviewStatus = 'pending';
         cachedReviewState.pendingReviewId = pending.id;
-        cachedReviewState.neverAskAgain = true;
       }
     } catch (error) {
       // A queue that cannot be decrypted/read must never cause another prompt or be overwritten.
       reviewOutboxReadBlocked = true;
       cachedReviewState.reviewStatus = 'pending';
       cachedReviewState.pendingReviewId = cachedReviewState.pendingReviewId || 'pending-unreadable';
-      cachedReviewState.neverAskAgain = true;
       void logUsageDiagnostic(`The encrypted review outbox could not be read; prompting is disabled to avoid duplicate feedback (${String(error?.message || error).slice(0, 180)}).`);
     }
     return cachedReviewState;
@@ -660,6 +666,30 @@ function getReviewOutboxPath() {
  * Reviews may contain free-form personal feedback, so the durable retry queue is encrypted using
  * Windows user-bound Electron safeStorage (DPAPI on Windows). No plaintext fallback is permitted.
  */
+// Electron 45 deprecates the synchronous safeStorage calls. Use the async API when present, and fall back to the
+// synchronous one (older Electron, or data written by an earlier build) so existing queued reviews stay readable.
+async function secureStorageAvailable() {
+  if (typeof safeStorage.isAsyncEncryptionAvailable === 'function') {
+    try { if (await safeStorage.isAsyncEncryptionAvailable()) return true; } catch { /* fall through */ }
+  }
+  try { return Boolean(safeStorage.isEncryptionAvailable()); } catch { return false; }
+}
+async function secureEncrypt(text) {
+  if (typeof safeStorage.encryptStringAsync === 'function') {
+    try { return Buffer.from(await safeStorage.encryptStringAsync(text)); } catch { /* use the synchronous API */ }
+  }
+  return safeStorage.encryptString(text);
+}
+async function secureDecrypt(buffer) {
+  if (typeof safeStorage.decryptStringAsync === 'function') {
+    try {
+      const out = await safeStorage.decryptStringAsync(buffer);
+      return typeof out === 'string' ? out : String(out?.result ?? '');
+    } catch { /* data written by the synchronous API: decrypt it that way */ }
+  }
+  return safeStorage.decryptString(buffer);
+}
+
 async function readReviewOutbox() {
   const file = getReviewOutboxPath();
   const candidates = [`${file}.tmp`, file, `${file}.bak`];
@@ -676,10 +706,10 @@ async function readReviewOutbox() {
     }
     foundAny = true;
     try {
-      if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is not available to decrypt pending reviews.');
+      if (!(await secureStorageAvailable())) throw new Error('Windows secure storage is not available to decrypt pending reviews.');
       const encrypted = Buffer.from(String(encoded).trim(), 'base64');
       if (!encrypted.length) throw new Error('The encrypted review outbox is empty or damaged.');
-      const parsed = JSON.parse(safeStorage.decryptString(encrypted));
+      const parsed = JSON.parse(await secureDecrypt(encrypted));
       const items = reviewQueuePolicy.normalizeOutbox(parsed);
       // Recover a fully-written temp/backup file after a crash during an atomic replacement.
       if (candidate !== file) {
@@ -702,10 +732,10 @@ async function readReviewOutbox() {
 
 async function writeReviewOutbox(items) {
   if (reviewOutboxReadBlocked) throw new Error('The existing encrypted review queue could not be read; it was not overwritten.');
-  if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable, so the review cannot be saved safely.');
+  if (!(await secureStorageAvailable())) throw new Error('Windows secure storage is unavailable, so the review cannot be saved safely.');
   const file = getReviewOutboxPath();
   await fs.mkdir(path.dirname(file), { recursive: true });
-  const encrypted = safeStorage.encryptString(JSON.stringify({ version: 1, items: items.slice(-5) }));
+  const encrypted = await secureEncrypt(JSON.stringify({ version: 1, items: items.slice(-5) }));
   const temp = `${file}.tmp`;
   await fs.writeFile(temp, encrypted.toString('base64'), { encoding: 'utf8', mode: 0o600 });
   // Windows rename cannot reliably replace an existing destination. Keep a recoverable backup
@@ -752,7 +782,7 @@ async function flushPendingReviews({ force = false } = {}) {
         state.reviewStatus = 'submitted';
         state.pendingReviewId = '';
         state.lastReviewId = item.id;
-        state.neverAskAgain = true;
+        state.lastReviewVersion = String(item.payload?.version || app.getVersion()).slice(0, 32);
         state.snoozedUntil = 0;
         await persistReviewState();
         queue = queue.filter((candidate) => candidate.id !== item.id);
@@ -768,7 +798,7 @@ async function flushPendingReviews({ force = false } = {}) {
       item.nextAttemptAt = Date.now() + reviewRetryDelayMs(item.attempts, item.lastStatus);
     }
     await writeReviewOutbox(queue);
-    return { delivered, pending: queue.length > 0 };
+    return { delivered, pending: queue.length > 0, message: queue[0]?.lastError || '' };
   } catch (error) {
     await logUsageDiagnostic(`Pending review delivery failed safely: ${String(error?.message || error).slice(0, 300)}`);
     return { delivered, pending: true, error: String(error?.message || error) };
@@ -779,7 +809,9 @@ async function flushPendingReviews({ force = false } = {}) {
 
 function startReviewOutboxService() {
   if (reviewOutboxTimer) return;
-  void flushPendingReviews();
+  // Once per launch ignore the retry backoff, so a review that was rejected earlier (for example by an older
+  // Monitor gateway) is re-sent as soon as the app starts after the Monitor has been updated.
+  void flushPendingReviews({ force: true });
   reviewOutboxTimer = setInterval(() => { void flushPendingReviews(); }, 60_000);
   reviewOutboxTimer.unref?.();
 }
@@ -1867,6 +1899,30 @@ handle('app:renderer-ready', (event) => {
   return true;
 });
 
+// ---- Unsaved-edit protection for the main window ----------------------------------------------------------
+// The renderer reports whether any in-app Edit PDF tab has unsaved edits. Closing the window (title-bar X, Alt+F4) or
+// quitting the app then asks once, natively. Choosing "Discard and close" proceeds for real; the old renderer-only
+// `beforeunload` guard had no main-process handler, so Electron silently cancelled the close and the app never exited.
+let rendererHasUnsaved = false;
+let closeConfirmed = false;
+let closePromptOpen = false;
+function askDiscardUnsaved(win) {
+  if (closePromptOpen) return Promise.resolve(false);
+  closePromptOpen = true;
+  if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.show(); }
+  const options = {
+    type: 'warning', buttons: ['Discard and close', 'Keep editing'], defaultId: 1, cancelId: 1, noLink: true,
+    title: 'Unsaved PDF edits', message: 'You have unsaved PDF edits.',
+    detail: 'If you close PDF Studio now, those edits will be lost. Your original PDF is not changed.',
+  };
+  const shown = win && !win.isDestroyed() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options);
+  return shown.then(({ response }) => response === 0).catch(() => false).finally(() => { closePromptOpen = false; });
+}
+handle('app:set-unsaved', (event, value) => {
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) rendererHasUnsaved = value === true;
+  return true;
+});
+
 function createWindow() {
   // Each newly created window gets its own chance to display a startup diagnostic.
   startupFailureShown = false;
@@ -1903,6 +1959,17 @@ function createWindow() {
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('window:maximized', false));
   mainWindow.on('enter-full-screen', () => mainWindow.webContents.send('window:fullscreen', true));
   mainWindow.on('leave-full-screen', () => mainWindow.webContents.send('window:fullscreen', false));
+  mainWindow.on('close', (event) => {
+    if (closeConfirmed || !rendererHasUnsaved) return;
+    event.preventDefault();
+    void askDiscardUnsaved(mainWindow).then((discard) => {
+      if (!discard) return;
+      closeConfirmed = true;
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+    });
+  });
+  // Once the user has confirmed (or nothing is unsaved) a stale renderer `beforeunload` guard must never block shutdown.
+  mainWindow.webContents.on('will-prevent-unload', (event) => { if (closeConfirmed || !rendererHasUnsaved) event.preventDefault(); });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) shell.openExternal(url);
     return { action: 'deny' };
@@ -1961,6 +2028,12 @@ app.on('window-all-closed', () => { app.quit(); });
 app.on('before-quit', (event) => {
   if (usageShutdownComplete) return;
   if (usageShutdownInProgress) { event.preventDefault(); return; }
+  // Quit paths other than the window's own close (tray, installer-driven update, taskbar "Close all windows").
+  if (rendererHasUnsaved && !closeConfirmed) {
+    event.preventDefault();
+    void askDiscardUnsaved(mainWindow).then((discard) => { if (discard) { closeConfirmed = true; app.quit(); } });
+    return;
+  }
   usageShutdownInProgress = true;
   event.preventDefault();
   stopAccessControl();
@@ -2147,8 +2220,18 @@ handle('review:maybe-prompt', async () => {
     : 0;
   const totalUsageSeconds = state.totalUsageSeconds + liveSeconds;
   const cooldownMs = 7 * 24 * 60 * 60 * 1000;
-  if (reviewQueuePolicy.shouldSuppressReviewPrompt(state, reviewOutboxReadBlocked || reviewStateReadBlocked)) {
-    return { shouldPrompt: false, stopChecking: true, totalUsageSeconds, submitted: Boolean(state.submittedAt), pending: Boolean(state.pendingReviewId || state.reviewStatus === 'pending' || reviewOutboxReadBlocked) };
+  const blocked = reviewOutboxReadBlocked || reviewStateReadBlocked;
+  if (reviewQueuePolicy.shouldSuppressReviewPrompt(state, blocked, { appVersion: app.getVersion(), now })) {
+    // Permanent only for an explicit opt-out or an unreadable store. A recent review (or one still being delivered)
+    // just pauses the prompt; it is checked again later so it can return after 90 days / a new major version.
+    const permanent = blocked || state.neverAskAgain;
+    const resting = reviewQueuePolicy.reviewCooldownRemainingMs(state, app.getVersion(), now);
+    return {
+      shouldPrompt: false, stopChecking: permanent, totalUsageSeconds,
+      submitted: Boolean(state.submittedAt), recentlyReviewed: resting > 0,
+      pending: Boolean(state.pendingReviewId || state.reviewStatus === 'pending' || reviewOutboxReadBlocked),
+      nextCheckAfterMs: resting > 0 ? Math.min(24 * 60 * 60 * 1000, resting) : 60 * 60 * 1000,
+    };
   }
   if (now < state.snoozedUntil) {
     return { shouldPrompt: false, totalUsageSeconds, nextCheckAfterMs: Math.min(24 * 60 * 60 * 1000, state.snoozedUntil - now) };
@@ -2156,8 +2239,12 @@ handle('review:maybe-prompt', async () => {
   if (state.lastPromptAt && now - state.lastPromptAt < cooldownMs) {
     return { shouldPrompt: false, totalUsageSeconds, nextCheckAfterMs: Math.min(24 * 60 * 60 * 1000, cooldownMs - (now - state.lastPromptAt)) };
   }
-  if (totalUsageSeconds < 30 * 60) {
-    return { shouldPrompt: false, totalUsageSeconds, nextCheckAfterMs: Math.max(60_000, Math.min(10 * 60_000, (30 * 60 - totalUsageSeconds) * 1000 + Math.random() * 20_000)) };
+  // 30 minutes of use in total, and (after a review) 30 minutes of new use since it.
+  const usageSinceReview = Math.max(0, totalUsageSeconds - state.usageSecondsAtReview);
+  const neededSeconds = Math.max(0, reviewQueuePolicy.REVIEW_MIN_NEW_USAGE_SECONDS - usageSinceReview);
+  if (totalUsageSeconds < 30 * 60 || neededSeconds > 0) {
+    const missing = Math.max(30 * 60 - totalUsageSeconds, neededSeconds);
+    return { shouldPrompt: false, totalUsageSeconds, nextCheckAfterMs: Math.max(60_000, Math.min(10 * 60_000, missing * 1000 + Math.random() * 20_000)) };
   }
   const shouldPrompt = Math.random() < 0.28;
   return { shouldPrompt, totalUsageSeconds, submitted: false, nextCheckAfterMs: shouldPrompt ? 0 : Math.round((12 + Math.random() * 18) * 60_000) };
@@ -2172,7 +2259,7 @@ handle('review:prompt-shown', async () => {
 });
 handle('review:defer', async (_event, choice) => {
   const state = await loadReviewState();
-  if (state.submittedAt || state.pendingReviewId || state.reviewStatus === 'pending') return true;
+  if (state.pendingReviewId || state.reviewStatus === 'pending') return true;
   if (String(choice) === 'never') {
     state.neverAskAgain = true;
     state.snoozedUntil = 0;
@@ -2187,12 +2274,21 @@ handle('review:submit', async (_event, review) => {
   const rating = Number(review?.rating);
   if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new Error('Choose a rating from 1 to 5 stars.');
   const state = await loadReviewState();
-  if (state.submittedAt || state.reviewStatus === 'submitted') return { ok: true, alreadySubmitted: true };
+  // Reviews are never blocked here: people may review whenever they like (the Monitor rate-limits abuse). Only the
+  // automatic prompt rests after a review; see review-queue-policy.cjs.
   if (reviewStateReadBlocked && state.pendingReviewId === 'state-unreadable') throw new Error('PDF Studio could not safely recover its local review history. No new review was added to avoid a possible duplicate.');
   if (reviewOutboxReadBlocked) throw new Error('PDF Studio could not safely read its existing encrypted review queue. No new review was added and no pending feedback was overwritten.');
-  if (state.pendingReviewId || state.reviewStatus === 'pending') return { ok: true, queued: true, alreadyQueued: true };
+  if (state.pendingReviewId || state.reviewStatus === 'pending') {
+    // A review is already waiting: try to deliver it right now instead of just reporting it as queued.
+    const retry = await flushPendingReviews({ force: true });
+    return { ok: true, queued: !retry.delivered, delivered: retry.delivered > 0, alreadyQueued: true, detail: retry.message || '' };
+  }
 
-  const name = String(review?.name || '').replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 60);
+  // No name given -> the machine's hostname identifies the reviewer in the Monitor.
+  await accountReviewUsage();
+  state.usageSecondsAtReview = state.totalUsageSeconds; // the next automatic prompt needs fresh use after this review
+  const hostname = getUsageHostname();
+  const name = (String(review?.name || '').replace(/[\x00-\x1f\x7f]/g, '').trim() || hostname).slice(0, 60);
   const message = String(review?.message || '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').trim().slice(0, 1500);
   await ensureUsageIdentity();
   const reviewId = crypto.randomBytes(16).toString('hex');
@@ -2206,14 +2302,28 @@ handle('review:submit', async (_event, review) => {
 
   // The encrypted outbox is written first. Only after it is durable do we suppress future prompts,
   // so an interrupted process cannot lose a review and then ask the same person to write it again.
-  await queueReview(payload, reviewId);
+  try {
+    await queueReview(payload, reviewId);
+  } catch (queueError) {
+    // Secure storage unavailable: send straight to the Monitor so the review is not lost.
+    const direct = await postMonitorUsage(payload, 10000);
+    if (direct.status !== 'delivered') throw new Error(`Your review could not be sent or saved on this device (${String(direct.message || queueError?.message || 'unknown error').slice(0, 160)}). Please try again later.`);
+    state.submittedAt = Date.now(); state.reviewStatus = 'submitted'; state.pendingReviewId = ''; state.lastReviewId = reviewId; state.lastReviewVersion = app.getVersion(); state.snoozedUntil = 0;
+    state.usageSecondsAtReview = state.totalUsageSeconds;
+    await persistReviewState();
+    return { ok: true, delivered: true, reviewId };
+  }
   state.reviewStatus = 'pending';
   state.pendingReviewId = reviewId;
-  state.neverAskAgain = true;
   state.snoozedUntil = 0;
   await persistReviewState();
-  void flushPendingReviews({ force: true });
-  return { ok: true, queued: true, reviewId };
+  // Attempt delivery now and report the real outcome; if the Monitor is unreachable the review stays queued and retries automatically.
+  const sent = await flushPendingReviews({ force: true });
+  return { ok: true, delivered: sent.delivered > 0, queued: !(sent.delivered > 0), reviewId, detail: sent.message || '' };
+});
+handle('review:identity', async () => {
+  const state = await loadReviewState().catch(() => null);
+  return { hostname: getUsageHostname(), lastReviewAt: Number(state?.submittedAt) || 0, reviewPending: Boolean(state?.pendingReviewId || state?.reviewStatus === 'pending') };
 });
 handle('fonts:find', async (_event, query) => {
   try { return await findInstalledFont({ family: String(query?.family || ''), bold: Boolean(query?.bold), italic: Boolean(query?.italic) }); } catch { return null; }

@@ -39,6 +39,23 @@ const NAV = [
 const COLLAPSE_KEY = 'pdfstudio-sidebar-collapsed';
 const readCollapsed = () => { try { return localStorage.getItem(COLLAPSE_KEY) === '1'; } catch { return false; } };
 
+// Below this window width the sidebar is always an icon rail; the toggle then opens it as an overlay on top of the
+// content, so the page area never gets squeezed. Keep in sync with the CSS in sidebar-collapse.css (no media query
+// there depends on it: the layout is driven by the `is-collapsed` / `is-overlay` classes only).
+const NARROW_QUERY = '(max-width: 919.98px)';
+function useNarrowWindow() {
+  const [narrow, setNarrow] = useState(() => (typeof window !== 'undefined' && window.matchMedia ? window.matchMedia(NARROW_QUERY).matches : false));
+  useEffect(() => {
+    if (!window.matchMedia) return undefined;
+    const query = window.matchMedia(NARROW_QUERY);
+    const onChange = (event) => setNarrow(event.matches);
+    setNarrow(query.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  return narrow;
+}
+
 /** Tooltip anchored to the hovered rail item. Rendered in a portal so the sidebar's overflow never clips it. */
 function RailTooltip({ tip }) {
   if (!tip) return null;
@@ -51,17 +68,37 @@ function RailTooltip({ tip }) {
 }
 
 export default function Sidebar({ pages, documents, mode, appVersion, currentDocument, setSelectedIds, setActiveId, setMode, setModal, chooseFiles, removeDocument }) {
-  const [collapsed, setCollapsed] = useState(readCollapsed);
+  const [preferCollapsed, setPreferCollapsed] = useState(readCollapsed);
+  const [peek, setPeek] = useState(false); // narrow windows: rail temporarily opened as an overlay
   const [railTip, setRailTip] = useState(null);
+  const narrow = useNarrowWindow();
+  const overlay = narrow && peek;
+  const collapsed = narrow ? !peek : preferCollapsed;
+
+  useEffect(() => { if (!narrow) setPeek(false); }, [narrow]);
+  useEffect(() => { setPeek(false); }, [mode]);
 
   const toggle = useCallback(() => {
     setRailTip(null);
-    setCollapsed((value) => {
+    if (narrow) { setPeek((value) => !value); return; }
+    setPreferCollapsed((value) => {
       const next = !value;
       try { localStorage.setItem(COLLAPSE_KEY, next ? '1' : '0'); } catch { /* preference just will not persist */ }
       return next;
     });
-  }, []);
+  }, [narrow]);
+
+  // Esc closes the overlay.
+  useEffect(() => {
+    if (!overlay) return undefined;
+    const onKey = (event) => { if (event.key === 'Escape') setPeek(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [overlay]);
+  // Choosing something in the overlay closes it (the toggle button manages itself).
+  const closeAfterChoice = (event) => {
+    if (overlay && event.target.closest?.('.nav-item, .quick-nav, .document-label, .empty-docs-link, .account-row')) setPeek(false);
+  };
 
   // Ctrl/Cmd+B toggles the rail, except while typing in a field.
   useEffect(() => {
@@ -93,7 +130,8 @@ export default function Sidebar({ pages, documents, mode, appVersion, currentDoc
 
   return (
     <>
-    <motion.aside className={cx('sidebar', collapsed && 'is-collapsed')} onMouseOver={showTip} onMouseLeave={hideTip} onFocus={showTip} onBlur={hideTip} onScroll={hideTip} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.25, delay: 0.06, ease: [0.22, 1, 0.36, 1] }}>
+    {overlay && <><div className="sidebar-rail-spacer" aria-hidden="true" /><div className="sidebar-backdrop" aria-hidden="true" onClick={() => setPeek(false)} /></>}
+    <motion.aside className={cx('sidebar', collapsed && 'is-collapsed', overlay && 'is-overlay')} onClickCapture={closeAfterChoice} onMouseOver={showTip} onMouseLeave={hideTip} onFocus={showTip} onBlur={hideTip} onScroll={hideTip} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.25, delay: 0.06, ease: [0.22, 1, 0.36, 1] }}>
       <div className="sidebar-scroll">
         <SectionLabel className="sidebar-toggle-row" trailing={<button type="button" className="icon-button sidebar-toggle" aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} aria-expanded={!collapsed} title={collapsed ? undefined : 'Collapse sidebar (Ctrl+B)'} {...tip(collapsed ? 'Expand sidebar' : '', 'Ctrl+B')} onClick={toggle}>{collapsed ? <PanelLeftOpen size={17} strokeWidth={1.85} aria-hidden="true" /> : <PanelLeftClose size={17} strokeWidth={1.85} aria-hidden="true" />}</button>}>Workspace</SectionLabel>
         <LayoutGroup id="primary-navigation">

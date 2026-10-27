@@ -1,7 +1,7 @@
 // Reads the existing content of a PDF page so it can be edited like in Acrobat:
 // text is grouped into lines and paragraph blocks, images are located through the operator list.
 import { getPdfJsLib } from './pdfjs.js';
-import { familyFromName } from './textMetrics.js';
+import { familyFromName, textWidth } from './textMetrics.js';
 
 const mul = (m, n) => [
   m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
@@ -32,11 +32,27 @@ function collectLines(content, page, viewport) {
     let fontObj = null;
     try { if (page.commonObjs.has(raw.fontName)) fontObj = page.commonObjs.get(raw.fontName); } catch { /* font not resolved yet */ }
     const real = fontObj?.name || '';
-    const width = Math.max(0.5, (raw.width || 0) * viewport.scale);
+    let width = Math.max(0.5, (raw.width || 0) * viewport.scale);
+    const font = { ...detectFont(real, style.fontFamily, fontObj), ref: raw.fontName };
+    // Leading/trailing spaces are part of the PDF run's advance width but are not visible text. Left in, they
+    // made the selectable/editable box run on past the text (sometimes right up to the next column).
+    const trimmed = raw.str.trim();
+    if (!trimmed) continue;
+    let left = t[4];
+    if (trimmed.length !== raw.str.length) {
+      const lead = raw.str.length - raw.str.trimStart().length;
+      const trail = raw.str.length - raw.str.trimEnd().length;
+      const full = textWidth(raw.str, font, 100);
+      const unit = full > 0 ? width / full : width / raw.str.length;
+      const leadW = full > 0 ? textWidth(raw.str.slice(0, lead), font, 100) * unit : (width * lead) / raw.str.length;
+      const trailW = full > 0 ? textWidth(raw.str.slice(raw.str.length - trail), font, 100) * unit : (width * trail) / raw.str.length;
+      left += leadW;
+      width = Math.max(0.5, width - leadW - trailW);
+    }
     items.push({
-      str: raw.str, x: t[4], base: t[5], size, w: width,
+      str: trimmed, x: left, base: t[5], size, w: width,
       top: t[5] - size * ascent, bottom: t[5] + size * descent,
-      font: { ...detectFont(real, style.fontFamily, fontObj), ref: raw.fontName },
+      font,
     });
   }
   // PDF content-stream order is not guaranteed to be visual order (tables and multi-column forms
@@ -151,6 +167,46 @@ export async function extractPageContent(page, viewport, pageIndex) {
     collectImages(page, viewport, pageIndex).catch(() => []),
   ]);
   return { blocks: groupBlocks(collectLines(content, page, viewport), pageIndex), images };
+}
+
+/** Right-most column (in page points) that holds real ink inside `rect`, or null when nothing can be read. */
+function inkRightOf(context, canvas, k, rect, bgRgb) {
+  const x0 = Math.max(0, Math.floor((rect.x - 1) * k)); const x1 = Math.min(canvas.width, Math.ceil((rect.x + rect.w + 1) * k));
+  const y0 = Math.max(0, Math.floor(rect.y * k)); const y1 = Math.min(canvas.height, Math.ceil((rect.y + rect.h) * k));
+  const w = x1 - x0; const h = y1 - y0;
+  if (w < 3 || h < 3) return null;
+  let data;
+  try { data = context.getImageData(x0, y0, w, h).data; } catch { return null; }
+  for (let x = w - 1; x >= 0; x -= 1) {
+    for (let y = 0; y < h; y += 1) {
+      const i = (y * w + x) * 4;
+      if (Math.abs(data[i] - bgRgb[0]) + Math.abs(data[i + 1] - bgRgb[1]) + Math.abs(data[i + 2] - bgRgb[2]) >= 48) return (x0 + x + 1) / k;
+    }
+  }
+  return null;
+}
+
+/** PDF text runs often report a width wider than the glyphs actually drawn (padding, tab stops, justified cells).
+ * Shrink each line's right edge to the ink really present on the rendered page so the hover box, the selection box
+ * and the edit box all hug the visible text. Edges only ever shrink, and never past the text itself. */
+export function tightenBlocksToInk(canvas, k, blocks) {
+  const context = canvas?.getContext('2d');
+  if (!context || !canvas.width || !(k > 0)) return blocks;
+  return blocks.map((block) => {
+    if (block.kind !== 'text' || !block.lines?.length) return block;
+    const lines = block.lines.map((line) => {
+      const rect = { x: line.x, y: line.base - line.size * 0.9, w: Math.max(1, line.right - line.x), h: line.size * 1.2 };
+      const bg = parseHex(sampleColors(canvas, k, rect).bg);
+      const ink = inkRightOf(context, canvas, k, rect, bg);
+      if (ink == null) return line;
+      const right = Math.min(line.right, ink + Math.max(0.6, 1.2 / k));
+      return right < line.right - 0.4 && right > line.x + 1 ? { ...line, right } : line;
+    });
+    const x = Math.min(...lines.map((l) => l.x));
+    const right = Math.max(...lines.map((l) => l.right));
+    if (Math.abs(right - (block.x + block.w)) < 0.01) return block;
+    return { ...block, x, w: right - x, lines };
+  });
 }
 
 const hex = (r, g, b) => `#${[r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('')}`;

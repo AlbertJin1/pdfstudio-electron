@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { FilePenLine, FolderOpen, Save, ShieldCheck, X } from 'lucide-react';
+import { FilePenLine, FileText, FolderOpen, Save, ShieldCheck, X } from 'lucide-react';
 import { loadPdfSource } from '../services/pdf/pdfjs.js';
 import { exportEditedPdf } from '../services/pdf/edit.js';
-import { detectUnderline, extractPageContent, renderRegionToDataUrl, sampleColors } from '../services/pdf/pageContent.js';
+import { detectUnderline, extractPageContent, renderRegionToDataUrl, sampleColors, tightenBlocksToInk } from '../services/pdf/pageContent.js';
 import { AUTO_SIZE_TYPES, COMMON_FONTS, TEXT_TYPES, baselineOf, fitTextPatch, layoutItem, resolveText } from '../services/pdf/textMetrics.js';
 import { saveInBrowser } from '../utils/download.js';
 import { normalizeBytes, uid } from '../utils/files.js';
 import { cx } from '../utils/cx.js';
 import ObjectView from './edit/ObjectView.jsx';
 import Ruler, { RULER_SIZE } from './edit/Rulers.jsx';
-import PageThumb from './edit/PageThumb.jsx';
 import SignatureDialog from './edit/SignatureDialog.jsx';
+import TooltipLayer from './edit/TooltipLayer.jsx';
 import { ALL_TOOLS, DocBar, FormatBar, SidePanel, ToolRail } from './edit/panels.jsx';
 import { alignItems, boundsOf, clamp, distributeItems, rectContains, rectsIntersect, transformItem, translateItem } from './edit/geometry.js';
 import { buildSnapLines, snapMove, snapPoint, snapResize, snapThreshold } from './edit/snap.js';
@@ -18,8 +18,9 @@ import { formatUnit } from './edit/units.js';
 
 const CSS_PT = 96 / 72;
 const PREFS_KEY = 'pdfstudio.editor.view.v1';
-const PANEL_PREFS_KEY = 'pdfstudio.editor.panels.v1';
-const loadPanels = () => { try { return { tools: true, pages: true, properties: true, ...JSON.parse(localStorage.getItem(PANEL_PREFS_KEY) || '{}') }; } catch { return { tools: true, pages: true, properties: true }; } };
+const PANEL_PREFS_KEY = 'pdfstudio.editor.panels.v2';
+const DEFAULT_PANELS = { tools: true, properties: true };
+const loadPanels = () => { try { const saved = JSON.parse(localStorage.getItem(PANEL_PREFS_KEY) || '{}'); return { tools: saved.tools !== false, properties: saved.properties !== false }; } catch { return DEFAULT_PANELS; } };
 const DEFAULT_VIEW = {
   unit: 'in', rulers: true, grid: false, gridSize: 18, showGuides: true, guidesLocked: false, showMargins: false, marginLink: false,
   snap: true, snapObjects: true, snapPage: true, snapGuides: true, snapMargins: true, snapGrid: true, lockAspect: true,
@@ -106,18 +107,24 @@ async function readImageFile(file) {
   } finally { URL.revokeObjectURL(url); }
 }
 
-function resizeRect(o, handle, dx, dy, minW, minH, aspect) {
+/**
+ * Resize helper. `aspect` (w/h ratio, 0 = free) keeps proportions; `center` resizes symmetrically around the
+ * original centre (Alt). Works for corner and edge handles.
+ */
+function resizeRect(o, handle, dx, dy, minW, minH, aspect, center = false) {
+  const k = center ? 2 : 1;
   let w = o.w; let h = o.h;
-  if (handle.includes('e')) w = o.w + dx;
-  if (handle.includes('w')) w = o.w - dx;
-  if (handle.includes('s')) h = o.h + dy;
-  if (handle.includes('n')) h = o.h - dy;
+  if (handle.includes('e')) w = o.w + dx * k;
+  if (handle.includes('w')) w = o.w - dx * k;
+  if (handle.includes('s')) h = o.h + dy * k;
+  if (handle.includes('n')) h = o.h - dy * k;
   w = Math.max(minW, w); h = Math.max(minH, h);
   if (aspect) {
-    if (handle.length === 2) { const f = Math.max(w / o.w, h / o.h); w = o.w * f; h = o.h * f; }
-    else if (handle === 'e' || handle === 'w') h = w / aspect;
-    else w = h * aspect;
+    if (handle.length === 2) { const f = Math.max(w / o.w, h / o.h, minW / o.w, minH / o.h); w = o.w * f; h = o.h * f; }
+    else if (handle === 'e' || handle === 'w') h = Math.max(minH, w / aspect);
+    else w = Math.max(minW, h * aspect);
   }
+  if (center) return { x: o.x + (o.w - w) / 2, y: o.y + (o.h - h) / 2, w, h };
   return { x: handle.includes('w') ? o.x + o.w - w : o.x, y: handle.includes('n') ? o.y + o.h - h : o.y, w, h };
 }
 
@@ -170,9 +177,33 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
   const [draft, setDraft] = useState(null);
   const [alignTo, setAlignTo] = useState('page');
   const [tab, setTab] = useState('format');
+  // The editor adapts to the room it actually has (the window minus any app chrome), not to the window width.
+  //   lg: tool rail + canvas + properties column   md: icon rail + canvas, properties slides over   sm: tool strip on top
+  const [bp, setBp] = useState('lg');
+  const [drawer, setDrawer] = useState(false);
+  const viewRef = useRef(null);
+  useEffect(() => {
+    const node = viewRef.current;
+    if (!node || typeof ResizeObserver === 'undefined') return undefined;
+    const pick = (w) => (w >= 1180 ? 'lg' : w >= 760 ? 'md' : 'sm');
+    const observer = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect?.width;
+      if (w) setBp((prev) => { const next = pick(w); return prev === next ? prev : next; });
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  const overlay = bp !== 'lg';
+  const stagePad = bp === 'sm' ? 12 : 24;
   const [panels, setPanels] = useState(loadPanels);
   useEffect(() => { try { localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify(panels)); } catch { /* storage may be disabled */ } }, [panels]);
-  const togglePanel = useCallback((key) => setPanels((old) => ({ ...old, [key]: !old[key] })), []);
+  const togglePanel = useCallback((key) => {
+    if (key === 'properties' && overlay) { setDrawer((open) => !open); return; }
+    if (key === 'tools' && overlay) return; // the rail is icon-only below the wide layout
+    setPanels((old) => ({ ...old, [key]: !old[key] }));
+  }, [overlay]);
+  const toolsCollapsed = overlay || !panels.tools;
+  const propsOpen = overlay ? drawer : panels.properties;
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [signatureOpen, setSignatureOpen] = useState(false);
@@ -214,10 +245,10 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
   // ---- zoom ---------------------------------------------------------------------------------
   const scale = useMemo(() => {
     if (!base) return 1;
-    const availW = Math.max(200, stageSize.width - 72); const availH = Math.max(200, stageSize.height - 72);
+    const availW = Math.max(120, stageSize.width - stagePad * 2); const availH = Math.max(120, stageSize.height - stagePad * 2);
     const raw = zoom.mode === 'width' ? availW / base.w : zoom.mode === 'page' ? Math.min(availW / base.w, availH / base.h, 3) : zoom.value;
     return clamp(raw, 0.2, 12000 / Math.max(base.w, base.h));
-  }, [base, stageSize, zoom]);
+  }, [base, stageSize, zoom, stagePad]);
   const zoomPercent = Math.round(scale / CSS_PT * 100);
   const zoomStep = useCallback((dir) => {
     const list = [10, 25, 33, 50, 67, 75, 100, 125, 150, 200, 300, 400, 600, 800];
@@ -372,9 +403,19 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
   // ---- page size, rendering, content ----------------------------------------------------------
   useEffect(() => {
     if (!stageRef.current || typeof ResizeObserver === 'undefined') return undefined;
-    const observer = new ResizeObserver((entries) => { const r = entries[0]?.contentRect; if (r) setStageSize({ width: r.width, height: r.height }); });
+    // Panels animate open/closed, which resizes the stage every frame. Applying at most one size per ~90 ms keeps the
+    // page canvas from re-rendering on each frame of that animation, and the final size is always applied.
+    let timer = 0; let latest = null; let last = 0;
+    const apply = () => { timer = 0; last = performance.now(); if (latest) setStageSize((prev) => (Math.abs(prev.width - latest.width) < 0.5 && Math.abs(prev.height - latest.height) < 0.5 ? prev : latest)); };
+    const observer = new ResizeObserver((entries) => {
+      const r = entries[0]?.contentRect; if (!r) return;
+      latest = { width: r.width, height: r.height };
+      if (timer) return;
+      const wait = Math.max(0, 90 - (performance.now() - last));
+      timer = window.setTimeout(apply, wait);
+    });
     observer.observe(stageRef.current);
-    return () => observer.disconnect();
+    return () => { observer.disconnect(); if (timer) window.clearTimeout(timer); };
   }, [pdfDoc]);
 
   useEffect(() => {
@@ -413,7 +454,9 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
         if (contentKeyRef.current !== key) {
           contentKeyRef.current = key;
           const found = await extractPageContent(page, page.getViewport({ scale: 1, rotation: page.rotate || 0 }), pageNumber - 1);
-          if (!cancelled || contentKeyRef.current === key) setContent({ key, ...found });
+          // Trim every text block to the ink actually drawn on the page so its box is accurate.
+          const blocks = tightenBlocksToInk(canvasRef.current, kRef.current, found.blocks);
+          if (!cancelled || contentKeyRef.current === key) setContent({ key, ...found, blocks });
         }
       } catch (error) {
         if (!cancelled && error?.name !== 'RenderingCancelledException') { console.error('PDF page rendering failed', error); setNotice(error?.message || 'This PDF page could not be rendered.'); }
@@ -499,9 +542,12 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
       };
       const layout = layoutItem(item);
       item.y = block.firstBaseline - baselineOf(layout, 0, 0);
-      // Keep the initial selection on the PDF's measured glyph bounds. Once text changes,
-      // the regular auto-fit path expands the box to fit the replacement content.
-      item.h = Math.max(1, block.h);
+      // The box is the text's real line box, i.e. exactly what the editor draws and edits, so selecting a block,
+      // entering edit mode and typing never change its size or move the text. (Sizing it to the PDF's glyph bounds
+      // made the outline shorter than the text field and, with padded PDF runs, far wider than the text.)
+      item.h = layout.autoH;
+      const hugs = (block.lines?.length || 1) === 1 || block.align === 'left';
+      item.w = hugs ? Math.max(layout.size * 0.6, layout.autoW) : Math.max(block.w, layout.autoW);
       item.orig = { x: item.x, y: item.y, text: item.text, size: item.size, font: item.font, fontName: item.fontName, bold: item.bold, italic: item.italic, underline, strike: false, color: item.color, align: item.align, lineHeight: item.lineHeight };
     }
     applyAnn(withList([...pageList(), item]), false);
@@ -628,7 +674,8 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
     const handleEl = target.closest('[data-handle]');
     if (handleEl && single) {
       const original = single; const imageLike = ['image', 'signature', 'imageedit'].includes(original.type);
-      ixRef.current = { type: 'resize', id: original.id, handle: handleEl.dataset.handle, original, startPt: pt, before: annRef.current, aspect: (imageLike ? !event.shiftKey : event.shiftKey) && view.lockAspect !== false ? original.w / original.h : 0, set: snapSet([original.id]) };
+      // Default proportion lock (images follow "Keep proportions"); Shift inverts it live while dragging.
+      ixRef.current = { type: 'resize', id: original.id, handle: handleEl.dataset.handle, original, startPt: pt, lastPt: pt, before: annRef.current, ratio: original.w / original.h, lockDefault: imageLike && view.lockAspect !== false, set: snapSet([original.id]) };
       surfaceRef.current?.setPointerCapture?.(event.pointerId); event.preventDefault(); return;
     }
     const objEl = target.closest('[data-obj]'); const blockEl = target.closest('[data-block]');
@@ -678,6 +725,33 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
     setDraft(first); surfaceRef.current?.setPointerCapture?.(event.pointerId); event.preventDefault();
   };
 
+  // Resize modifiers (all live, re-evaluated on every pointer move and every key press/release):
+  //   Shift = flip proportion lock · Alt = resize from the centre · Ctrl/Cmd = bypass snapping.
+  const runResize = (ix, pt, mods) => {
+    if (!base) return;
+    const o = ix.original; const text = TEXT_TYPES.has(o.type);
+    const center = !!mods.altKey; const flip = !!mods.shiftKey; const noSnap = !!(mods.ctrlKey || mods.metaKey);
+    const aspect = !text && ix.lockDefault !== flip ? ix.ratio : 0;
+    const minW = text ? Math.max(12, (o.size || 12) * 1.5) : 4; const minH = text ? o.h : 4;
+    let rect = resizeRect(o, ix.handle, pt.x - ix.startPt.x, pt.y - ix.startPt.y, minW, minH, aspect, center);
+    let hits = [];
+    if (view.snap && !noSnap && !aspect) {
+      const s = snapResize(rect, ix.handle, ix.set, snapThreshold(scale), minW); hits = s.hits;
+      if (center) {
+        // Snap the dragged edge, then mirror the change so the centre stays put.
+        const w = Math.max(minW, rect.w + 2 * (s.rect.w - rect.w)); const h = Math.max(minH, rect.h + 2 * (s.rect.h - rect.h));
+        rect = { x: o.x + (o.w - w) / 2, y: o.y + (o.h - h) / 2, w, h };
+      } else rect = { ...rect, ...s.rect };
+    }
+    // Keep the object on the page.
+    if (rect.x < 0) { if (!center) rect.w += rect.x; rect.x = 0; } if (rect.y < 0) { if (!center) rect.h += rect.y; rect.y = 0; }
+    rect.w = Math.max(minW, Math.min(rect.w, base.w - rect.x)); rect.h = Math.max(minH, Math.min(rect.h, base.h - rect.y));
+    const next = text ? applyPatch(o, { x: rect.x, w: rect.w, reflow: true }) : transformItem(o, { x: o.x, y: o.y, w: o.w, h: o.h }, rect);
+    applyAnn(withList(pageList().map((i) => (i.id === o.id ? next : i)), ix.before), true);
+    setSnapHits(hits);
+  };
+  const runResizeRef = useRef(null); runResizeRef.current = runResize;
+
   const surfaceMove = (event) => {
     const pt = toPt(event);
     cursorBus.current.forEach((fn) => fn(pt));
@@ -696,16 +770,7 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
       applyAnn(withList(pageList().map((i) => (originals.has(i.id) ? translateItem(originals.get(i.id), dx, dy) : i)), ix.before), true);
       setSnapHits(hits); return;
     }
-    if (ix.type === 'resize') {
-      const o = ix.original; const text = TEXT_TYPES.has(o.type);
-      const minW = text ? Math.max(12, (o.size || 12) * 1.5) : 4; const minH = text ? o.h : 4;
-      let rect = resizeRect(o, ix.handle, pt.x - ix.startPt.x, pt.y - ix.startPt.y, minW, minH, ix.aspect);
-      let hits = [];
-      if (snapping(event) && !ix.aspect) { const s = snapResize(rect, ix.handle, ix.set, thr, minW); rect = { ...rect, ...s.rect }; hits = s.hits; }
-      const next = text ? applyPatch(o, { x: rect.x, w: rect.w, reflow: true }) : transformItem(o, { x: o.x, y: o.y, w: o.w, h: o.h }, rect);
-      applyAnn(withList(pageList().map((i) => (i.id === o.id ? next : i)), ix.before), true);
-      setSnapHits(hits); return;
-    }
+    if (ix.type === 'resize') { ix.lastPt = pt; runResize(ix, pt, event); return; }
     if (ix.type === 'text') {
       if (!ix.dragged && Math.hypot(event.clientX - ix.startClient.x, event.clientY - ix.startClient.y) < 5) return;
       ix.dragged = true; ix.end = pt;
@@ -878,11 +943,27 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
       else if (key === 'v') setTool('select');
       else if (key === 't') setTool('text');
       else if (key === 'i') setTool('image');
+      else if (key === '[') togglePanel('tools');
+      else if (key === ']') togglePanel('properties');
     };
     const onKeyUp = (event) => { if (event.key === ' ' && spaceRef.current) { spaceRef.current = false; setSpaceHeld(false); } };
     window.addEventListener('keydown', onKeyDown); window.addEventListener('keyup', onKeyUp);
     return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp); };
-  }, [active, commitAnn, deleteSelected, duplicateSelected, editingId, goToPage, nudge, onCloseTab, pageCount, pageList, pageNumber, pdfDoc, redo, selectedIds, selectedItems, setSelection, setTool, single, standalone, startEditing, tool, undo, withList, zoomStep]);
+  }, [active, commitAnn, deleteSelected, duplicateSelected, editingId, goToPage, nudge, onCloseTab, pageCount, pageList, pageNumber, pdfDoc, redo, selectedIds, selectedItems, setSelection, setTool, single, standalone, startEditing, tool, togglePanel, undo, withList, zoomStep]);
+
+  // Live resize modifiers: pressing or releasing Shift / Alt / Ctrl mid-drag updates the result immediately,
+  // and Esc cancels the resize and restores the original size.
+  useEffect(() => {
+    const handle = (event) => {
+      const ix = ixRef.current; if (!ix || ix.type !== 'resize') return;
+      if (event.key === 'Escape' && event.type === 'keydown') { event.preventDefault(); event.stopPropagation(); applyAnn(ix.before, true); ixRef.current = null; setSnapHits([]); return; }
+      if (!['Shift', 'Alt', 'Control', 'Meta'].includes(event.key)) return;
+      event.preventDefault(); // stops Alt from focusing the window menu on release
+      runResizeRef.current?.(ix, ix.lastPt, event);
+    };
+    window.addEventListener('keydown', handle, true); window.addEventListener('keyup', handle, true);
+    return () => { window.removeEventListener('keydown', handle, true); window.removeEventListener('keyup', handle, true); };
+  }, [applyAnn]);
 
   // ---- save ----------------------------------------------------------------------------------------
   const savePdf = useCallback(async () => {
@@ -921,13 +1002,15 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
     applyAnn({ ...annRef.current, [key]: list }, true);
   }, [applyAnn, pageKey]);
 
+  const changesOnPage = useCallback((n) => (ann[String(n - 1)] || []).filter((i) => !isPristine(i)).length, [ann]);
   const covered = useMemo(() => new Set(items.map((i) => i.blockId).filter(Boolean)), [items]);
   const selectionBounds = selectedItems.length ? boundsOf(selectedItems) : null;
   const band = selectionBounds ? { x: { start: selectionBounds.x, end: selectionBounds.x + selectionBounds.w }, y: { start: selectionBounds.y, end: selectionBounds.y + selectionBounds.h } } : null;
   const px = (v) => v * scale;
   const interactive = tool === 'select';
   const gridPx = view.gridSize * scale;
-  const hasWorkspacePdfs = documents.some((d) => d.kind === 'pdf' && sourcesRef?.current?.has(d.id));
+  const workspaceDocs = standalone ? EMPTY_LIST : documents.filter((d) => d.kind === 'pdf' && sourcesRef?.current?.has(d.id));
+  const hasWorkspacePdfs = workspaceDocs.length > 0;
   const surfaceStyle = base ? { width: px(base.w), height: px(base.h) } : undefined;
   if (surfaceStyle && view.grid && gridPx > 5) {
     surfaceStyle.backgroundImage = 'linear-gradient(to right, rgba(60,80,200,.16) 1px, transparent 1px), linear-gradient(to bottom, rgba(60,80,200,.16) 1px, transparent 1px)';
@@ -937,50 +1020,42 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
   const activeDraftIndex = draftGuide ? `${draftGuide.axis}${draftGuide.index}` : null;
 
   return (
-    <section className={cx('ep-view', standalone && 'is-standalone')} onDragOver={(event) => event.preventDefault()} onDrop={onDropFile}>
+    <section ref={viewRef} className={cx('ep-view', standalone && 'is-standalone', pdfDoc && 'has-doc')} data-bp={bp} onDragOver={(event) => event.preventDefault()} onDrop={onDropFile}>
       <input ref={fileInputRef} className="hidden-input" type="file" accept="application/pdf,.pdf" onChange={onPdfInputChange} />
       <input ref={imageInputRef} className="hidden-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" onChange={handleImageInput} />
       <input ref={replaceInputRef} className="hidden-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" onChange={handleReplaceInput} />
-      <header className="ep-header">
-        <div><h1><FilePenLine size={20} /> Edit PDF</h1><p>Edit existing text and images, add your own, and line everything up with rulers, guides and margins.</p></div>
-        <div className="ep-header-actions">
-          {!standalone && hasWorkspacePdfs && <select className="ep-select" aria-label="Choose a PDF already in your workspace" value={loadedSourceId || ''} onChange={switchToWorkspacePdf} disabled={busy}><option value="">Workspace PDFs…</option>{documents.filter((d) => d.kind === 'pdf' && sourcesRef?.current?.has(d.id)).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select>}
-          <button type="button" className="ep-btn" onClick={openPdf} disabled={busy}><FolderOpen size={16} /> Open PDF</button>
-          <button type="button" className="ep-btn ep-btn-primary" onClick={savePdf} disabled={!pdfDoc || busy}><Save size={16} /> {busy ? 'Working…' : 'Save as PDF'}{dirty && <span className="ep-dot" title="Unsaved edits" />}</button>
-        </div>
-      </header>
+      <TooltipLayer rootRef={viewRef} />
 
       {notice && <div className={cx('ep-notice', /saved/i.test(notice) && 'is-ok')} role="status"><span>{notice}</span><button type="button" onClick={() => setNotice('')} aria-label="Dismiss"><X size={14} /></button></div>}
 
       {!pdfDoc ? (
         <div className="ep-empty">
-          <div className="ep-empty-icon"><FilePenLine size={30} /></div>
-          <h2>Edit text, images and layout in your PDF</h2>
-          <p>Open a PDF, click any text or image to change it, and use guides and margins to keep it aligned. Your original file stays unchanged.</p>
-          <button type="button" className="ep-btn ep-btn-primary" onClick={openPdf} disabled={busy}><FolderOpen size={17} /> Choose a PDF to edit</button>
-          <div className="ep-empty-points"><span><ShieldCheck size={15} /> Processed on this device</span><span><Save size={15} /> Saved as a new PDF</span></div>
+          <div className="ep-empty-card">
+            <div className="ep-empty-icon"><FilePenLine size={28} strokeWidth={1.7} /></div>
+            <h2>Edit a PDF</h2>
+            <p>Change existing text and images, add your own, sign and mark up. Drop a PDF anywhere on this page, or choose one to begin.</p>
+            <button type="button" className="ep-btn ep-btn-primary ep-btn-lg" onClick={openPdf} disabled={busy}><FolderOpen size={17} /> Open PDF</button>
+            {hasWorkspacePdfs && (
+              <div className="ep-recent-list" role="group" aria-label="PDFs in your workspace">
+                <h3>In your workspace</h3>
+                {workspaceDocs.slice(0, 5).map((d) => <button type="button" key={d.id} className="ep-recent" onClick={() => switchToWorkspacePdf({ target: { value: d.id } })} disabled={busy}><FileText size={16} aria-hidden="true" /><span>{d.name}</span><small>{d.pageCount} {d.pageCount === 1 ? 'page' : 'pages'}</small></button>)}
+              </div>
+            )}
+            <div className="ep-empty-points"><span><ShieldCheck size={15} /> Processed on this device</span><span><Save size={15} /> Saved as a new PDF</span></div>
+          </div>
         </div>
       ) : (
-        <div className={cx('ep-shell', !panels.tools && 'is-tools-collapsed', !panels.pages && 'is-pages-collapsed', !panels.properties && 'is-properties-collapsed', panels.pages && 'is-pages-open')}>
-          <ToolRail tool={tool} onTool={setTool} collapsed={!panels.tools} />
-          <aside className="ep-pages" aria-label="Pages" aria-hidden={!panels.pages}>
-            <div className="ep-pages-title"><span>Pages</span><b>{pageCount}</b></div>
-            <div className="ep-pages-list">
-              {Array.from({ length: pageCount }, (_, i) => i + 1).map((n) => (
-                <button type="button" key={n} className={cx('ep-page-btn', n === pageNumber && 'is-active')} onClick={() => goToPage(n)}>
-                  <PageThumb pdfDoc={pdfDoc} pageNumber={n} /><span>{n}</span>{(ann[String(n - 1)] || []).filter((i) => !isPristine(i)).length > 0 && <small>{(ann[String(n - 1)] || []).filter((i) => !isPristine(i)).length}</small>}
-                </button>
-              ))}
-            </div>
-          </aside>
+        <div className={cx('ep-shell', toolsCollapsed && 'is-tools-collapsed', !propsOpen && 'is-properties-collapsed', overlay && 'is-overlay', overlay && drawer && 'is-drawer-open')} data-bp={bp}>
+          <ToolRail tool={tool} onTool={setTool} collapsed={toolsCollapsed} onToggle={overlay ? undefined : () => togglePanel('tools')} layout={bp === 'sm' ? 'row' : 'column'} />
 
           <main className="ep-main">
-            <DocBar fileName={fileName} dirty={dirty} pageNumber={pageNumber} pageCount={pageCount} onPage={goToPage} zoomPercent={zoomPercent} zoomMode={zoom.mode} onZoomStep={zoomStep}
+            <DocBar fileName={fileName} dirty={dirty} pdfDoc={pdfDoc} changes={changesOnPage} pageNumber={pageNumber} pageCount={pageCount} onPage={goToPage} zoomPercent={zoomPercent} zoomMode={zoom.mode} onZoomStep={zoomStep}
               onZoomPreset={(p) => setZoom({ mode: 'custom', value: p / 100 * CSS_PT })} onFit={(mode) => setZoom({ mode, value: CSS_PT })}
-              canUndo={undoRef.current.length > 0 && historyVersion >= 0} canRedo={redoRef.current.length > 0} onUndo={undo} onRedo={redo} view={view} setView={setView} panels={panels} onTogglePanel={togglePanel} />
+              canUndo={undoRef.current.length > 0 && historyVersion >= 0} canRedo={redoRef.current.length > 0} onUndo={undo} onRedo={redo} view={view} setView={setView} panels={panels} onTogglePanel={togglePanel}
+              onOpen={openPdf} onSave={savePdf} busy={busy} workspaceDocs={workspaceDocs} loadedSourceId={loadedSourceId} onSwitchDoc={switchToWorkspacePdf} propsOpen={propsOpen} />
             <FormatBar original={styleSource?.origFont?.fontName || (styleSource?.origFont ? 'PDF font' : '')} style={formatStyle} onStyle={onFormat} hasTextTarget={textTargets.length > 0} selectionCount={selectedItems.length} alignTo={alignTo} setAlignTo={setAlignTo}
               onAlign={doAlign} onDistribute={doDistribute} canAlign={selectedItems.length > 0} canDistribute={selectedItems.length >= 3} />
-            <div className={cx('ep-canvas-area', view.rulers && 'has-rulers')} style={{ '--ep-ruler': `${RULER_SIZE}px` }}>
+            <div className={cx('ep-canvas-area', view.rulers && 'has-rulers')} style={{ '--ep-ruler': `${RULER_SIZE}px`, '--ep-pad': `${stagePad}px` }}>
               {view.rulers && base && <RulersLayer bus={cursorBus} view={measure} unit={view.unit} scale={scale} base={base} band={band} onGuideStart={beginGuideDrag} />}
               <div className={cx('ep-stage', spaceHeld && 'is-pan', panning && 'is-panning')} ref={stageRef} onPointerDownCapture={stagePointerDown} onPointerMove={stagePointerMove} onPointerUp={stagePointerUp} onPointerCancel={stagePointerUp} onPointerLeave={() => cursorBus.current.forEach((fn) => fn(null))} onAuxClick={(event) => event.preventDefault()}>
                 <div className="ep-hint-pill">{tool === 'select' ? 'Click text or an image to edit it. Drag to move it.' : toolInfo.hint}</div>
@@ -1022,7 +1097,8 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
             defaults={defaults} setDefaults={(patch) => setDefaultsState((prev) => ({ ...prev, ...patch }))} stampText={stampText} setStampText={setStampText} tool={tool}
             pageSize={base || { w: 612, h: 792 }} view={view} setView={setView} margins={margins} setMargins={setMargins} guides={pageGuides} onGuides={onGuides}
             onApplyGuidesAll={() => { const all = {}; for (let n = 0; n < pageCount; n += 1) all[String(n)] = { v: [...(pageGuides.v || [])], h: [...(pageGuides.h || [])] }; setGuidesByPage(all); notify?.('Guides copied to every page.', 'success'); }}
-            onClearGuides={() => setGuides(pageKey, EMPTY_GUIDES)} onSave={savePdf} busy={busy} dirty={dirty} />
+            onClearGuides={() => setGuides(pageKey, EMPTY_GUIDES)} onSave={savePdf} busy={busy} dirty={dirty} collapsed={!propsOpen} overlay={overlay} onToggle={() => togglePanel('properties')} />
+          {overlay && drawer && <button type="button" className="ep-scrim" aria-label="Close properties panel" tabIndex={-1} onClick={() => setDrawer(false)} />}
         </div>
       )}
 

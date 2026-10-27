@@ -38,4 +38,11 @@ assert.match(gateway, /CURLOPT_FOLLOWLOCATION => false/, 'gateway does not forwa
 assert.match(gateway, /Unknown Monitor gateway resource/, 'gateway is not an unrestricted proxy');
 assert.match(gateway, /update-download/); 
 
+// Reviews must be accepted by the gateway (it previously only allowed open/heartbeat/close and answered
+// "Unsupported telemetry event" to every review).
+{
+  const gateway = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'server-bridge', 'public', 'api', 'client-gateway.php'), 'utf8');
+  assert.match(gateway, /\['open', 'heartbeat', 'close', 'review'\]/, 'gateway accepts the review event');
+  assert.match(gateway, /min_range' => 1, 'max_range' => 5/, 'gateway validates the 1-5 rating');
+}
 console.log('Monitor telemetry route and client reporting regression checks passed.');

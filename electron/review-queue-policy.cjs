@@ -2,15 +2,34 @@
 
 const MAX_PENDING_REVIEWS = 5;
 const MAX_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
+// After a review the automatic prompt rests for this long, or until the app reaches a new major version.
+const REVIEW_REPROMPT_MS = 90 * 24 * 60 * 60 * 1000;
+// New usage required after a review before the automatic prompt may qualify again.
+const REVIEW_MIN_NEW_USAGE_SECONDS = 30 * 60;
 
-function shouldSuppressReviewPrompt(state, queueReadBlocked = false) {
+const majorOf = (version) => { const m = String(version || '').match(/\d+/); return m ? Number(m[0]) : 0; };
+
+/** Milliseconds the automatic prompt must still rest because of a recent review (0 = not resting). */
+function reviewCooldownRemainingMs(state, appVersion = '', now = Date.now()) {
+  const at = Number(state?.submittedAt) || 0;
+  if (at <= 0) return 0;
+  // A newer major version (e.g. 3.x -> 4.x) is a new product to review.
+  if (appVersion && state.lastReviewVersion && majorOf(appVersion) > majorOf(state.lastReviewVersion)) return 0;
+  const elapsed = Math.max(0, now - at); // a clock set back never extends the pause beyond the window
+  return Math.max(0, REVIEW_REPROMPT_MS - elapsed);
+}
+
+/**
+ * True while the automatic prompt must not appear: an unreadable queue/state, an explicit "don't ask again",
+ * a review waiting for delivery, or a recent review (paused for 90 days / until the next major version).
+ */
+function shouldSuppressReviewPrompt(state, queueReadBlocked = false, { appVersion = '', now = Date.now() } = {}) {
   if (queueReadBlocked) return true;
   if (!state || typeof state !== 'object') return false;
-  return Number(state.submittedAt) > 0
-    || Boolean(state.neverAskAgain)
+  return Boolean(state.neverAskAgain)
     || Boolean(state.pendingReviewId)
     || state.reviewStatus === 'pending'
-    || state.reviewStatus === 'submitted';
+    || reviewCooldownRemainingMs(state, appVersion, now) > 0;
 }
 
 function retryDelayMs(attempts, status) {
@@ -38,4 +57,4 @@ function createOutboxItem(id, payload, now = Date.now()) {
   return { id, payload, createdAt: now, attempts: 0, nextAttemptAt: 0, lastStatus: '', lastError: '' };
 }
 
-module.exports = { MAX_PENDING_REVIEWS, shouldSuppressReviewPrompt, retryDelayMs, normalizeOutbox, createOutboxItem };
+module.exports = { MAX_PENDING_REVIEWS, REVIEW_REPROMPT_MS, REVIEW_MIN_NEW_USAGE_SECONDS, reviewCooldownRemainingMs, shouldSuppressReviewPrompt, retryDelayMs, normalizeOutbox, createOutboxItem };

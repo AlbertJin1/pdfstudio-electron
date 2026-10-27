@@ -47,6 +47,34 @@
 :root:root .app-shell .sidebar.is-collapsed .account-meta,
 :root:root .app-shell .sidebar.is-collapsed .account-settings { display: none; }
 
+/* ---- Fluid width + responsive modes ---------------------------------------------------------------
+   Expanded: scales smoothly with the window (no stepped breakpoints). Narrow windows (< 920px) always use the rail;
+   the toggle then opens it as an overlay (.is-overlay) above the content, with a spacer keeping the rail's slot. */
+:root:root .app-shell .app-body { position: relative; }
+:root:root .app-shell .sidebar:not(.is-collapsed) { width: clamp(204px, 22vw, 258px); }
+:root:root .app-shell .sidebar { min-width: 0; max-width: 100%; }
+:root:root .app-shell .sidebar-scroll { overscroll-behavior: contain; }
+:root:root .app-shell .sidebar-rail-spacer { flex: 0 0 68px; width: 68px; }
+:root:root .app-shell .sidebar-backdrop { position: absolute; inset: 0; z-index: 38; background: rgb(15 18 30 / .38); animation: sidebar-fade .18s ease-out both; }
+:root:root .app-shell .sidebar.is-overlay { position: absolute; top: 0; bottom: 0; left: 0; z-index: 40; width: min(268px, 86vw); box-shadow: 18px 0 48px -12px rgb(15 18 30 / .38); animation: sidebar-slide .2s cubic-bezier(.22, 1, .36, 1) both; }
+:root:root .app-shell.reduce-motion .sidebar.is-overlay, :root:root .app-shell.reduce-motion .sidebar-backdrop { animation: none; }
+@keyframes sidebar-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sidebar-slide { from { transform: translateX(-14px); opacity: .4; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { :root:root .app-shell .sidebar.is-overlay, :root:root .app-shell .sidebar-backdrop { animation: none; } }
+
+/* Short windows: give the navigation the room. Compact the footer, then drop the privacy card. */
+@media (max-height: 720px) {
+  :root:root .app-shell .sidebar-scroll { padding-top: 12px; padding-bottom: 8px; }
+  :root:root .app-shell .sidebar-divider { margin-top: 10px; margin-bottom: 8px; }
+  :root:root .app-shell .privacy-card p { display: none; }
+  :root:root .app-shell .privacy-card { padding-top: 7px; padding-bottom: 7px; }
+}
+@media (max-height: 600px) {
+  :root:root .app-shell .sidebar-footer .privacy-card { display: none; }
+  :root:root .app-shell .sidebar .nav-item, :root:root .app-shell .sidebar .quick-nav { min-height: 36px; }
+  :root:root .app-shell .sidebar.is-collapsed .nav-item, :root:root .app-shell .sidebar.is-collapsed .quick-nav { width: 40px; height: 40px; min-height: 40px; }
+}
+
 /* ---- Tooltip (portaled to <body>, so it is styled independently of the theme scope) --------------- */
 .rail-tooltip {
   position: fixed; z-index: 2147483000; transform: translateY(-50%);

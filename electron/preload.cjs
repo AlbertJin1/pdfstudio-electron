@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('pdfStudio', Object.freeze({
   markReviewPromptShown: () => ipcRenderer.invoke('review:prompt-shown'),
   deferReview: (choice) => ipcRenderer.invoke('review:defer', choice),
   submitReview: (payload) => ipcRenderer.invoke('review:submit', payload),
+  getReviewIdentity: () => ipcRenderer.invoke('review:identity'),
   getAccessState: () => ipcRenderer.invoke('access:get-state'),
   recheckAccess: () => ipcRenderer.invoke('access:recheck'),
   onAccessState: (callback) => {
@@ -24,6 +25,7 @@ contextBridge.exposeInMainWorld('pdfStudio', Object.freeze({
   minimize: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:maximize-toggle'),
   close: () => ipcRenderer.invoke('window:close'),
+  setUnsavedChanges: (hasUnsaved) => ipcRenderer.invoke('app:set-unsaved', Boolean(hasUnsaved)),
   isMaximized: () => ipcRenderer.invoke('window:is-maximized'),
   version: () => ipcRenderer.invoke('app:version'),
   platform: () => ipcRenderer.invoke('app:platform'),
