@@ -191,3 +191,30 @@ Targeted mocked updater integration tests passed for Windows (legacy `action=lat
 - Added `npm run test:branding` for splash assets, theme variants, logo dimensions, role text and animation selectors.
 - Verified `npm run test:branding`, `npm run test:pdf`, `npm run test:access`, HTML parsing, JSX transpilation checks for changed components, and PostCSS parsing for changed styles.
 - A fresh Vite production build and Electron visual launch remain unverified in this environment because the installed dependencies are incomplete (`vite` and `pdfjs-dist` are missing locally). Reinstall dependencies on Windows with `npm ci`, then run `npm run test:branding`, `npm run check`, and `npm start` to verify the final packaged splash, About dialog, and theme switching.
+
+
+## Thumbnail-based fullscreen page viewer (October 27, 2026)
+
+- Removed the Page Workspace Live Preview / Page Details sidebar and its obsolete visibility preference, giving the page grid the full available workspace width.
+- Added a persistent expand/fullscreen control at the bottom-right of every page thumbnail. Clicking it selects that page and opens the dedicated full-viewport page viewer.
+- Added zoom-out, zoom-in (25% to 300%), Fit page, previous/next buttons, Ctrl/Cmd + mouse-wheel zoom, and keyboard shortcuts: Left/Right to navigate, Home/End for first/last page, +/- to zoom, 0 or F to fit, and Esc to close.
+- Zoom changes adjust the displayed canvas and its overlay coordinate space without rerendering the source PDF for each zoom click. Zoomed pages can be scrolled from their top-left edge rather than being clipped by centering.
+- Validation: `node tests/workspace-ui.test.cjs`, `node tests/branding-ui.test.cjs`, and PostCSS parsing for `src/styles/workspace-polish.css` passed.
+- Build limitation: the production Vite build could not run because this local dependency tree is incomplete (`node_modules/pdfjs-dist/package.json` and the Vite executable are missing). The source changes are packaged, but `dist` has not been regenerated in this environment; run `npm ci`, then `npm run web:build` / `npm start` on a machine with registry or cache access.
+
+## 2026-10-27 — System theme and contrast layout UX
+
+- Added a versioned `System / Light / Dark` preference. Older unversioned Light/Dark values migrate to System; deliberate fixed modes selected in this release remain pinned.
+- Wired Electron `nativeTheme` into a safe preload API and broadcast changes to open renderer windows. Browser `prefers-color-scheme` remains the fallback.
+- Updated the first-paint splash to use the resolved system mode and styled the Local workspace status indicator consistently for light and dark surfaces.
+- Anchored hidden accessibility checkboxes to their own toggle row to prevent scroll-to-viewport jumps. Contrast styling adjusts colors, borders and focus rings without changing geometry.
+- Regression tests: `npm run test:theme-ux`, `npm run test:workspace-ui`, `npm run test:branding`, and `npm run test:access` pass.
+- Build limitation in this environment: `npm run web:build` stops before Vite because `node_modules/pdfjs-dist/package.json` is missing from the incomplete local dependency tree. Rebuild after installing dependencies.
+
+## Efficient portable updater rollout (3.0.4)
+
+- `node tests/portable-update-engine.test.cjs` passed: changed-chunk extraction/reconstruction produced a byte-identical target EXE; ZIP extraction verified both package contents and final checksum.
+- A cross-language interoperability check against `monitor/src/delta.php` passed with a 5 MB fixture: PHP and Electron produced the same `psd-chunks-v1` chunk offsets and SHA-256 hashes (27 chunks).
+- All Electron updater, access/gateway, telemetry, review queue, branding, theme UX, and workspace UI tests passed. All Monitor `tests/*_test.php` suites passed, including 12 staged-rollout cases and 19 gateway security cases.
+- The Electron source version and lockfile are bumped to `3.0.4` so this updater can be published as a real update to already-installed 3.0.3 clients.
+- A fresh Windows portable build was not produced in this environment: npm dependencies are not installed here and the .NET SDK is unavailable to compile the legacy C# bridge source. Build on the supported Windows machine before publishing.

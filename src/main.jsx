@@ -8,6 +8,7 @@ import './styles/tour.css';
 import './styles/sidebar-collapse.css';
 import './styles/loader.css';
 import './styles/dropzone.css';
+import './styles/workspace-polish.css';
 
 // The Edit PDF window and the main window share one HTML entry; each loads only its own code.
 const App = lazy(() => import('./App.jsx'));

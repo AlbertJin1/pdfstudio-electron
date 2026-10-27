@@ -36,7 +36,10 @@ const gateway = fs.readFileSync(path.join(__dirname, '..', 'server-bridge', 'pub
 assert.match(gateway, /X-Api-Key: /, 'only the server-side gateway attaches the shared key upstream');
 assert.match(gateway, /CURLOPT_FOLLOWLOCATION => false/, 'gateway does not forward the server key across redirects');
 assert.match(gateway, /Unknown Monitor gateway resource/, 'gateway is not an unrestricted proxy');
-assert.match(gateway, /update-download/); 
+assert.match(gateway, /update-download/);
+assert.match(gateway, /\['latest', 'download', 'manifest', 'delta'\]/, 'server bridge allowlists delta manifest and chunk operations');
+assert.match(gateway, /\$upstreamQuery\['format'\] = 'zip'/, 'server bridge passes only the explicitly supported ZIP format');
+assert.match(gateway, /Invalid differential chunk identifier/, 'server bridge validates every differential chunk hash');
 
 // Reviews must be accepted by the gateway (it previously only allowed open/heartbeat/close and answered
 // "Unsupported telemetry event" to every review).

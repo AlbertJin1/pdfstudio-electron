@@ -1,6 +1,6 @@
 # PDF Studio — Windows desktop app
 
-**PDF Studio 3.0.3** is an Electron desktop rebuild of the original PDF Studio, for **Windows only**. The new app uses Electron + Node.js for native desktop capabilities, React for the interface, Tailwind CSS for styling utilities, PDF.js for PDF rendering, and `pdf-lib` for page composition and export.
+**PDF Studio 3.0.4** is an Electron desktop rebuild of the original PDF Studio, for **Windows only**. The new app uses Electron + Node.js for native desktop capabilities, React for the interface, Tailwind CSS for styling utilities, PDF.js for PDF rendering, and `pdf-lib` for page composition and export.
 
 It can be run as a desktop app during development and is packaged as a single no-install Windows portable `.exe`. There are no macOS or Linux builds.
 
@@ -43,7 +43,7 @@ If you ever need to launch Electron directly without rebuilding, use `npx electr
 
 ### Workspace and UI
 
-- Responsive workspace with a unique, modern UI, light and dark themes, live page preview, document source list, and local-only status.
+- Responsive page workspace with a unique, modern UI, light and dark themes, a fullscreen per-page viewer with zoom controls, document source list, and local-only status.
 - Import multiple PDF and image files, mixed-source workspaces, drag-and-drop file import, per-file source overview, and image pages.
 - Drag-and-drop page reordering; click, Ctrl/Cmd-click and Shift-click selection; search within the page list.
 - Rotate, duplicate, delete, reverse order, insert blank pages, undo and redo common page-list changes.
@@ -71,7 +71,7 @@ If you ever need to launch Electron directly without rebuilding, use `npx electr
 - Appearance settings include six accent presets (Violet, Ocean blue, Teal, Emerald, Rose, Amber), light/dark mode, Standard/Large/Extra large text, compact/comfortable density, high contrast, and reduced motion. Preferences persist locally.
 - Keyboard-shortcut help renders Ctrl keycaps with accessible screen-reader labels.
 - Motion for React (the maintained successor to Framer Motion) powers page transitions, settings-tab changes, shared active-navigation movement, staggered dashboard cards, page/document list layout changes, dialog enter/exit, editor properties panels, loading overlays, toast notifications, and update-status/progress transitions. Buttons and tool cards use spring-based hover and press feedback. Animations are intentionally short and restrained rather than decorative. The in-app Reduce motion option and the operating-system accessibility preference are respected.
-- The Updates & downloads center silently checks for updates after launch, downloads new packages in the background, verifies the published SHA-256, and offers Update now / Update later when a package is ready. The service URL and credentials remain in the Electron main process and are not shown in the UI.
+- The Updates & downloads center checks after launch and stages updates in the background. For Electron v3-to-v3 updates it reuses matching content-defined SHA-256 chunks and downloads only changed parts when that is smaller than a compressed full package; otherwise it verifies and extracts the Monitor ZIP, then falls back to the raw EXE for older Monitor deployments. The final portable EXE is verified before Update now / Update later is offered.
 - Desktop usage reporting starts as soon as Electron is ready and sends `open`, `heartbeat`, and `close` events to Universal App Monitor. It supports both `/pdfstudio-monitor/api/` and `/pdfstudio-monitor/public/api/` deployments, validates the JSON acknowledgement, retries transient network failures, and writes rejected-report details to `monitor-usage.log` in the app user-data folder.
 
 ### Motion and accessibility
@@ -154,6 +154,14 @@ The workspace UI uses a higher-contrast typographic hierarchy and larger consist
 
 Preferences persist locally in the Electron renderer's settings storage. Reset to defaults resets preferences only; it does not delete source files or change the current document. Page deletion confirmations remove pages only from the current workspace and the operation can be undone.
 
+
+### Efficient portable updates and V2 → V3 rollout
+
+- **V3 → V3:** the updater downloads the target manifest, indexes the currently running portable launcher using the same content-defined chunking algorithm as the Monitor and legacy C# updater, then requests only missing chunk hashes. Every compressed chunk is decompressed and hash-checked before the target EXE is rebuilt; the complete rebuilt EXE must match the published SHA-256 and size.
+- **Fallbacks:** if the manifest/delta path is unavailable or the changed content would cost more than a compressed full package, the updater downloads the Monitor ZIP, verifies its checksum, extracts only `PdfStudio.exe`, and verifies the final EXE. The raw EXE remains the final compatibility fallback.
+- **V2 → V3:** the patched V2 C# source prefers the compressed ZIP migration package and verifies the extracted portable Electron launcher. This optimization applies only after that source is built and shipped in the bridge executable; already-installed bridge binaries cannot gain it retroactively. The V2-to-V3 transition still needs the target executable contents once because the binary architecture changed.
+- **Required rollout sequence:** the Monitor selects exact `2.8.15` for clients below the bridge whenever V3 is published. Only clients reporting `2.8.15` or later are offered V3+. Keep the `2.8.15` bridge artifact available on the Monitor before publishing V3.
+
 ### PDF Studio Monitor update channel
 
 The updater uses a hardcoded Monitor API endpoint matching the legacy C# client. It is defined in `electron/main.cjs`, is not user-configurable, and cannot be overridden by saved preferences or a settings field:
@@ -162,9 +170,9 @@ The updater uses a hardcoded Monitor API endpoint matching the legacy C# client.
 
 Electron communicates with the Monitor through the server-side gateway in `server-bridge/public/api/client-gateway.php`. The desktop source and packaged EXE do not contain, load, decrypt, or send the shared Monitor API key. The gateway injects the server-side `X-Api-Key` only when proxying a small allowlist of Monitor operations; it also validates requests, enforces size/method restrictions and basic rate limits, verifies HTTPS, and never follows upstream redirects with the server key attached.
 
-**Deployment requirement:** before using remote updates, access control, or telemetry with this build, deploy Monitor 2.4.18 (which includes the updated gateway) to the existing Monitor installation. The gateway uses the same server-side `MONITOR_API_KEY` as Monitor's protected APIs and defaults to the canonical HTTPS API route; no separate gateway config file is required. Full instructions are in [`server-bridge/README.md`](server-bridge/README.md). Until the gateway is deployed/configured, local PDF features continue to work, but Monitor-backed features will report that the gateway is unavailable. Windows still uses the existing legacy-compatible `action=latest` / `action=download` release behavior through the gateway. Update UI messages do not expose the API key or external release URL.
+**Deployment requirement:** before using remote updates, access control, or telemetry with this build, deploy Monitor 2.4.18 (which includes the updated gateway) to the existing Monitor installation. The gateway uses the same server-side `MONITOR_API_KEY` as Monitor's protected APIs and defaults to the canonical HTTPS API route; no separate gateway config file is required. Full instructions are in [`server-bridge/README.md`](server-bridge/README.md). Until the gateway is deployed/configured, local PDF features continue to work, but Monitor-backed features will report that the gateway is unavailable. The gateway supports the legacy-compatible `action=latest` / `action=download` paths plus the explicitly allowlisted `format=zip`, `action=manifest`, and POST `action=delta` operations. It injects the shared Monitor API key server-side and does not expose it to Electron. Deploy the updated Monitor 2.4.18 gateway from this project before enabling compressed or differential updates. Update UI messages do not expose the API key or external release URL.
 
-New packages are downloaded to the app’s private update-staging directory in the background, verified against the published SHA-256, and persisted across restarts. When a verified package is ready, the user is prompted to choose Update now or Update later. The package is never executed without the user choosing Update now.
+New executables are reconstructed in the app’s private update-staging directory: delta chunks and the final executable are SHA-256-verified, compressed ZIP packages are verified before extracting only `PdfStudio.exe`, and raw-EXE fallback packages are checked against the published checksum. Staging is persisted across restarts. When a verified package is ready, the user is prompted to choose Update now or Update later. The package is never executed without the user choosing Update now.
 ## Installation and application icon
 
 The Motion animation dependency is pinned to the published `13.5.0` package set because the previous lockfile referenced a missing `motion-utils@14.5.0` tarball. Use `npm ci` to install from the corrected lockfile.

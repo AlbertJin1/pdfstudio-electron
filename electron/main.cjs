@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell, session, safeStorage, net } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell, session, safeStorage, net, nativeTheme } = require('electron');
 const { fileURLToPath } = require('node:url');
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
@@ -11,6 +11,7 @@ const accessPolicy = require('./services/access-policy.cjs');
 const reviewQueuePolicy = require('./review-queue-policy.cjs');
 const ocrService = require('./ocr-service.cjs');
 const ghostscriptCompression = require('./services/ghostscript-compression.cjs');
+const portableUpdateEngine = require('./services/portable-update-engine.cjs');
 
 // All settings, caches and staged updates live in the per-user app-data folder (%AppData%\PDF Studio), so the
 // portable EXE never creates any folder next to itself. The folder name is set explicitly because the package name
@@ -97,6 +98,19 @@ app.on('web-contents-created', (_event, contents) => {
 
 let mainWindow;
 let activeUpdateDownload = null;
+
+function getSystemThemeName() {
+  return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
+}
+
+// Keep all renderer windows synchronized when Windows switches between light and dark mode.
+nativeTheme.on('updated', () => {
+  const theme = getSystemThemeName();
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) continue;
+    win.webContents.send('theme:system-changed', theme);
+  }
+});
 
 // Keep PDF Studio on the same release channel as the legacy C# client.
 // This is the Monitor API root (not the public downloads page); remote client requests use client-gateway.php.
@@ -229,7 +243,7 @@ function assertPublicHttps(value, base) {
   return parsed;
 }
 
-async function fetchHttpsResponse(value, { signal, accept = 'application/json', maxRedirects = 5, allowApiPathFallback = true } = {}) {
+async function fetchHttpsResponse(value, { signal, accept = 'application/json', maxRedirects = 5, allowApiPathFallback = true, method = 'GET', body = null } = {}) {
   let current = assertPublicHttps(value);
   const requestSignal = signal || AbortSignal.timeout(20_000);
   for (let redirects = 0; redirects <= maxRedirects; redirects += 1) {
@@ -242,11 +256,13 @@ async function fetchHttpsResponse(value, { signal, accept = 'application/json', 
       };
       // No shared API key is shipped to or sent by the desktop client. The server gateway
       // injects its server-only key only when forwarding allowlisted requests internally.
+      const requestHeaders = body === null ? headers : { ...headers, 'Content-Type': 'application/json' };
       response = await fetch(current, {
-        method: 'GET',
+        method,
         redirect: 'manual',
         signal: requestSignal,
-        headers,
+        headers: requestHeaders,
+        ...(body === null ? {} : { body: typeof body === 'string' ? body : JSON.stringify(body) }),
       });
     } catch (error) {
       if (!signal && (error?.name === 'TimeoutError' || error?.name === 'AbortError')) {
@@ -269,7 +285,7 @@ async function fetchHttpsResponse(value, { signal, accept = 'application/json', 
       const alternatives = allowApiPathFallback ? monitorApiUrlCandidates(current) : [];
       const alternate = alternatives.find((candidate) => candidate.pathname !== current.pathname);
       if (alternate && routeFallbackStatuses.includes(response.status)) {
-        return fetchHttpsResponse(alternate.toString(), { signal, accept, maxRedirects, allowApiPathFallback: false });
+        return fetchHttpsResponse(alternate.toString(), { signal, accept, maxRedirects, allowApiPathFallback: false, method, body });
       }
       let serverDetail = '';
       if (accept.includes('application/json')) {
@@ -290,7 +306,7 @@ async function fetchHttpsResponse(value, { signal, accept = 'application/json', 
       const alternatives = allowApiPathFallback ? monitorApiUrlCandidates(current) : [];
       const alternate = alternatives.find((candidate) => candidate.pathname !== current.pathname);
       if (alternate) {
-        return fetchHttpsResponse(alternate.toString(), { signal, accept, maxRedirects, allowApiPathFallback: false });
+        return fetchHttpsResponse(alternate.toString(), { signal, accept, maxRedirects, allowApiPathFallback: false, method, body });
       }
       throw new Error('The PDF Studio Monitor gateway returned a non-JSON response. Check the gateway deployment and tunnel route.');
     }
@@ -335,19 +351,28 @@ function monitorTarget() {
   return { platform: 'windows', architecture };
 }
 
-function assertMonitorDownloadUrl(value) {
+function assertMonitorUpdateUrl(value, expectedAction = '') {
   const url = assertPublicHttps(value);
   const allowedPath = [
     '/pdfstudio-monitor/api/client-gateway.php',
     '/pdfstudio-monitor/public/api/client-gateway.php',
   ].includes(url.pathname.toLowerCase());
+  const action = url.searchParams.get('action') || 'latest';
   if (!isPdfStudioMonitorApiUrl(url)
       || !allowedPath
       || url.searchParams.get('resource') !== 'update'
-      || !['download'].includes(url.searchParams.get('action') || '')) {
-    throw new Error('The update package URL is not a valid PDF Studio Monitor download endpoint.');
+      || !['latest', 'download', 'manifest', 'delta'].includes(action)
+      || (expectedAction && action !== expectedAction)) {
+    throw new Error('The update URL is not a valid PDF Studio Monitor update endpoint.');
+  }
+  const format = url.searchParams.get('format');
+  if (format && (action !== 'download' || format !== 'zip')) {
+    throw new Error('The update endpoint contains an unsupported package format.');
   }
   return url;
+}
+function assertMonitorDownloadUrl(value) {
+  return assertMonitorUpdateUrl(value, 'download');
 }
 
 async function readMonitorReleaseMetadata() {
@@ -409,18 +434,41 @@ async function readMonitorReleaseMetadata() {
 
   let download = null;
   if (updateAvailable) {
-    // Match legacy C# UpdateService.Endpoint("action=download&version=...").
-    const downloadUrl = monitorGatewayEndpoint({ resource: 'update', action: 'download', app: 'pdfstudio', version: latestVersion }).toString();
-    const safeDownloadUrl = assertMonitorDownloadUrl(downloadUrl).toString();
     const declaredHash = String(latest.sha256 || '').trim().replace(/^sha256[:=]/i, '').toLowerCase();
-    if (!declaredHash) {
-      throw new Error('The PDF Studio Monitor did not provide the SHA-256 checksum required to verify this update.');
-    }
+    const targetSize = Number(latest.size || data.size || 0);
     if (!/^[a-f0-9]{64}$/.test(declaredHash)) {
-      throw new Error('The PDF Studio Monitor returned an invalid SHA-256 checksum for this release.');
+      throw new Error('The PDF Studio Monitor did not provide a valid SHA-256 checksum required to verify this update.');
+    }
+    if (!Number.isSafeInteger(targetSize) || targetSize < 1 || targetSize > MAX_FILE_BYTES) {
+      throw new Error('The PDF Studio Monitor returned an invalid executable size for this update.');
     }
     const name = `PDF-Studio-${latestVersion}-Portable-${target.architecture}.exe`;
-    download = { url: safeDownloadUrl, name, sha256: declaredHash, size: Number(latest.size || data.size || 0) };
+    const downloadUrl = monitorGatewayEndpoint({ resource: 'update', action: 'download', app: 'pdfstudio', version: latestVersion }).toString();
+    download = { url: assertMonitorDownloadUrl(downloadUrl).toString(), name, sha256: declaredHash, size: targetSize };
+
+    // Monitor provides a cached ZIP of the exact portable EXE. Its own checksum and the final EXE checksum
+    // are both checked, so compressed transfers are safe and older Monitor releases still have a raw-EXE fallback.
+    const packageInfo = latest.package && typeof latest.package === 'object' ? latest.package : null;
+    const packageSize = Number(packageInfo?.size || 0);
+    const packageHash = String(packageInfo?.sha256 || '').trim().replace(/^sha256[:=]/i, '').toLowerCase();
+    if (String(packageInfo?.format || '').toLowerCase() === 'zip'
+        && Number.isSafeInteger(packageSize) && packageSize > 0 && packageSize <= MAX_FILE_BYTES
+        && /^[a-f0-9]{64}$/.test(packageHash)
+        && (!packageInfo.entry || String(packageInfo.entry) === 'PdfStudio.exe')) {
+      const zipUrl = monitorGatewayEndpoint({ resource: 'update', action: 'download', app: 'pdfstudio', version: latestVersion, format: 'zip' }).toString();
+      download.compressed = { url: assertMonitorUpdateUrl(zipUrl, 'download').toString(), size: packageSize, sha256: packageHash, entry: 'PdfStudio.exe' };
+    }
+
+    const deltaInfo = latest.delta && typeof latest.delta === 'object' ? latest.delta : null;
+    const manifestSize = Number(deltaInfo?.manifest_size || 0);
+    const manifestHash = String(deltaInfo?.manifest_sha256 || '').trim().replace(/^sha256[:=]/i, '').toLowerCase();
+    if (String(deltaInfo?.format || '') === portableUpdateEngine.DELTA_FORMAT
+        && Number.isSafeInteger(manifestSize) && manifestSize > 0 && manifestSize <= portableUpdateEngine.MAX_MANIFEST_BYTES
+        && /^[a-f0-9]{64}$/.test(manifestHash)) {
+      const manifestUrl = monitorGatewayEndpoint({ resource: 'update', action: 'manifest', app: 'pdfstudio', version: latestVersion }).toString();
+      download.delta = { format: portableUpdateEngine.DELTA_FORMAT, manifestUrl: assertMonitorUpdateUrl(manifestUrl, 'manifest').toString(), manifestSize, manifestSha256: manifestHash };
+    }
+    // If the monitor doesn't support the newer compressed/delta fields, retain the existing verified raw EXE path.
   }
 
   return {
@@ -472,62 +520,271 @@ async function getStagedUpdatePath(fileName) {
   return candidate;
 }
 
-async function downloadReleasePackage(payload, sender) {
-  if (!payload || typeof payload !== 'object') throw new Error('Missing update download details.');
-  const source = assertMonitorDownloadUrl(payload.url);
-  const targetPath = payload.background
-    ? await getStagedUpdatePath(payload.fileName || path.basename(source.pathname) || `PDF-Studio-update-${Date.now()}`)
-    : await getAvailableDownloadPath(payload.fileName || path.basename(source.pathname) || `PDF-Studio-update-${Date.now()}`);
+function getPortableLauncherPath() {
+  const candidates = [process.env.PORTABLE_EXECUTABLE_FILE, process.execPath];
+  for (const candidate of candidates) {
+    if (!candidate || !path.isAbsolute(candidate) || !fsSync.existsSync(candidate)) continue;
+    try {
+      const stat = fsSync.statSync(candidate);
+      if (stat.isFile() && path.extname(candidate).toLowerCase() === '.exe') return path.resolve(candidate);
+    } catch { /* try the next candidate */ }
+  }
+  return null;
+}
+
+function reportUpdateProgress(sender, { percent = null, downloadedBytes = 0, totalBytes = null, message }) {
+  const safePercent = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
+  publishUpdaterState({ status: 'downloading', percent: safePercent, downloadedBytes, totalBytes, message });
+  if (!sender?.isDestroyed?.()) sender.send('updater:download-progress', { percent: safePercent, downloadedBytes, totalBytes, message });
+}
+
+async function streamResponseToFile(response, targetPath, {
+  sender, signal, expectedSize = 0, expectedSha256 = '', maxBytes = MAX_FILE_BYTES,
+  message = 'Downloading update…',
+} = {}) {
   const partialPath = `${targetPath}.part`;
-  if (payload.background) { await fs.rm(targetPath, { force: true }).catch(() => {}); await fs.rm(partialPath, { force: true }).catch(() => {}); }
-  const controller = new AbortController();
-  const download = { controller, partialPath, cancelled: false };
-  activeUpdateDownload = download;
-  let fileHandle;
+  await fs.rm(partialPath, { force: true }).catch(() => {});
+  await fs.rm(targetPath, { force: true }).catch(() => {});
+  const fileHandle = await fs.open(partialPath, 'w');
+  const digest = crypto.createHash('sha256');
+  const headerSize = Number(response.headers.get('content-length') || 0);
+  const totalBytes = headerSize > 0 ? headerSize : (expectedSize > 0 ? expectedSize : null);
+  let downloadedBytes = 0;
   try {
-    const response = await fetchHttpsResponse(source.toString(), { signal: controller.signal, accept: 'application/octet-stream, application/zip, */*' });
-    const totalBytes = Number(response.headers.get('content-length') || 0) || null;
-    const maxBytes = 2 * 1024 * 1024 * 1024;
-    if (totalBytes && totalBytes > maxBytes) throw new Error('The update package is larger than the 2 GB safety limit.');
-    fileHandle = await fs.open(partialPath, 'w');
-    const digest = crypto.createHash('sha256');
-    let downloadedBytes = 0;
-    const progressMessage = payload.background ? 'Downloading securely in the background. You can keep working.' : 'Downloading update…';
-    const sendProgress = (percent) => {
-      // Keep progress in main-process state as well as streaming it to the renderer. If the user
-      // opens Settings after a background download has started, the current progress is still shown.
-      publishUpdaterState({ status: 'downloading', percent, downloadedBytes, totalBytes, message: progressMessage });
-      if (!sender?.isDestroyed?.()) sender.send('updater:download-progress', { percent, downloadedBytes, totalBytes, message: progressMessage });
-    };
-    sendProgress(0);
+    reportUpdateProgress(sender, { percent: 0, downloadedBytes: 0, totalBytes, message });
     for await (const chunk of response.body) {
-      if (download.cancelled || controller.signal.aborted) throw new Error('Download cancelled.');
+      if (signal?.aborted) { const error = new Error('Update cancelled.'); error.name = 'AbortError'; throw error; }
       const buffer = Buffer.from(chunk);
       downloadedBytes += buffer.length;
       if (downloadedBytes > maxBytes) throw new Error('The update package is larger than the 2 GB safety limit.');
       digest.update(buffer);
-      const chunkStart = downloadedBytes - buffer.length;
       let offset = 0;
       while (offset < buffer.length) {
-        const { bytesWritten } = await fileHandle.write(buffer, offset, buffer.length - offset, chunkStart + offset);
+        const { bytesWritten } = await fileHandle.write(buffer, offset, buffer.length - offset, downloadedBytes - buffer.length + offset);
         if (!bytesWritten) throw new Error('The update package could not be written to disk. Check available storage and permissions.');
         offset += bytesWritten;
       }
       const percent = totalBytes ? Math.min(100, (downloadedBytes / totalBytes) * 100) : null;
-      sendProgress(percent);
+      reportUpdateProgress(sender, { percent, downloadedBytes, totalBytes, message });
+    }
+    if (expectedSize > 0 && downloadedBytes !== expectedSize) throw new Error('The update download is incomplete. Please try again.');
+    await fileHandle.sync();
+    const actualHash = digest.digest('hex');
+    const expectedHash = String(expectedSha256 || '').trim().replace(/^sha256[:=]/i, '').toLowerCase();
+    if (expectedHash && (!/^[a-f0-9]{64}$/.test(expectedHash) || actualHash !== expectedHash)) {
+      throw new Error('SHA-256 verification failed. The downloaded update was removed because it does not match the checksum published by PDF Studio Monitor.');
     }
     await fileHandle.close();
-    fileHandle = null;
-    const actualHash = digest.digest('hex');
-    const expectedHash = String(payload.sha256 || '').replace(/^sha256[:=]/i, '').trim().toLowerCase();
-    if (!/^[a-f0-9]{64}$/.test(expectedHash)) throw new Error('The PDF Studio Monitor download is missing a valid SHA-256 checksum.');
-    if (actualHash !== expectedHash) throw new Error('SHA-256 verification failed. The downloaded file was removed because it does not match the checksum published by PDF Studio Monitor.');
     await fs.rename(partialPath, targetPath);
-    if (!sender?.isDestroyed?.()) sender.send('updater:download-progress', { percent: 100, downloadedBytes, totalBytes, message: progressMessage });
-    return { canceled: false, path: targetPath, fileName: path.basename(targetPath), sha256: actualHash, verified: true };
+    reportUpdateProgress(sender, { percent: 100, downloadedBytes, totalBytes, message });
+    return { path: targetPath, sha256: actualHash, size: downloadedBytes };
   } catch (error) {
-    if (fileHandle) { try { await fileHandle.close(); } catch {} }
-    try { await fs.unlink(partialPath); } catch {}
+    await fileHandle.close().catch(() => {});
+    await fs.rm(partialPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function isUpdateCancelled(error, signal) {
+  return Boolean(signal?.aborted || error?.name === 'AbortError' || /download cancelled/i.test(String(error?.message || '')));
+}
+
+async function readDeltaManifest(payload, signal, sender) {
+  const delta = payload.delta;
+  if (!delta || delta.format !== portableUpdateEngine.DELTA_FORMAT) throw new Error('The update does not advertise a supported differential manifest.');
+  const url = assertMonitorUpdateUrl(delta.manifestUrl, 'manifest');
+  reportUpdateProgress(sender, { percent: null, downloadedBytes: 0, totalBytes: delta.manifestSize, message: 'Checking which parts of the new version can be reused…' });
+  const response = await fetchHttpsResponse(url.toString(), { signal, accept: 'application/json', maxRedirects: 5 });
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (contentLength > portableUpdateEngine.MAX_MANIFEST_BYTES) throw new Error('The differential-update manifest is unexpectedly large.');
+  const parts = [];
+  let total = 0;
+  for await (const chunk of response.body) {
+    if (signal?.aborted) { const error = new Error('Update cancelled.'); error.name = 'AbortError'; throw error; }
+    const bytes = Buffer.from(chunk);
+    total += bytes.length;
+    if (total > portableUpdateEngine.MAX_MANIFEST_BYTES) throw new Error('The differential-update manifest is unexpectedly large.');
+    parts.push(bytes);
+  }
+  if (delta.manifestSize > 0 && total !== Number(delta.manifestSize)) throw new Error('The differential-update manifest download is incomplete.');
+  const bytes = Buffer.concat(parts, total);
+  if (portableUpdateEngine.sha256(bytes) !== String(delta.manifestSha256).toLowerCase()) throw new Error('The differential-update manifest failed its SHA-256 integrity check.');
+  return portableUpdateEngine.validateDeltaManifest(bytes, {
+    version: payload.version,
+    size: Number(payload.size),
+    sha256: payload.sha256,
+  });
+}
+
+async function tryDownloadDeltaUpdate(payload, targetPath, sender, signal) {
+  // Delta reuse is for Electron portable EXE -> Electron portable EXE updates only. A C# v2 -> Electron v3
+  // migration intentionally uses the compressed full launcher because the executable format changed.
+  if (!app.isPackaged || compareVersions(app.getVersion(), '3.0.0') < 0 || compareVersions(payload.version, '3.0.0') < 0 || !payload.delta) return false;
+  const launcher = getPortableLauncherPath();
+  if (!launcher) return false;
+
+  const manifest = await readDeltaManifest(payload, signal, sender);
+  reportUpdateProgress(sender, { percent: null, downloadedBytes: 0, totalBytes: Number(payload.size) || null, message: 'Analyzing the current portable executable for reusable data…' });
+  const localIndex = await portableUpdateEngine.buildLocalChunkIndex(launcher, {
+    signal,
+    onProgress: ({ done, total }) => reportUpdateProgress(sender, {
+      percent: total ? Math.min(18, (done / total) * 18) : null,
+      downloadedBytes: done,
+      totalBytes: total,
+      message: 'Analyzing the current portable executable for reusable data…',
+    }),
+  });
+  const missing = new Map();
+  for (const chunk of manifest.chunks) {
+    const local = localIndex.get(chunk.sha256);
+    if (!local || local.size !== chunk.size) missing.set(chunk.sha256, chunk);
+  }
+  const missingRawBytes = [...missing.values()].reduce((sum, chunk) => sum + chunk.size, 0);
+  const targetBytes = Number(payload.size) || manifest.size;
+  const zipBytes = Number(payload.compressed?.size) || 0;
+  const fallbackThreshold = zipBytes > 0 ? Math.min(targetBytes * 0.92, zipBytes * 1.75) : targetBytes * 0.92;
+  if (missingRawBytes >= fallbackThreshold) {
+    reportUpdateProgress(sender, { percent: null, downloadedBytes: missingRawBytes, totalBytes: targetBytes, message: 'Most of the executable changed; switching to the compressed update…' });
+    return false;
+  }
+
+  const tempDirectory = path.join(getUpdatesDirectory(), `delta-${crypto.randomBytes(10).toString('hex')}`);
+  const deltaPath = path.join(tempDirectory, 'changed-parts.delta');
+  const targetPartPath = `${targetPath}.part`;
+  await fs.mkdir(tempDirectory, { recursive: true });
+  try {
+    if (missing.size > 0) {
+      const deltaUrl = assertMonitorUpdateUrl(monitorGatewayEndpoint({ resource: 'update', action: 'delta', version: payload.version }).toString(), 'delta');
+      reportUpdateProgress(sender, { percent: null, downloadedBytes: 0, totalBytes: null, message: `Downloading ${missing.size.toLocaleString()} changed parts only…` });
+      const response = await fetchHttpsResponse(deltaUrl.toString(), {
+        method: 'POST',
+        body: { version: payload.version, chunks: [...missing.keys()] },
+        signal,
+        accept: 'application/vnd.pdfstudio.delta, application/octet-stream, */*',
+        maxRedirects: 5,
+      });
+      await streamResponseToFile(response, deltaPath, {
+        sender, signal, maxBytes: MAX_FILE_BYTES, message: 'Downloading changed parts only…',
+      });
+      await portableUpdateEngine.extractDeltaPack(deltaPath, missing, tempDirectory, {
+        signal,
+        onProgress: ({ done, total }) => reportUpdateProgress(sender, {
+          percent: total ? 18 + (done / total) * 5 : null,
+          downloadedBytes: done,
+          totalBytes: total,
+          message: 'Verifying downloaded update parts…',
+        }),
+      });
+    }
+
+    reportUpdateProgress(sender, { percent: 25, downloadedBytes: 0, totalBytes: targetBytes, message: 'Rebuilding the new portable executable from unchanged and changed parts…' });
+    await portableUpdateEngine.assembleDelta(launcher, targetPartPath, manifest, localIndex, tempDirectory, {
+      signal,
+      onProgress: ({ done, total }) => reportUpdateProgress(sender, {
+        percent: total ? 25 + (done / total) * 70 : null,
+        downloadedBytes: done,
+        totalBytes: total,
+        message: 'Rebuilding the new portable executable from unchanged and changed parts…',
+      }),
+    });
+    const rebuiltHash = await sha256File(targetPartPath);
+    if (rebuiltHash.toLowerCase() !== String(payload.sha256).toLowerCase()) throw new Error('The rebuilt executable failed its final SHA-256 integrity check.');
+    const rebuiltStat = await fs.stat(targetPartPath);
+    if (rebuiltStat.size !== targetBytes) throw new Error('The rebuilt executable has an unexpected file size.');
+    await fs.rm(targetPath, { force: true }).catch(() => {});
+    await fs.rename(targetPartPath, targetPath);
+    reportUpdateProgress(sender, { percent: 100, downloadedBytes: rebuiltStat.size, totalBytes: rebuiltStat.size, message: 'Differential update verified.' });
+    return { path: targetPath, sha256: rebuiltHash, size: rebuiltStat.size, method: 'delta' };
+  } catch (error) {
+    await fs.rm(targetPartPath, { force: true }).catch(() => {});
+    throw error;
+  } finally {
+    await fs.rm(tempDirectory, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }).catch(() => {});
+  }
+}
+
+async function downloadReleasePackage(payload, sender) {
+  if (!payload || typeof payload !== 'object') throw new Error('Missing update download details.');
+  const source = assertMonitorDownloadUrl(payload.url);
+  const outputName = safeName(payload.name || payload.fileName || `PDF-Studio-${payload.version || Date.now()}-Portable.exe`, `PDF-Studio-update-${Date.now()}.exe`);
+  const targetPath = payload.background
+    ? await getStagedUpdatePath(outputName)
+    : await getAvailableDownloadPath(outputName);
+  const controller = new AbortController();
+  const download = { controller, partialPath: `${targetPath}.part`, cancelled: false };
+  activeUpdateDownload = download;
+  const zipPath = `${targetPath}.download.zip`;
+  try {
+    // 1) Try a content-defined delta for already-installed Electron portable builds.
+    if (payload.delta) {
+      try {
+        const deltaResult = await tryDownloadDeltaUpdate(payload, targetPath, sender, controller.signal);
+        if (deltaResult) return { ...deltaResult, canceled: false, fileName: path.basename(targetPath), verified: true };
+      } catch (error) {
+        if (isUpdateCancelled(error, controller.signal)) throw new Error('Download cancelled.');
+        await fs.rm(`${targetPath}.part`, { force: true }).catch(() => {});
+        await fs.rm(targetPath, { force: true }).catch(() => {});
+        console.warn('[PDF Studio] Differential update could not be used; falling back to a compressed package:', error?.message || error);
+        reportUpdateProgress(sender, { percent: null, downloadedBytes: 0, totalBytes: Number(payload.size) || null, message: 'The smart update was unavailable. Preparing the compressed update…' });
+      }
+    }
+
+    // 2) Prefer the Monitor's cached compressed portable EXE package. Verify the ZIP checksum, extract
+    // exactly PdfStudio.exe, then verify the reconstructed EXE checksum and byte length independently.
+    if (payload.compressed?.url && /^[a-f0-9]{64}$/i.test(String(payload.compressed.sha256 || ''))
+        && Number(payload.compressed.size) > 0) {
+      try {
+        const zipUrl = assertMonitorUpdateUrl(payload.compressed.url, 'download');
+        const response = await fetchHttpsResponse(zipUrl.toString(), {
+          signal: controller.signal,
+          accept: 'application/zip, application/octet-stream, */*',
+        });
+        const zipDownload = await streamResponseToFile(response, zipPath, {
+          sender,
+          signal: controller.signal,
+          expectedSize: Number(payload.compressed.size),
+          expectedSha256: payload.compressed.sha256,
+          maxBytes: MAX_FILE_BYTES,
+          message: 'Downloading the compressed update package…',
+        });
+        const extracted = await portableUpdateEngine.extractZipExecutable(zipPath, targetPath, {
+          entryName: String(payload.compressed.entry || 'PdfStudio.exe'),
+          expectedSize: Number(payload.size),
+          expectedSha256: String(payload.sha256),
+          signal: controller.signal,
+        });
+        await fs.rm(zipPath, { force: true }).catch(() => {});
+        reportUpdateProgress(sender, { percent: 100, downloadedBytes: zipDownload.size, totalBytes: zipDownload.size, message: 'Compressed update verified.' });
+        return { canceled: false, path: targetPath, fileName: path.basename(targetPath), sha256: extracted.sha256, verified: true, size: extracted.size, bytesDownloaded: zipDownload.size, method: 'compressed' };
+      } catch (error) {
+        if (isUpdateCancelled(error, controller.signal)) throw new Error('Download cancelled.');
+        await fs.rm(zipPath, { force: true }).catch(() => {});
+        await fs.rm(`${zipPath}.part`, { force: true }).catch(() => {});
+        await fs.rm(targetPath, { force: true }).catch(() => {});
+        console.warn('[PDF Studio] Compressed update could not be used; falling back to the full executable:', error?.message || error);
+        reportUpdateProgress(sender, { percent: null, downloadedBytes: 0, totalBytes: Number(payload.size) || null, message: 'The compressed package was unavailable. Downloading the verified executable…' });
+      }
+    }
+
+    // 3) Legacy Monitor fallback: old releases still provide a raw EXE with a published checksum.
+    const response = await fetchHttpsResponse(source.toString(), {
+      signal: controller.signal,
+      accept: 'application/octet-stream, application/zip, */*',
+    });
+    const result = await streamResponseToFile(response, targetPath, {
+      sender,
+      signal: controller.signal,
+      expectedSize: Number(payload.size) || 0,
+      expectedSha256: String(payload.sha256 || ''),
+      maxBytes: MAX_FILE_BYTES,
+      message: 'Downloading the verified portable executable…',
+    });
+    return { canceled: false, path: targetPath, fileName: path.basename(targetPath), sha256: result.sha256, verified: true, size: result.size, bytesDownloaded: result.size, method: 'full' };
+  } catch (error) {
+    await fs.rm(`${targetPath}.part`, { force: true }).catch(() => {});
+    await fs.rm(targetPath, { force: true }).catch(() => {});
+    await fs.rm(zipPath, { force: true }).catch(() => {});
+    await fs.rm(`${zipPath}.part`, { force: true }).catch(() => {});
     if (download.cancelled || controller.signal.aborted || error?.name === 'AbortError') throw new Error('Download cancelled.');
     throw error;
   } finally {
@@ -2069,6 +2326,7 @@ handle('app:open-external', async (_event, url) => {
   if (!openExternalSafe(url)) throw new TypeError('Only plain HTTPS links are allowed.');
 });
 handle('app:platform', () => process.platform);
+handle('theme:get-system', () => getSystemThemeName());
 handle('updater:check', async () => {
   void checkAndStageUpdate({ manual: true });
   return { status: 'checking', message: 'Checking for updates…' };
@@ -2096,9 +2354,9 @@ handle('files:open', async (event, options) => {
     'pdf-single': { title: 'Select a PDF file', multi: false, filters: [{ name: 'PDF documents', extensions: ['pdf'] }] },
     pdf: { title: 'Select PDF files', multi: true, filters: [{ name: 'PDF documents', extensions: ['pdf'] }] },
     images: { title: 'Select images to convert to PDF', multi: true, filters: [{ name: 'Images', extensions: IMAGE_EXTS }] },
-    all: { title: 'Add documents to PDF Studio', multi: true, filters: [{ name: 'Supported documents', extensions: ['pdf', ...IMAGE_EXTS, 'docx'] }] },
+    all: { title: 'Add documents to PDF Studio', multi: true, filters: [{ name: 'Supported documents', extensions: ['pdf', ...IMAGE_EXTS] }] },
   }[accept] || null;
-  const spec = dialogSpec || { title: 'Add documents to PDF Studio', multi: true, filters: [{ name: 'Supported documents', extensions: ['pdf', ...IMAGE_EXTS, 'docx'] }] };
+  const spec = dialogSpec || { title: 'Add documents to PDF Studio', multi: true, filters: [{ name: 'Supported documents', extensions: ['pdf', ...IMAGE_EXTS] }] };
   const picked = await dialog.showOpenDialog(parent, {
     title: spec.title,
     properties: spec.multi ? ['openFile', 'multiSelections'] : ['openFile'],
@@ -2108,17 +2366,14 @@ handle('files:open', async (event, options) => {
   const output = [];
   for (const filePath of picked.filePaths) {
     const ext = path.extname(filePath).toLowerCase();
+    // Dialog filters are not a security boundary: reject unsupported files here as well.
+    if (ext !== '.pdf' && !IMAGE_EXTS.includes(ext.slice(1))) continue;
     const raw = await fs.readFile(filePath);
-    if (ext === '.docx') {
-      const data = await docxBufferToPdf(raw);
-      output.push({ name: `${path.basename(filePath, ext)}.pdf`, originName: path.basename(filePath), path: filePath, mime: 'application/pdf', kind: 'pdf', bytes: new Uint8Array(data) });
-    } else {
-      const mimeByExt = {
-        '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-        '.webp': 'image/webp', '.bmp': 'image/bmp', '.gif': 'image/gif', '.tif': 'image/tiff', '.tiff': 'image/tiff',
-      };
-      output.push({ name: path.basename(filePath), path: filePath, mime: mimeByExt[ext] || 'application/octet-stream', kind: ext === '.pdf' ? 'pdf' : 'image', bytes: new Uint8Array(raw) });
-    }
+    const mimeByExt = {
+      '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+      '.webp': 'image/webp', '.bmp': 'image/bmp', '.gif': 'image/gif', '.tif': 'image/tiff', '.tiff': 'image/tiff',
+    };
+    output.push({ name: path.basename(filePath), path: filePath, mime: mimeByExt[ext], kind: ext === '.pdf' ? 'pdf' : 'image', bytes: new Uint8Array(raw) });
   }
   return output;
 });

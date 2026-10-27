@@ -9,7 +9,7 @@ import SettingsNav from './SettingsNav.jsx';
 import UpdatesTab from './UpdatesTab.jsx';
 import WorkspaceTab from './WorkspaceTab.jsx';
 
-export default function SettingsView({ preferences, settingsTab, dark, updateState, readyUpdate, imageFormat, imageQuality, showInspector, appVersion, setSettingsTab, setDark, setModal, setImageFormat, setImageQuality, setShowInspector, setPreference, resetPreferences, checkForUpdates }) {
+export default function SettingsView({ preferences, settingsTab, updateState, readyUpdate, imageFormat, imageQuality, appVersion, setSettingsTab, setDark, setModal, setImageFormat, setImageQuality, setPreference, resetPreferences, checkForUpdates }) {
   return (
     <motion.section key="settings" className="settings-view" variants={pageVariants} initial="initial" animate="animate" exit="exit">
               <div className="settings-page-heading">
@@ -21,8 +21,8 @@ export default function SettingsView({ preferences, settingsTab, dark, updateSta
                 <div className="settings-content">
                   <AnimatePresence mode="wait" initial={false}>
                   <motion.div key={settingsTab} className="settings-content-motion" variants={pageVariants} initial="initial" animate="animate" exit="exit">
-    {settingsTab === 'appearance' && <AppearanceTab preferences={preferences} dark={dark} setDark={setDark} setPreference={setPreference} />}
-    {settingsTab === 'workspace' && <WorkspaceTab preferences={preferences} showInspector={showInspector} setShowInspector={setShowInspector} setPreference={setPreference} />}
+    {settingsTab === 'appearance' && <AppearanceTab preferences={preferences} setDark={setDark} setPreference={setPreference} />}
+    {settingsTab === 'workspace' && <WorkspaceTab preferences={preferences} setPreference={setPreference} />}
     {settingsTab === 'export' && <ExportTab imageFormat={imageFormat} imageQuality={imageQuality} setImageFormat={setImageFormat} setImageQuality={setImageQuality} />}
     {settingsTab === 'privacy' && <PrivacyTab appVersion={appVersion} setModal={setModal} />}
     {settingsTab === 'updates' && <UpdatesTab updateState={updateState} readyUpdate={readyUpdate} appVersion={appVersion} checkForUpdates={checkForUpdates} />}

@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import EditPdfView from './EditPdfView.jsx';
 import { cx } from '../utils/cx.js';
+import { readPreferences } from '../constants/preferences.js';
+import { resolveDarkTheme, useSystemDarkTheme } from '../hooks/useSystemDarkTheme.js';
 
 export default function PdfEditorWindow() {
   const [initialDocument, setInitialDocument] = useState(null);
   const [notice, setNotice] = useState('');
-  const [dark, setDark] = useState(() => { try { return localStorage.getItem('pdfstudio-theme') === 'dark'; } catch { return false; } });
+  const [preferences, setPreferences] = useState(readPreferences);
+  const systemDark = useSystemDarkTheme();
+  const dark = resolveDarkTheme(preferences.theme, systemDark);
   const sourcesRef = useRef(new Map());
   const notify = useCallback((message, type = 'info') => {
     setNotice({ message: String(message || ''), type });
@@ -13,7 +17,7 @@ export default function PdfEditorWindow() {
 
   useEffect(() => {
     document.title = 'PDF Studio - Edit PDF';
-    const updateTheme = () => { try { setDark(localStorage.getItem('pdfstudio-theme') === 'dark'); } catch { setDark(false); } };
+    const updateTheme = () => setPreferences(readPreferences());
     window.addEventListener('storage', updateTheme);
     let cancelled = false;
     window.pdfStudio?.getEditorDocument?.().then((payload) => {

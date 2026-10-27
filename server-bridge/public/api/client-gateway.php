@@ -8,7 +8,7 @@ declare(strict_types=1);
  * /api path handled by your rewrite rules). The shared Monitor API key is loaded only by PHP
  * from a non-public server config file or the server environment. Never copy the key into Electron.
  *
- * Deliberately exposes only four read/report operations: update metadata, update download,
+ * Deliberately exposes a strict allowlist: update metadata, raw/ZIP downloads, differential manifests and requested update chunks,
  * access-policy lookup, and validated usage telemetry (open / heartbeat / close sessions and product reviews). It is not a generic proxy.
  */
 
@@ -246,12 +246,15 @@ $rateLimit = ['client', 120, 60];
 
 switch ($resource) {
     case 'update': {
-        if ($method !== 'GET') {
-            header('Allow: GET');
-            gateway_json_error(405, 'This Monitor gateway resource accepts GET only.');
-        }
+        // Public client gateway for the bridge-first release channel. It deliberately exposes only
+        // known update operations; the shared Monitor API key is injected server-side below.
         $action = gateway_clean_string($_GET['action'] ?? 'latest', 16);
-        if (!in_array($action, ['latest', 'download'], true)) gateway_json_error(400, 'Unsupported update action.');
+        if (!in_array($action, ['latest', 'download', 'manifest', 'delta'], true)) gateway_json_error(400, 'Unsupported update action.');
+        $needsPost = $action === 'delta';
+        if (($needsPost && $method !== 'POST') || (!$needsPost && !in_array($method, ['GET', 'HEAD'], true))) {
+            header('Allow: ' . ($needsPost ? 'POST' : 'GET, HEAD'));
+            gateway_json_error(405, $needsPost ? 'Differential update requests require POST.' : 'This update action accepts GET only.');
+        }
         $upstreamPath = 'update.php';
         $upstreamQuery = ['action' => $action, 'app' => 'pdfstudio'];
         $version = gateway_clean_string($_GET['version'] ?? '', 96);
@@ -259,7 +262,9 @@ switch ($resource) {
             if (!gateway_valid_version($version)) gateway_json_error(400, 'Invalid release version.');
             $upstreamQuery['version'] = ltrim($version, 'vV');
         }
-        if ($action === 'download' && $version === '') gateway_json_error(400, 'A release version is required for downloads.');
+        if (in_array($action, ['download', 'manifest', 'delta'], true) && $version === '') {
+            gateway_json_error(400, 'A release version is required for this update operation.');
+        }
         if ($action === 'latest') {
             $installId = gateway_clean_string($_GET['install_id'] ?? '', 64);
             if ($installId !== '' && !gateway_valid_install_id($installId)) gateway_json_error(400, 'Invalid installation identifier.');
@@ -268,12 +273,36 @@ switch ($resource) {
             if ($hostname !== '') $upstreamQuery['hostname'] = $hostname;
             $localIp = gateway_clean_string($_GET['local_ip'] ?? '', 64);
             if ($localIp !== '' && filter_var($localIp, FILTER_VALIDATE_IP) !== false) $upstreamQuery['local_ip'] = $localIp;
-        }
-        if ($action === 'download') {
+            $rateLimit = ['update-latest', 120, 60];
+        } elseif ($action === 'download') {
+            $format = strtolower(gateway_clean_string($_GET['format'] ?? '', 12));
+            if ($format !== '' && $format !== 'zip') gateway_json_error(400, 'Unsupported update package format.');
+            if ($format === 'zip') $upstreamQuery['format'] = 'zip';
             $streamDownload = true;
             $rateLimit = ['update-download', 30, 3600];
+        } elseif ($action === 'manifest') {
+            $rateLimit = ['update-manifest', 120, 3600];
         } else {
-            $rateLimit = ['update-latest', 120, 60];
+            // Differential requests may name only valid SHA-256 chunk ids. The API revalidates every
+            // hash against its release manifest; this gateway also bounds incoming JSON before forwarding.
+            $contentLength = (int) ($_SERVER['CONTENT_LENGTH'] ?? 0);
+            if ($contentLength > 2097152) gateway_json_error(413, 'Differential update request is too large.');
+            $rawBody = file_get_contents('php://input', false, null, 0, 2097153);
+            if (!is_string($rawBody) || strlen($rawBody) > 2097152) gateway_json_error(413, 'Differential update request is too large.');
+            $body = json_decode($rawBody, true);
+            if (!is_array($body) || ltrim((string) ($body['version'] ?? ''), 'vV') !== ltrim($version, 'vV')
+                || !isset($body['chunks']) || !is_array($body['chunks']) || count($body['chunks']) > 10000) {
+                gateway_json_error(400, 'Invalid differential update request.');
+            }
+            $chunks = [];
+            foreach ($body['chunks'] as $hash) {
+                if (!is_string($hash) || preg_match('/^[a-f0-9]{64}$/iD', $hash) !== 1) gateway_json_error(400, 'Invalid differential chunk identifier.');
+                $chunks[strtolower($hash)] = true;
+            }
+            $requestBody = json_encode(['version' => ltrim($version, 'vV'), 'chunks' => array_keys($chunks)], JSON_UNESCAPED_SLASHES);
+            if (!is_string($requestBody)) gateway_json_error(400, 'Differential request could not be serialized.');
+            $streamDownload = true;
+            $rateLimit = ['update-delta', 60, 3600];
         }
         break;
     }

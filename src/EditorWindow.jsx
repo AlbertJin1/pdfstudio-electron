@@ -3,6 +3,7 @@ import EditPdfView from './views/EditPdfView.jsx';
 import Toast from './components/layout/Toast.jsx';
 import { useToast } from './hooks/useToast.js';
 import { readPreferences } from './constants/preferences.js';
+import { resolveDarkTheme, useSystemDarkTheme } from './hooks/useSystemDarkTheme.js';
 import { cx } from './utils/cx.js';
 
 /** Root of the stand-alone Edit PDF window (opened by the main window with ?window=edit). */
@@ -10,7 +11,8 @@ export default function EditorWindow() {
   const [preferences, setPreferences] = useState(readPreferences);
   const [initial, setInitial] = useState(null);
   const { toast, setToast, notify } = useToast();
-  const dark = preferences.theme === 'dark';
+  const systemDark = useSystemDarkTheme();
+  const dark = resolveDarkTheme(preferences.theme, systemDark);
 
   // Follow theme/accent changes made in the main window; this window never writes preferences.
   useEffect(() => {
@@ -21,6 +23,8 @@ export default function EditorWindow() {
   useEffect(() => {
     const root = document.documentElement;
     root.classList.toggle('dark', dark);
+    root.style.colorScheme = dark ? 'dark' : 'light';
+    root.dataset.themeMode = preferences.theme;
     root.dataset.accent = preferences.accentTheme || 'violet';
     root.dataset.platform = 'win32';
     root.classList.toggle('reduce-motion', Boolean(preferences.reduceMotion));

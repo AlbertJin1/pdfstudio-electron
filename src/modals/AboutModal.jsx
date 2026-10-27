@@ -28,8 +28,7 @@ export default function AboutModal({ appVersion, setMode, setSettingsTab, setMod
         </div>
         <div className="developer-signature-mark" aria-hidden="true">JAR<span> / </span>PDF STUDIO</div>
       </div>
-      <div className="about-branding-strip" role="group" aria-label="Brand logos">
-        <div className="about-branding-label"><span className="about-branding-glyph"><Sparkles size={14} aria-hidden="true"/></span><span>Brand identity</span></div>
+      <div className="about-branding-strip" role="group" aria-label="ITRS and RSC logos">
         <div className="about-branding-logo about-itrs-logo" role="img" aria-label="ITRS">
           <img className="itrs-logo-light" src="./branding/itrs-dark.png" alt="ITRS" draggable="false" />
           <img className="itrs-logo-dark" src="./branding/itrs-white.png" alt="ITRS" draggable="false" />

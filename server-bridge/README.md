@@ -13,7 +13,9 @@ This bridge removes the shared Monitor API key from the Electron client. The des
 ## Exposed operations
 
 - `GET ?resource=update&action=latest` — release metadata; the gateway forces `app=pdfstudio`.
-- `GET ?resource=update&action=download&version=...` — one versioned update package, streamed by PHP without buffering the full file.
+- `GET ?resource=update&action=download&version=...` — raw portable EXE; `&format=zip` requests the compressed EXE package. Both are streamed by PHP without buffering the full file.
+- `GET ?resource=update&action=manifest&version=...` — content-defined differential manifest.
+- `POST ?resource=update&action=delta&version=...` with JSON `{ "version": "3.0.4", "chunks": ["<sha256>"] }` — only the requested verified chunk payloads. The gateway bounds the request size and validates hashes before forwarding.
 - `GET ?resource=access&install_id=...` — read-only access-policy lookup.
 - `POST ?resource=telemetry` — only `open`, `heartbeat`, and `close` events with validated identifiers and bounded payloads.
 

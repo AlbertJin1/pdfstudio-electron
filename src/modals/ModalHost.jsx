@@ -8,13 +8,14 @@ import ExportSelectedModal from './ExportSelectedModal.jsx';
 import GuideModal from './GuideModal.jsx';
 import ImagesModal from './ImagesModal.jsx';
 import PageMenuModal from './PageMenuModal.jsx';
+import PagePreviewModal from './PagePreviewModal.jsx';
 import ReviewModal from './ReviewModal.jsx';
 import SplitModal from './SplitModal.jsx';
 import TextModal from './TextModal.jsx';
 import UpdateReadyModal from './UpdateReadyModal.jsx';
 import WordModal from './WordModal.jsx';
 
-export default function ModalHost({ hideGuide, setHideGuide, pages, guideStep, setGuideStep, chooseFiles, readyUpdate, applyingUpdate, modal, textValue, textColor, textSize, coverColor, exportTitle, exportAuthor, exportPageNumbers, exportWatermarkMode, exportWatermark, exportWatermarkOpacity, exportWatermarkAngle, exportWatermarkColor, exportPaperSize, exportCompression, exportPassword, splitMode, splitEvery, splitRanges, imageFormat, imageQuality, appVersion, selectedPages, setSelectedIds, setActiveId, setMode, setSettingsTab, setModal, setTextValue, setTextColor, setTextSize, setCoverColor, setExportTitle, setExportAuthor, setExportPageNumbers, setExportWatermarkMode, setExportWatermark, setExportWatermarkOpacity, setExportWatermarkAngle, setExportWatermarkColor, setExportPaperSize, setExportCompression, setExportPassword, setSplitMode, setSplitEvery, setSplitRanges, setImageFormat, setImageQuality, deleteSelected, requestDeleteSelected, rotateSelected, duplicateSelected, addTextOverlay, addCoverOverlay, doExportPdf, convertToWord, compressPdfFile, convertToImages, splitPdf, deferReadyUpdate, applyReadyUpdate, notify }) {
+export default function ModalHost({ hideGuide, setHideGuide, pages, sources, guideStep, setGuideStep, chooseFiles, readyUpdate, applyingUpdate, modal, textValue, textColor, textSize, coverColor, exportTitle, exportAuthor, exportPageNumbers, exportWatermarkMode, exportWatermark, exportWatermarkOpacity, exportWatermarkAngle, exportWatermarkColor, exportPaperSize, exportCompression, exportPassword, splitMode, splitEvery, splitRanges, imageFormat, imageQuality, appVersion, selectedPages, setSelectedIds, setActiveId, setMode, setSettingsTab, setModal, setTextValue, setTextColor, setTextSize, setCoverColor, setExportTitle, setExportAuthor, setExportPageNumbers, setExportWatermarkMode, setExportWatermark, setExportWatermarkOpacity, setExportWatermarkAngle, setExportWatermarkColor, setExportPaperSize, setExportCompression, setExportPassword, setSplitMode, setSplitEvery, setSplitRanges, setImageFormat, setImageQuality, deleteSelected, requestDeleteSelected, rotateSelected, duplicateSelected, addTextOverlay, addCoverOverlay, doExportPdf, convertToWord, compressPdfFile, convertToImages, splitPdf, deferReadyUpdate, applyReadyUpdate, notify }) {
   return (
     <>
     <AnimatePresence mode="sync" initial={false}>
@@ -28,6 +29,7 @@ export default function ModalHost({ hideGuide, setHideGuide, pages, guideStep, s
     {modal?.type === 'text' && <TextModal key="text" textValue={textValue} textColor={textColor} textSize={textSize} setModal={setModal} setTextValue={setTextValue} setTextColor={setTextColor} setTextSize={setTextSize} addTextOverlay={addTextOverlay} />}
     {modal?.type === 'cover' && <CoverModal key="cover" coverColor={coverColor} setModal={setModal} setCoverColor={setCoverColor} addCoverOverlay={addCoverOverlay} />}
     {modal?.type === 'page-menu' && <PageMenuModal key="page-menu" modal={modal} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setModal={setModal} requestDeleteSelected={requestDeleteSelected} rotateSelected={rotateSelected} duplicateSelected={duplicateSelected} />}
+    {modal?.type === 'page-preview' && <PagePreviewModal key="page-preview" pages={pages} sources={sources} modal={modal} setModal={setModal} setActiveId={setActiveId} setSelectedIds={setSelectedIds} />}
     {modal?.type === 'guide' && <GuideModal key="guide" guideStep={guideStep} setGuideStep={setGuideStep} setMode={setMode} setSettingsTab={setSettingsTab} setModal={setModal} chooseFiles={chooseFiles} hideGuide={hideGuide} setHideGuide={setHideGuide} />}
     {modal?.type === 'about' && <AboutModal key="about" appVersion={appVersion} setMode={setMode} setSettingsTab={setSettingsTab} setModal={setModal} />}
     {modal?.type === 'review' && <ReviewModal key="review" setModal={setModal} notify={notify} />}

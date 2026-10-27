@@ -68,7 +68,7 @@ export default function PageGridPanel({ landedId, duplicateSelected, requestDele
       onKeyDown: null,
     };
 
-    const sameCue = (a, b) => a?.id === b?.id && a?.position === b?.position;
+    const sameCue = (a, b) => a?.id === b?.id && a?.position === b?.position && a?.edge === b?.edge;
     const updateCue = (next) => {
       if (sameCue(session.cue, next)) return;
       session.cue = next;
@@ -79,7 +79,7 @@ export default function PageGridPanel({ landedId, duplicateSelected, requestDele
       const rect = source.getBoundingClientRect();
       const ghost = source.cloneNode(true);
       ghost.classList.add('page-drag-ghost', 'page-drag-ghost-live');
-      ghost.classList.remove('page-dragging', 'page-selected', 'page-active', 'drop-before', 'drop-after', 'page-landed');
+      ghost.classList.remove('page-dragging', 'page-selected', 'page-active', 'drop-before', 'drop-after', 'drop-edge-left', 'drop-edge-right', 'drop-edge-top', 'drop-edge-bottom', 'page-landed');
       ghost.removeAttribute('draggable');
       ghost.setAttribute('aria-hidden', 'true');
       Object.assign(ghost.style, {
@@ -88,7 +88,7 @@ export default function PageGridPanel({ landedId, duplicateSelected, requestDele
         transformOrigin: '50% 12%', transition: 'none', animation: 'none',
         willChange: 'transform', contain: 'paint', backfaceVisibility: 'hidden',
       });
-      ghost.style.transform = `translate3d(${session.x - session.offsetX}px, ${session.y - session.offsetY}px, 0) perspective(900px) rotate(-2deg) scale(1.035)`;
+      ghost.style.transform = `translate3d(${session.x - session.offsetX}px, ${session.y - session.offsetY}px, 0) rotate(-1deg) scale(1.015)`;
       document.body.appendChild(ghost);
       session.ghost = ghost;
     };
@@ -98,10 +98,9 @@ export default function PageGridPanel({ landedId, duplicateSelected, requestDele
       const { x, y, lastX, lastY, ghost } = session;
       const dx = x - lastX;
       const dy = y - lastY;
-      const speed = Math.min(1, Math.hypot(dx, dy) / 28);
-      const angle = Math.max(-13, Math.min(13, dx * 0.26 - dy * 0.07));
-      const counter = Math.max(-5, Math.min(5, -dx * 0.10));
-      if (ghost) ghost.style.transform = `translate3d(${x - session.offsetX}px, ${y - session.offsetY}px, 0) perspective(900px) rotate(${angle}deg) rotateY(${counter}deg) scale(${1.035 + speed * 0.012})`;
+      // A restrained tilt keeps the entire page readable while the compositor handles motion.
+      const angle = Math.max(-4, Math.min(4, dx * 0.075 - dy * 0.025));
+      if (ghost) ghost.style.transform = `translate3d(${x - session.offsetX}px, ${y - session.offsetY}px, 0) rotate(${angle}deg) scale(1.02)`;
       session.lastX = x;
       session.lastY = y;
 
@@ -109,19 +108,23 @@ export default function PageGridPanel({ landedId, duplicateSelected, requestDele
       const target = hit?.closest?.('.page-card[data-page-id]');
       if (target && target.dataset.pageId !== session.pageId) {
         const rect = target.getBoundingClientRect();
-        const dxFromCenter = x - (rect.left + rect.width / 2);
-        const dyFromCenter = y - (rect.top + rect.height / 2);
-        // Pick the closest edge in either axis so reordering remains intuitive in a grid.
-        const position = Math.abs(dxFromCenter) >= Math.abs(dyFromCenter)
-          ? (dxFromCenter < 0 ? 'before' : 'after')
-          : (dyFromCenter < 0 ? 'before' : 'after');
-        updateCue({ id: target.dataset.pageId, position });
+        // Compare normalized distances: document cards are tall, so raw pixels made
+        // vertical edges win too often and caused surprising insert positions.
+        const normalizedX = (x - (rect.left + rect.width / 2)) / Math.max(1, rect.width);
+        const normalizedY = (y - (rect.top + rect.height / 2)) / Math.max(1, rect.height);
+        const horizontal = Math.abs(normalizedX) >= Math.abs(normalizedY);
+        const position = horizontal ? (normalizedX < 0 ? 'before' : 'after') : (normalizedY < 0 ? 'before' : 'after');
+        const edge = horizontal ? (normalizedX < 0 ? 'left' : 'right') : (normalizedY < 0 ? 'top' : 'bottom');
+        updateCue({ id: target.dataset.pageId, position, edge });
+      } else if (target && target.dataset.pageId === session.pageId) {
+        updateCue(null);
       } else if (hit?.closest?.('.page-add-card')) {
         updateCue({ id: '__end__', position: 'after' });
       } else if (hit?.closest?.('.page-drop-placeholder')) {
-        // The placeholder is visual only; retain the existing destination while over it.
+        // The insertion placeholder is visual only; retain the current destination.
       } else {
-        // Do not cause a layout update for blank space in the grid.
+        // Clear stale targets so releasing over blank space never moves a page unexpectedly.
+        updateCue(null);
       }
     };
     const cleanup = (commit, cancelled = false) => {
@@ -212,12 +215,13 @@ export default function PageGridPanel({ landedId, duplicateSelected, requestDele
       return filteredPages.map((page) => {
         const pageIndex = pageIndexById.get(page.id) ?? -1;
         const cuePosition = dropCue?.id === page.id ? dropCue.position : null;
+        const cueEdge = dropCue?.id === page.id ? dropCue.edge : null;
         const targetIndex = pageIndex;
         const insertionIndex = targetIndex - (sourceIndex >= 0 && sourceIndex < targetIndex ? 1 : 0) + (cuePosition === 'after' ? 1 : 0);
         const destinationPosition = Math.max(1, insertionIndex + 1);
         return <Fragment key={page.id}>
           {cuePosition === 'before' && draggingPageId && <DropPagePlaceholder page={draggedPage} position={destinationPosition} />}
-          <PageCard key={page.id} page={page} pageIndex={pageIndex} pages={pages} selectedIds={selectedIds} activeId={activeId} search={search} isReordering={!!draggingPageId} isDragging={draggingPageId === page.id} cuePosition={cuePosition} landedId={landedId} onContextMenu={openMenu} suppressPageClickUntil={suppressPageClickUntil} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setModal={setModal} startPageDrag={startPageDrag} selectPage={selectPage} rotateSelected={rotateSelected} movePage={movePage} />
+          <PageCard key={page.id} page={page} pageIndex={pageIndex} pages={pages} selectedIds={selectedIds} activeId={activeId} search={search} isReordering={!!draggingPageId} isDragging={draggingPageId === page.id} cuePosition={cuePosition} cueEdge={cueEdge} landedId={landedId} onContextMenu={openMenu} suppressPageClickUntil={suppressPageClickUntil} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setModal={setModal} startPageDrag={startPageDrag} selectPage={selectPage} rotateSelected={rotateSelected} movePage={movePage} />
           {cuePosition === 'after' && draggingPageId && <DropPagePlaceholder page={draggedPage} position={destinationPosition} />}
         </Fragment>;
       });

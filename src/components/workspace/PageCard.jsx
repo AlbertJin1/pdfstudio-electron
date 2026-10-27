@@ -5,6 +5,7 @@ import {
   ArrowRight,
   Check,
   FileText,
+  Expand,
   GripVertical,
   MoreHorizontal,
   RotateCw,
@@ -15,7 +16,7 @@ import { interactiveSpring } from '../../constants/motion.js';
 import { cx } from '../../utils/cx.js';
 import { extName } from '../../utils/format.js';
 
-function PageCard({ landedId, onContextMenu, page, pageIndex, pages, selectedIds, activeId, search, isReordering, isDragging, cuePosition, suppressPageClickUntil, setSelectedIds, setActiveId, setModal, startPageDrag, selectPage, rotateSelected, movePage }) {
+function PageCard({ landedId, onContextMenu, page, pageIndex, pages, selectedIds, activeId, search, isReordering, isDragging, cuePosition, cueEdge, suppressPageClickUntil, setSelectedIds, setActiveId, setModal, startPageDrag, selectPage, rotateSelected, movePage }) {
   const selected = selectedIds.includes(page.id);
   const pageNumber = String(pageIndex + 1).padStart(2, '0');
   return (
@@ -26,7 +27,7 @@ function PageCard({ landedId, onContextMenu, page, pageIndex, pages, selectedIds
       exit={{ opacity: 0, scale: 0.96 }}
       whileHover={isReordering ? undefined : { y: -2 }}
       transition={isReordering ? { duration: 0 } : interactiveSpring}
-      className={cx('page-card', selected && 'page-selected', activeId === page.id && 'page-active', isDragging && 'page-dragging', cuePosition === 'before' && 'drop-before', cuePosition === 'after' && 'drop-after', landedId === page.id && 'page-landed')}
+      className={cx('page-card', selected && 'page-selected', activeId === page.id && 'page-active', isDragging && 'page-dragging', cuePosition === 'before' && 'drop-before', cuePosition === 'after' && 'drop-after', cueEdge && `drop-edge-${cueEdge}`, landedId === page.id && 'page-landed')}
       data-page-id={page.id}
       draggable={false}
       aria-label={`Page ${pageIndex + 1}. Drag the grip to reorder. Click to select.`}
@@ -52,7 +53,7 @@ function PageCard({ landedId, onContextMenu, page, pageIndex, pages, selectedIds
           <IconButton icon={MoreHorizontal} label={`More actions for page ${pageIndex + 1}`} size={12} onClick={(event) => { event.stopPropagation(); setActiveId(page.id); setSelectedIds([page.id]); setModal({ type: 'page-menu', pageId: page.id }); }} />
         </div>
       </div>
-      <div className="page-thumb-zone">{page.thumbnail ? <img src={page.thumbnail} alt={`Page ${pageIndex + 1}`} draggable="false" /> : <div className="page-thumb-placeholder"><FileText size={27} /><span>Rendering…</span></div>}{!!page.overlays?.length && <span className="page-overlay-badge"><Type size={11} /> {page.overlays.length}</span>}</div>
+      <div className="page-thumb-zone">{page.thumbnail ? <img src={page.thumbnail} alt={`Page ${pageIndex + 1}`} draggable="false" /> : <div className="page-thumb-placeholder"><FileText size={27} /><span>Rendering…</span></div>}{!!page.overlays?.length && <span className="page-overlay-badge"><Type size={11} /> {page.overlays.length}</span>}<button type="button" className="page-thumb-fullscreen" aria-label={`Open page ${pageIndex + 1} in full-page viewer`} title="Open full-page viewer" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setActiveId(page.id); setSelectedIds([page.id]); setModal({ type: 'page-preview', pageId: page.id }); }}><Expand size={15} strokeWidth={2} /></button></div>
       <div className="page-card-footer"><div><strong>Page {pageNumber}</strong><small>{page.kind === 'image' ? extName(page.sourceName) + ' image' : page.kind === 'blank' ? 'Blank page' : `PDF page ${page.sourcePageIndex + 1}`}</small></div><span className={cx('page-check', selected && 'page-check-on')}>{selected && <Check size={12} />}</span></div>
     </motion.div>
   );

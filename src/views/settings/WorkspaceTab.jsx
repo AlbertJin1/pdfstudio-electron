@@ -2,7 +2,7 @@ import { SlidersHorizontal } from 'lucide-react';
 import SettingToggle from '../../components/common/SettingToggle.jsx';
 import ShortcutKeys from '../../components/common/ShortcutKeys.jsx';
 
-export default function WorkspaceTab({ preferences, showInspector, setShowInspector, setPreference }) {
+export default function WorkspaceTab({ preferences, setPreference }) {
   return (
     <div className="settings-panel">
                     <div className="settings-panel-title"><span className="settings-symbol settings-symbol-blue"><SlidersHorizontal size={18}/></span><div><h2>Workspace behavior</h2><p>Control page tools and protect against accidental changes.</p></div></div>

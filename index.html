@@ -10,8 +10,15 @@
     <meta name="description" content="PDF Studio — a modern local-first PDF workspace." />
     <title>PDF Studio</title>
     <script>
-      // Pick the splash colours before first paint so dark-theme users never see a white flash.
-      try { if (localStorage.getItem('pdfstudio-theme') === 'dark') document.documentElement.setAttribute('data-boot', 'dark'); } catch (_) {}
+      // Pick the splash colours before first paint, following the stored mode or OS preference.
+      try {
+        const saved = JSON.parse(localStorage.getItem('pdfstudio-settings') || '{}');
+        const hasVersionedThemeMode = saved.themeModeVersion === 1 && ['system', 'light', 'dark'].includes(saved.theme);
+        // Older releases stored only the resolved light/dark appearance. Start those installs in System mode.
+        const mode = hasVersionedThemeMode ? saved.theme : 'system';
+        const systemDark = !!window.matchMedia?.('(prefers-color-scheme: dark)').matches;
+        if (mode === 'dark' || (mode === 'system' && systemDark)) document.documentElement.setAttribute('data-boot', 'dark');
+      } catch (_) {}
     </script>
     <style>
       /* Static splash: pure HTML/CSS so it paints on the very first frame, long before the JS bundle has loaded. */

@@ -4,10 +4,16 @@ import { normalizeBytes } from '../utils/files.js';
 import { uid } from '../utils/id.js';
 
 const FILE_ACCEPT = {
-  all: '.pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.docx',
+  all: '.pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff',
   pdf: '.pdf,application/pdf',
   images: '.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,image/*',
 };
+
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff']);
+const IMAGE_MIME_BY_EXT = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.bmp': 'image/bmp', '.gif': 'image/gif', '.tif': 'image/tiff', '.tiff': 'image/tiff' };
+const fileExtension = (name) => { const match = /\.[^.]+$/.exec(String(name || '')); return match ? match[0].toLowerCase() : ''; };
+const isPageFileExtension = (ext) => ext === '.pdf' || IMAGE_EXTENSIONS.has(ext);
+
 
 export function useWorkspace({ notify, setMode, setIsLoading, setLoadingLabel, setModal, confirmDelete, accessLockedRef, fileInputRef }) {
   const [pages, setPages] = useState([]);
@@ -84,15 +90,30 @@ export function useWorkspace({ notify, setMode, setIsLoading, setLoadingLabel, s
     setLoadingLabel('Reading your files');
     const newPages = [];
     const newDocuments = [];
+    let unsupportedCount = 0;
     try {
       for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
         const item = items[itemIndex];
-        let bytes = normalizeBytes(item.bytes ?? item.data);
-        if (!bytes.length) continue;
-        let kind = item.kind || (item.mime === 'application/pdf' || item.name?.toLowerCase().endsWith('.pdf') ? 'pdf' : 'image');
-        if (!['pdf', 'image'].includes(kind)) continue;
+        const name = item.name || `Document ${itemIndex + 1}`;
+        const ext = fileExtension(name);
+        // Never let a Word document or an unknown file fall through to the image path.
+        // This guard also protects Electron imports if a stale picker sends an old file type.
+        if (!isPageFileExtension(ext)) { unsupportedCount += 1; continue; }
+        const kind = ext === '.pdf' ? 'pdf' : 'image';
+        const bytes = normalizeBytes(item.bytes ?? item.data);
+        if (!bytes.length) { unsupportedCount += 1; continue; }
+        const suppliedMime = String(item.mime || '').toLowerCase();
+        if (kind === 'pdf' && suppliedMime && suppliedMime !== 'application/pdf' && suppliedMime !== 'application/octet-stream') {
+          unsupportedCount += 1;
+          continue;
+        }
+        if (kind === 'image' && suppliedMime && !suppliedMime.startsWith('image/') && suppliedMime !== 'application/octet-stream') {
+          unsupportedCount += 1;
+          continue;
+        }
+        const safeMime = kind === 'pdf' ? 'application/pdf' : (suppliedMime.startsWith('image/') ? suppliedMime : IMAGE_MIME_BY_EXT[ext]);
         const sourceId = uid();
-        const source = { id: sourceId, name: item.name || `Document ${itemIndex + 1}`, originName: item.originName, path: item.path || '', mime: item.mime || (kind === 'pdf' ? 'application/pdf' : 'image/png'), kind, bytes, size: bytes.byteLength };
+        const source = { id: sourceId, name, originName: item.originName, path: item.path || '', mime: safeMime, kind, bytes, size: bytes.byteLength };
         let pageCount = 1;
         if (kind === 'pdf') {
           setLoadingLabel(`Reading ${source.name}`);
@@ -111,8 +132,6 @@ export function useWorkspace({ notify, setMode, setIsLoading, setLoadingLabel, s
             if (!opened) { notify(`Skipped ${source.name}: password was not accepted.`, 'error'); continue; }
           }
           pageCount = source.pdf.numPages;
-        } else if (!source.mime.startsWith('image/')) {
-          source.mime = 'image/png';
         }
         sourcesRef.current.set(sourceId, source);
         newDocuments.push({ id: sourceId, name: source.name, kind, mime: source.mime, size: source.size, pageCount, path: source.path, originName: source.originName, importedAt: new Date() });
@@ -120,7 +139,10 @@ export function useWorkspace({ notify, setMode, setIsLoading, setLoadingLabel, s
           newPages.push({ id: uid(), sourceId, sourceName: source.name, sourcePageIndex: kind === 'pdf' ? pageIndex : null, kind, rotation: 0, thumbnail: null, overlays: [], width: 595.28, height: 841.89 });
         }
       }
-      if (!newPages.length) return;
+      if (!newPages.length) {
+        if (unsupportedCount) notify(`Skipped ${unsupportedCount} unsupported file${unsupportedCount === 1 ? '' : 's'}. Add PDF files or supported images only.`, 'error');
+        return;
+      }
       setDocuments((previous) => [...previous, ...newDocuments]);
       const current = pagesRef.current;
       historyRef.current.push(current);
@@ -134,6 +156,7 @@ export function useWorkspace({ notify, setMode, setIsLoading, setLoadingLabel, s
       setMode('workspace');
       setSourceRevision((n) => n + 1);
       notify(`${newPages.length} page${newPages.length === 1 ? '' : 's'} added to your workspace.`);
+      if (unsupportedCount) notify(`Skipped ${unsupportedCount} unsupported file${unsupportedCount === 1 ? '' : 's'}. Only PDFs and images can be added as pages.`, 'error');
       setLoadingLabel('Generating page previews');
       for (const page of newPages) {
         const thumbnail = await createPageThumbnail(page, sourcesRef.current);
@@ -169,14 +192,30 @@ export function useWorkspace({ notify, setMode, setIsLoading, setLoadingLabel, s
 
   const handleBrowserFiles = useCallback(async (fileList) => {
     if (accessLockedRef.current) return;
-    const items = await Promise.all([...fileList].map(async (file) => {
-      const ext = file.name.split('.').pop().toLowerCase();
-      let kind = ext === 'pdf' ? 'pdf' : 'image';
-      let mime = file.type || (kind === 'pdf' ? 'application/pdf' : 'image/png');
+    const files = [...(fileList || [])];
+    const accepted = [];
+    let rejectedCount = 0;
+    for (const file of files) {
+      const ext = fileExtension(file.name);
+      const mime = String(file.type || '').toLowerCase();
+      const extAllowed = isPageFileExtension(ext);
+      const mimeAllowed = !mime || mime === 'application/octet-stream' || (ext === '.pdf' ? mime === 'application/pdf' : mime.startsWith('image/'));
+      if (!extAllowed || !mimeAllowed) rejectedCount += 1;
+      else accepted.push(file);
+    }
+    if (!accepted.length) {
+      if (rejectedCount) notify(`Skipped ${rejectedCount} unsupported file${rejectedCount === 1 ? '' : 's'}. Add PDF files or supported images only; Word documents cannot be added as pages.`, 'error');
+      return;
+    }
+    const items = await Promise.all(accepted.map(async (file) => {
+      const ext = fileExtension(file.name);
+      const kind = ext === '.pdf' ? 'pdf' : 'image';
+      const mime = file.type || (kind === 'pdf' ? 'application/pdf' : IMAGE_MIME_BY_EXT[ext]);
       return { name: file.name, mime, kind, bytes: new Uint8Array(await file.arrayBuffer()) };
     }));
     await addImportedItems(items);
-  }, [addImportedItems]);
+    if (rejectedCount) notify(`Skipped ${rejectedCount} unsupported file${rejectedCount === 1 ? '' : 's'}. Only PDFs and images can be added as pages.`, 'error');
+  }, [accessLockedRef, addImportedItems, notify]);
 
   const selectPage = useCallback((page, event) => {
     setActiveId(page.id);

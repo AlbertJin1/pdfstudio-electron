@@ -1,0 +1,588 @@
+/* Workspace preview, precise reorder markers, and About / control polish. Loaded last on purpose. */
+
+/* The page workspace uses the full available width; expanded previews live in the fullscreen viewer. */
+:root:root .app-shell .workspace-content {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) !important;
+  overflow: hidden;
+}
+:root:root .app-shell .page-grid-panel {
+  width: 100%;
+  min-width: 0;
+  border-right: 0;
+}
+:root:root .app-shell .page-grid-options > .icon-button {
+  --ib: 34px;
+}
+
+/* A calm, readable drag ghost and an edge indicator matching the actual drop side. */
+:root:root .app-shell .page-drag-ghost-live {
+  border-color: #8e7cf0 !important;
+  box-shadow: 0 16px 38px rgb(29 24 70 / .22), 0 0 0 1px rgb(126 103 235 / .38) !important;
+  transform-origin: 50% 12%;
+  will-change: transform;
+}
+:root:root .app-shell .page-grid.is-reordering .page-card {
+  transition: none !important;
+}
+:root:root .app-shell .page-card.drop-edge-left::before,
+:root:root .app-shell .page-card.drop-edge-right::after {
+  top: 7px;
+  bottom: 7px;
+  width: 4px;
+  height: auto;
+}
+:root:root .app-shell .page-card.drop-edge-left::before { left: -8px; right: auto; }
+:root:root .app-shell .page-card.drop-edge-right::after { left: auto; right: -8px; }
+:root:root .app-shell .page-card.drop-edge-top::before,
+:root:root .app-shell .page-card.drop-edge-bottom::after {
+  left: 7px;
+  right: 7px;
+  width: auto;
+  height: 4px;
+}
+:root:root .app-shell .page-card.drop-edge-top::before { top: -8px; bottom: auto; }
+:root:root .app-shell .page-card.drop-edge-bottom::after { top: auto; bottom: -8px; }
+:root:root .app-shell .page-card.drop-edge-top::before,
+:root:root .app-shell .page-card.drop-edge-bottom::after {
+  background: #7762ed;
+  box-shadow: 0 0 0 4px rgb(128 100 244 / .12), 0 0 14px rgb(128 100 244 / .28);
+}
+:root:root .app-shell.theme-dark .page-card.drop-edge-top::before,
+:root:root .app-shell.theme-dark .page-card.drop-edge-bottom::after {
+  background: #b2a4ff;
+  box-shadow: 0 0 0 4px rgb(167 151 255 / .15), 0 0 14px rgb(167 151 255 / .2);
+}
+
+/* Full-page thumbnail action: always visible and easy to hit, including touch screens. */
+:root:root .app-shell .page-thumb-fullscreen {
+  position: absolute;
+  z-index: 4;
+  right: 8px;
+  bottom: 8px;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid rgb(220 216 255 / .95);
+  border-radius: 8px;
+  color: #6250ce;
+  background: rgb(255 255 255 / .95);
+  box-shadow: 0 2px 8px rgb(35 28 86 / .14);
+  cursor: pointer;
+  transition: background-color .16s ease, color .16s ease, box-shadow .16s ease, transform .16s ease;
+}
+:root:root .app-shell .page-thumb-fullscreen:hover,
+:root:root .app-shell .page-thumb-fullscreen:focus-visible {
+  color: #fff;
+  background: #6f5be5;
+  border-color: #6f5be5;
+  box-shadow: 0 4px 14px rgb(91 72 190 / .3);
+  transform: translateY(-1px);
+  outline: none;
+}
+:root:root .app-shell .page-thumb-fullscreen:focus-visible {
+  outline: 3px solid rgb(126 103 235 / .28);
+  outline-offset: 2px;
+}
+:root:root .app-shell .page-overlay-badge { right: auto; left: 6px; }
+:root:root .app-shell.theme-dark .page-thumb-fullscreen {
+  color: #c6bbff;
+  background: rgb(37 36 49 / .96);
+  border-color: #51496e;
+}
+:root:root .app-shell.theme-dark .page-thumb-fullscreen:hover,
+:root:root .app-shell.theme-dark .page-thumb-fullscreen:focus-visible {
+  color: #fff;
+  background: #7562df;
+  border-color: #9384f1;
+}
+
+:root:root .app-shell .page-preview-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+ :root:root .app-shell .page-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
+}
+:root:root .app-shell .page-preview-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+:root:root .app-shell .page-preview-zoom-button,
+:root:root .app-shell .page-preview-fit-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 34px;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--line, #dfe4eb);
+  border-radius: 8px;
+  color: var(--ink-soft, #4e5b6f);
+  background: var(--surface, #fff);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+}
+:root:root .app-shell .page-preview-zoom-button:hover:not(:disabled),
+:root:root .app-shell .page-preview-fit-button:hover {
+  color: #6350d3;
+  background: #f5f2ff;
+  border-color: #d8d0ff;
+}
+:root:root .app-shell .page-preview-zoom-button:disabled {
+  opacity: .42;
+  cursor: not-allowed;
+}
+:root:root .app-shell .page-preview-zoom-level {
+  min-width: 48px;
+  text-align: center;
+  color: var(--ink, #263143);
+  font-size: 11px;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+}
+:root:root .app-shell .page-preview-shortcut-help {
+  margin-left: auto;
+  color: var(--muted, #7b8597);
+  font-size: 10px;
+  align-self: center;
+}
+
+:root:root .app-shell .page-preview-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  padding: 0 2px;
+}
+:root:root .app-shell .page-preview-meta > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+:root:root .app-shell .page-preview-meta strong {
+  color: var(--ink, #263143);
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+:root:root .app-shell .page-preview-meta span {
+  color: var(--muted, #657287);
+  font-size: 11px;
+  line-height: 1.45;
+}
+:root:root .app-shell .page-preview-meta .page-preview-counter {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  border: 1px solid var(--line, #dfe4eb);
+  border-radius: 8px;
+  background: var(--surface-soft, #f6f7f9);
+  color: var(--ink-soft, #4e5b6f);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+:root:root .app-shell .page-preview-canvas-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--line, #dfe4eb);
+  border-radius: 12px;
+  background: var(--surface-alt, #f4f6f9);
+}
+ :root:root .app-shell .page-preview-canvas-stage.is-zoomed {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+:root:root .app-shell .page-preview-modal .preview-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 0;
+}
+:root:root .app-shell .page-preview-canvas-stage.is-zoomed .preview-stage {
+  width: max-content;
+  min-width: 100%;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+:root:root .app-shell .page-preview-modal .preview-paper-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: fit-content;
+  max-width: none;
+  min-height: 0;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+:root:root .app-shell .page-preview-modal .preview-paper {
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  max-width: none;
+  height: auto;
+}
+:root:root .app-shell .page-preview-modal .preview-rendered-canvas {
+  display: block;
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+  box-shadow: 0 10px 28px rgb(22 30 48 / .15);
+}
+:root:root .app-shell .page-preview-modal .preview-annotations {
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+}
+:root:root .app-shell .page-preview-modal .paper-page-tag { display: none; }
+:root:root .app-shell .modal-card:has(.page-preview-modal) {
+  display: flex;
+  flex-direction: column;
+  width: calc(100vw - 24px);
+  max-width: none;
+  height: calc(100dvh - 24px);
+  max-height: calc(100dvh - 24px);
+  overflow: hidden;
+}
+:root:root .app-shell .modal-card:has(.page-preview-modal) .modal-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+:root:root .app-shell.theme-dark .page-preview-canvas-stage {
+  background: #1a1d23;
+  border-color: #3b414c;
+}
+ :root:root .app-shell.theme-dark .page-preview-zoom-button,
+:root:root .app-shell.theme-dark .page-preview-fit-button {
+  color: #d2d8e2;
+  background: #242832;
+  border-color: #434958;
+}
+:root:root .app-shell.theme-dark .page-preview-zoom-button:hover:not(:disabled),
+:root:root .app-shell.theme-dark .page-preview-fit-button:hover {
+  color: #dcd5ff;
+  background: #302d44;
+  border-color: #5e548e;
+}
+:root:root .app-shell.theme-dark .page-preview-zoom-level { color: #e2e7ef; }
+:root:root .app-shell.theme-dark .page-preview-meta strong { color: #e2e7ef; }
+:root:root .app-shell.theme-dark .page-preview-meta span { color: #aab4c2; }
+:root:root .app-shell.theme-dark .page-preview-counter { background: #252a32; border-color: #424853; color: #d2d8e2; }
+
+/* Give the developer surname a distinctive gradient underline instead of a default text underline. */
+:root:root .app-shell .developer-name em {
+  position: relative;
+  display: inline-block;
+  padding-bottom: 4px;
+  color: #137f5d;
+  font-style: normal;
+  text-decoration: none !important;
+  text-decoration-color: transparent !important;
+  box-shadow: none !important;
+  white-space: nowrap;
+}
+:root:root .app-shell .developer-name em::after {
+  content: '';
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  left: 0;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #12815d 0%, #44b487 72%, #a1e3c1 100%);
+  transform: skewX(-20deg);
+  transform-origin: left center;
+}
+:root:root .app-shell .developer-name em::before {
+  content: '';
+  position: absolute;
+  right: -4px;
+  bottom: 0;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #42b487;
+  box-shadow: 0 0 0 2px rgb(66 180 135 / .12);
+}
+:root:root .app-shell.theme-dark .developer-name em { color: #9be8c3; }
+:root:root .app-shell.theme-dark .developer-name em::after { background: linear-gradient(90deg, #72d9ab 0%, #a4f1cd 72%, #d8ffea 100%); }
+:root:root .app-shell.theme-dark .developer-name em::before { background: #a4f1cd; box-shadow: 0 0 0 2px rgb(164 241 205 / .13); }
+
+/* The ITRS and RSC marks receive equal columns without a redundant section label. */
+:root:root .app-shell .about-branding-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(12px, 2vw, 24px);
+  min-height: 84px;
+  padding: 10px 16px;
+}
+:root:root .app-shell .about-branding-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 62px;
+  min-width: 0;
+  padding: 2px 8px;
+}
+:root:root .app-shell .about-itrs-logo,
+:root:root .app-shell .about-rsc-logo {
+  width: 100%;
+  min-width: 0;
+  flex: initial;
+}
+:root:root .app-shell .about-branding-logo img {
+  display: block;
+  width: 100%;
+  max-width: 250px;
+  height: 100%;
+  max-height: 58px;
+  object-fit: contain;
+}
+:root:root .app-shell .about-branding-divider {
+  align-self: center;
+  justify-self: center;
+  width: 1px;
+  height: 54px;
+  min-height: 0;
+  background: var(--line, #dfe4eb);
+}
+
+/* Center the toggle thumb using geometry, not a hard-coded top offset. */
+:root:root .app-shell .setting-switch {
+  box-sizing: border-box;
+  vertical-align: middle;
+}
+:root:root .app-shell .setting-switch::after {
+  top: 50%;
+  left: 2px;
+  transform: translateY(-50%);
+}
+:root:root .app-shell .setting-toggle-row input:checked + .setting-switch::after {
+  transform: translate(18px, -50%);
+}
+
+@media (max-width: 900px) {
+  :root:root .app-shell .page-grid { grid-template-columns: repeat(auto-fill, minmax(125px, 1fr)); }
+}
+@media (max-width: 760px) {
+  :root:root .app-shell .workspace-content { display: block; overflow: visible; }
+  :root:root .app-shell .modal-card:has(.page-preview-modal) { width: calc(100vw - 12px); height: calc(100dvh - 12px); max-height: calc(100dvh - 12px); }
+  :root:root .app-shell .page-preview-toolbar { align-items: flex-start; flex-direction: column; }
+  :root:root .app-shell .page-preview-zoom-controls { align-self: stretch; }
+  :root:root .app-shell .page-preview-shortcut-help { display: none; }
+  :root:root .app-shell .page-preview-meta span:not(.page-preview-counter) { display: none; }
+  :root:root .app-shell .about-branding-strip { gap: 10px; padding: 9px; min-height: 72px; }
+  :root:root .app-shell .about-branding-logo { height: 52px; padding: 0 4px; }
+  :root:root .app-shell .about-branding-logo img { max-height: 50px; }
+  :root:root .app-shell .about-branding-divider { height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:root .app-shell .page-drag-ghost-live,
+  :root:root .app-shell .page-card.drop-edge-top::before,
+  :root:root .app-shell .page-card.drop-edge-bottom::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+
+/* System theme, calm local-processing status, and layout-stable accessibility controls. */
+:root:root .app-shell .titlebar-center {
+  min-width: 0;
+  overflow: visible;
+}
+:root:root .app-shell .titlebar-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  min-height: 29px;
+  max-width: 100%;
+  padding: 0 12px;
+  border: 1px solid #d6e9df;
+  border-radius: 999px;
+  background: #f1f8f4;
+  color: #32634d;
+  font-size: calc(12px * var(--ui-scale));
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+}
+:root:root .app-shell .titlebar-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: #17845d;
+  box-shadow: 0 0 0 3px rgb(23 132 93 / .13);
+}
+:root:root .app-shell.theme-dark .titlebar-status {
+  border-color: #36594a;
+  background: #202d27;
+  color: #c4ead5;
+}
+:root:root .app-shell.theme-dark .titlebar-dot {
+  background: #59d59a;
+  box-shadow: 0 0 0 3px rgb(89 213 154 / .15);
+}
+:root:root .app-shell .local-badge {
+  min-height: 30px;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid #d6e9df;
+  border-radius: 8px;
+  background: #f1f8f4;
+  color: #32634d;
+  font-size: calc(11.5px * var(--ui-scale));
+  font-weight: 650;
+  line-height: 1;
+}
+:root:root .app-shell .local-badge span {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: #17845d;
+  box-shadow: 0 0 0 3px rgb(23 132 93 / .12);
+}
+:root:root .app-shell.theme-dark .local-badge {
+  border-color: #36594a;
+  background: #202d27;
+  color: #c4ead5;
+}
+:root:root .app-shell.theme-dark .local-badge span {
+  background: #59d59a;
+  box-shadow: 0 0 0 3px rgb(89 213 154 / .15);
+}
+
+/* Three explicit colour modes. The system card remains selected only when following Windows. */
+:root:root .app-shell .settings-theme-options {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+:root:root .app-shell .settings-theme-options .theme-choice {
+  min-width: 0;
+  height: 100%;
+  min-height: 86px;
+  align-items: center;
+}
+:root:root .app-shell .settings-theme-options .theme-choice > span:nth-child(2) {
+  min-width: 0;
+}
+:root:root .app-shell .settings-theme-options .theme-choice small {
+  line-height: 1.45;
+}
+:root:root .app-shell .theme-preview-system {
+  display: grid;
+  flex: 0 0 45px;
+  place-items: center;
+  color: #6757d9;
+  background: linear-gradient(135deg, #f8f9fc 0 50%, #292c35 50% 100%);
+  border-color: #cdd2dd;
+}
+:root:root .app-shell.theme-dark .theme-preview-system {
+  color: #c7c2ff;
+  background: linear-gradient(135deg, #f8f9fc 0 50%, #292c35 50% 100%);
+  border-color: #596170;
+}
+@media (max-width: 760px) {
+  :root:root .app-shell .settings-theme-options { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Keep hidden checkbox focus inside its own row. Without a positioned containing block,
+   Chromium may scroll the whole Settings page to the checkbox when contrast is toggled. */
+:root:root .app-shell .setting-toggle-row {
+  position: relative;
+  scroll-margin-block: 18px;
+}
+:root:root .app-shell .setting-toggle-row input {
+  top: 50%;
+  right: 0;
+  left: auto;
+  width: 42px;
+  height: 24px;
+  margin: 0;
+  transform: translateY(-50%);
+}
+:root:root .app-shell .setting-switch {
+  flex: 0 0 42px;
+  box-sizing: border-box;
+}
+
+/* Accessibility contrast changes colours and focus rings only: never alter dimensions,
+   margins, paddings, line heights, or border widths, so Settings cannot jump on toggle. */
+:root:root .app-shell.high-contrast {
+  --line: #a8b2c1;
+  --line-strong: #7f8b9d;
+}
+:root:root .app-shell.high-contrast .settings-panel,
+:root:root .app-shell.high-contrast .settings-nav,
+:root:root .app-shell.high-contrast .stat-card,
+:root:root .app-shell.high-contrast .tool-card,
+:root:root .app-shell.high-contrast .theme-choice,
+:root:root .app-shell.high-contrast .settings-segment button {
+  border-color: #a8b2c1;
+}
+:root:root .app-shell.high-contrast .settings-field-heading small,
+:root:root .app-shell.high-contrast .setting-toggle-copy small,
+:root:root .app-shell.high-contrast .settings-nav-item small {
+  color: #354255;
+}
+:root:root .app-shell.high-contrast .setting-switch {
+  border-color: #66758a;
+}
+:root:root .app-shell.high-contrast :is(button, input, select, textarea):focus-visible {
+  outline: 3px solid var(--ring);
+  outline-offset: 2px;
+}
+:root:root .app-shell.theme-dark.high-contrast .settings-panel,
+:root:root .app-shell.theme-dark.high-contrast .settings-nav,
+:root:root .app-shell.theme-dark.high-contrast .stat-card,
+:root:root .app-shell.theme-dark.high-contrast .tool-card,
+:root:root .app-shell.theme-dark.high-contrast .theme-choice,
+:root:root .app-shell.theme-dark.high-contrast .settings-segment button {
+  border-color: #737f90;
+}
+:root:root .app-shell.theme-dark.high-contrast .settings-field-heading small,
+:root:root .app-shell.theme-dark.high-contrast .setting-toggle-copy small,
+:root:root .app-shell.theme-dark.high-contrast .settings-nav-item small {
+  color: #e2e7ef;
+}
+:root:root .app-shell.theme-dark.high-contrast .setting-switch {
+  border-color: #9aa7b8;
+}

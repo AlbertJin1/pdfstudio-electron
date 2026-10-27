@@ -29,7 +29,7 @@ export default function TitleBar({ mode, maximized, setMode, editorTabOpen = fal
           <button type="button" className="titlebar-tab-add" onClick={() => setMode('edit')} aria-label="Open Edit PDF tab" title="Open Edit PDF tab"><Plus size={16} aria-hidden="true" /></button>
         )}
       </div>
-      <div className="titlebar-center" title="Files are processed on this device"><span className="titlebar-dot" /> <span>Local workspace</span></div>
+      <div className="titlebar-center" title="Files are processed on this device"><span className="titlebar-status" role="status"><span className="titlebar-dot" aria-hidden="true"/><span>Local workspace</span></span></div>
       <WindowControls maximized={maximized} />
     </motion.header>
   );

@@ -276,7 +276,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .preview-stage { display: flex; flex-direction: column; align-items: center; gap: 9px; }
 .preview-paper-wrap { position: relative; width: 100%; max-width: 274px; min-height: 150px; display: flex; justify-content: center; padding: 9px; background: #f2f3f8; border: 1px solid #e6e7ef; border-radius: 8px; overflow: hidden; }
 .preview-paper { width: 100%; display: flex; align-items: flex-start; justify-content: center; }
-.preview-rendered-canvas { background: white; max-width: 100%; height: auto !important; box-shadow: 0 4px 12px rgba(30,32,55,.09); }
+.preview-rendered-canvas { background: white; max-width: 100%; height: auto; box-shadow: 0 4px 12px rgba(30,32,55,.09); }
 .preview-annotations { position: absolute; left: 9px; right: 9px; top: 9px; bottom: 9px; pointer-events: none; }
 .annotation-text { position: absolute; max-width: 80%; font-weight: 650; line-height: 1.2; overflow-wrap: anywhere; text-shadow: 0 1px 1px rgba(255,255,255,.45); }
 .annotation-rect { position: absolute; }

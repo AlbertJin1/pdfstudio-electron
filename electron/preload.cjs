@@ -34,6 +34,12 @@ contextBridge.exposeInMainWorld('pdfStudio', Object.freeze({
   isMaximized: () => ipcRenderer.invoke('window:is-maximized'),
   version: () => ipcRenderer.invoke('app:version'),
   platform: () => ipcRenderer.invoke('app:platform'),
+  getSystemTheme: () => ipcRenderer.invoke('theme:get-system'),
+  onSystemThemeChanged: (callback) => {
+    const listener = (_event, theme) => callback(theme);
+    ipcRenderer.on('theme:system-changed', listener);
+    return () => ipcRenderer.removeListener('theme:system-changed', listener);
+  },
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
   getUpdaterState: () => ipcRenderer.invoke('updater:get-state'),
