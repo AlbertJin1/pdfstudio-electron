@@ -59,7 +59,7 @@ export function useKeyboardShortcuts(props) {
       if (p.modal) return;
       // Edit PDF owns its own save/undo/delete shortcuts; do not send those keystrokes
       // to the page-management workspace while its dedicated editor is active.
-      if (p.mode === 'edit') return;
+      if (p.mode === 'edit' || p.mode === 'photo') return;
 
       if (mod && lower === 'f' && p.mode === 'workspace' && pages.length) {
         event.preventDefault();

@@ -45,8 +45,16 @@ try {
 
   const packageJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
   assert.equal(packageJson.build.win.compression, 'maximum', 'portable EXE uses maximum compression');
+  assert(packageJson.scripts['prebuild:win'].includes('scripts/prepare-bundled-resources.cjs'), 'Windows build stages optional resources before packaging');
   assert(packageJson.build.extraResources.some((entry) => entry.from === 'build-resources/ocr'), 'OCR is staged through size policy');
   assert(packageJson.build.extraResources.some((entry) => entry.from === 'build-resources/ghostscript'), 'native Ghostscript is staged through size policy');
+  assert(packageJson.build.asar, 'application files remain in ASAR');
+  assert(packageJson.build.asarUnpack.some((pattern) => pattern.includes('@tesseract.js-data')), 'OCR language models remain unpacked for local filesystem loading');
+  assert(packageJson.build.asarUnpack.some((pattern) => pattern.includes('@jspawn/ghostscript-wasm')), 'bundled Ghostscript WASM remains packaged');
+  assert(packageJson.scripts['test:build-size'], 'focused build-size policy test is available');
+  for (const excluded of ['!**/*.map', '!**/*.pdb', '!**/*.ilk', '!**/*.tsbuildinfo']) {
+    assert(packageJson.build.files.includes(excluded), `non-runtime build artifact exclusion exists: ${excluded}`);
+  }
   console.log('Portable EXE size policy tests passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

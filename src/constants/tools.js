@@ -1,4 +1,4 @@
-import { FileArchive, FileImage, FilePenLine, FileText, ImageDown, ImagePlus, Layers3, ScanSearch } from 'lucide-react';
+import { Crop, FileArchive, FileImage, FilePenLine, FileText, ImageDown, ImagePlus, Layers3, ScanSearch } from 'lucide-react';
 
 export const initialTools = [
   { label: 'Edit PDF', description: 'Add text, signatures, highlights, stamps and shapes', icon: FilePenLine, tone: 'lavender', mode: 'edit' },
@@ -9,4 +9,5 @@ export const initialTools = [
   { label: 'Images to PDF', description: 'Build a polished PDF from your image files', icon: ImagePlus, tone: 'green', mode: 'workspace', action: 'imagesToPdf' },
   { label: 'Image to text', description: 'Extract text (OCR) from photos, screenshots and scans, then copy or save it', icon: ScanSearch, tone: 'lavender', action: 'imageText' },
   { label: 'Format converter', description: 'Convert HEIC, WebP, PNG, JPG and more. Shrink to a size limit and strip hidden location data', icon: ImageDown, tone: 'green', action: 'imageConvert' },
+  { label: 'Photo Editing', description: 'Open a dedicated workspace to crop, rotate, watermark, resize, adjust colors, and remove EXIF/GPS data', icon: Crop, tone: 'orange', action: 'photoEditor' },
 ];

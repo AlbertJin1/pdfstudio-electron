@@ -4,6 +4,7 @@ import { AnimatePresence, LayoutGroup, motion } from 'motion/react';
 import {
   CheckCircle2,
   ChevronRight,
+  Crop,
   FileImage,
   FilePenLine,
   FileText,
@@ -32,6 +33,7 @@ const NAV = [
   { id: 'home', label: 'Overview', aria: 'Overview', title: 'Overview (Ctrl+1)', shortcut: 'Ctrl+1', keyHint: 'Ctrl 1', icon: LayoutDashboard },
   { id: 'workspace', label: 'Page workspace', aria: 'Page workspace', title: 'Page workspace (Ctrl+2)', shortcut: 'Ctrl+2', icon: Files },
   { id: 'edit', label: 'Edit PDF', aria: 'Edit PDF', title: 'Edit PDF content', icon: FilePenLine, badge: 'NEW' },
+  { id: 'photo', label: 'Photo Editing', aria: 'Photo Editing', title: 'Crop, adjust, watermark, and export photos', icon: Crop, badge: 'NEW' },
   { id: 'convert', label: 'Convert files', aria: 'Conversion studio', title: 'Conversion studio (Ctrl+3)', shortcut: 'Ctrl+3', icon: WandSparkles, badge: 'TOOLS' },
   { id: 'history', label: 'Recent sources', aria: 'Recent sources', title: 'Recent sources (Ctrl+4)', shortcut: 'Ctrl+4', icon: History },
   { id: 'settings', label: 'Settings', aria: 'Settings', title: 'Application settings', icon: Settings2 },
@@ -163,6 +165,7 @@ export default function Sidebar({ pages, documents, mode, appVersion, currentDoc
         <button className="quick-nav" aria-label="PDF to Word" {...tip('PDF to Word')} onClick={() => setModal({ type: 'word' })} disabled={!pages.length}><span className="quick-icon quick-blue"><FileText size={15} /></span><span>PDF to Word</span></button>
         <button className="quick-nav" aria-label="Export images" {...tip('Export images')} onClick={() => setModal({ type: 'images' })}><span className="quick-icon quick-orange"><FileImage size={15} /></span><span>Export images</span></button>
         <button className="quick-nav" aria-label="Format converter" {...tip('Format converter')} onClick={() => setModal({ type: 'imageConvert' })}><span className="quick-icon quick-green"><ImageDown size={15} /></span><span>Format converter</span></button>
+        <button className="quick-nav" aria-label="Photo Editing" {...tip('Photo Editing')} onClick={() => setMode('photo')}><span className="quick-icon quick-orange"><Crop size={15} /></span><span>Photo Editing</span></button>
       </div>
       <div className="sidebar-footer">
         <div className="privacy-card" {...tip('Your files stay yours: processed on this device')}><div className="privacy-icon"><ShieldCheck size={17} /></div><div><strong>Your files stay yours</strong><p>Processed on this device. No uploads.</p></div><CheckCircle2 size={15} className="privacy-check" /></div>

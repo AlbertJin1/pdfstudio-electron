@@ -9,6 +9,7 @@ import './styles/sidebar-collapse.css';
 import './styles/loader.css';
 import './styles/dropzone.css';
 import './styles/image-export.css';
+import './styles/photo-editor.css';
 import './styles/select.css';
 import './styles/workspace-polish.css';
 

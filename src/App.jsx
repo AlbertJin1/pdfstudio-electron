@@ -25,32 +25,47 @@ const ConvertView = lazy(() => import('./views/ConvertView.jsx'));
 const EditPdfView = lazy(() => import('./views/EditPdfView.jsx'));
 const HistoryView = lazy(() => import('./views/HistoryView.jsx'));
 const SettingsView = lazy(() => import('./views/settings/SettingsView.jsx'));
+const PhotoEditorView = lazy(() => import('./views/PhotoEditorView.jsx'));
 
 function App() {
   const [mode, setModeRaw] = useState('home');
   const [editorTabOpen, setEditorTabOpen] = useState(false);
   const [editorDirty, setEditorDirty] = useState(false);
   const [editorTabTitle, setEditorTabTitle] = useState('Edit PDF');
+  const [photoTabOpen, setPhotoTabOpen] = useState(false);
+  const [photoSession, setPhotoSession] = useState({ hasPhotos: false, busy: false });
   const previousModeRef = useRef('home');
-  // Edit PDF is a first-class in-app tab rather than a detached Electron window.
+  // Both heavyweight editors are first-class in-app tabs and remain mounted while switching tabs.
   const setMode = useCallback((next) => {
     if (next === 'edit') {
-      setModeRaw((current) => { if (current !== 'edit') previousModeRef.current = current; return 'edit'; });
+      setModeRaw((current) => { if (current !== 'edit' && current !== 'photo') previousModeRef.current = current; return 'edit'; });
       setEditorTabOpen(true);
       return;
     }
-    setModeRaw((current) => { if (current !== 'edit') previousModeRef.current = next; return next; });
+    if (next === 'photo') {
+      setModeRaw((current) => { if (current !== 'edit' && current !== 'photo') previousModeRef.current = current; return 'photo'; });
+      setPhotoTabOpen(true);
+      return;
+    }
+    setModeRaw((current) => { if (current !== 'edit' && current !== 'photo') previousModeRef.current = next; return next; });
   }, []);
   const activateMainTab = useCallback(() => {
-    setModeRaw((current) => current === 'edit' ? (previousModeRef.current || 'home') : current);
+    setModeRaw((current) => (current === 'edit' || current === 'photo') ? (previousModeRef.current || 'home') : current);
   }, []);
   const closeEditorTab = useCallback(() => {
     if (editorDirty && !window.confirm('You have unsaved PDF edits. Close the Edit PDF tab and discard those changes?')) return;
     setEditorTabOpen(false);
     setEditorDirty(false);
     setEditorTabTitle('Edit PDF');
-    setModeRaw((current) => current === 'edit' ? (previousModeRef.current || 'home') : current);
-  }, [editorDirty]);
+    setModeRaw((current) => current === 'edit' ? (photoTabOpen ? 'photo' : (previousModeRef.current || 'home')) : current);
+  }, [editorDirty, photoTabOpen]);
+  const closePhotoTab = useCallback(() => {
+    if (photoSession.busy) { window.alert('Please wait for photo processing to finish before closing this tab.'); return; }
+    if (photoSession.hasPhotos && !window.confirm('Close the Photo Editing tab and discard the loaded photos and current edits? Original files will remain unchanged.')) return;
+    setPhotoTabOpen(false);
+    setPhotoSession({ hasPhotos: false, busy: false });
+    setModeRaw((current) => current === 'photo' ? (editorTabOpen ? 'edit' : (previousModeRef.current || 'home')) : current);
+  }, [photoSession, editorTabOpen]);
   // If the whole application is closed while an Edit PDF tab has unsaved edits, ask before exit. In the desktop app the
   // main process owns that prompt (it reliably closes the window once the user confirms); the browser build falls back to
   // the standard `beforeunload` guard.
@@ -265,6 +280,7 @@ function App() {
   else if (tool.action === 'compress') setModal({ type: 'compress' });
   else if (tool.action === 'imageConvert') { if (!accessLockedRef.current) setModal({ type: 'imageConvert' }); }
   else if (tool.action === 'imageText') { if (!accessLockedRef.current) setModal({ type: 'imageText' }); }
+  else if (tool.action === 'photoEditor') { if (!accessLockedRef.current) setMode('photo'); }
   else { setMode(tool.mode || 'workspace'); if (!pages.length && tool.mode !== 'edit') chooseFiles(); }
   };
 
@@ -272,14 +288,15 @@ function App() {
     <MotionConfig reducedMotion={preferences.reduceMotion ? 'always' : 'user'} transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}>
     <motion.div data-accent={preferences.accentTheme || 'violet'} className={cx('app-shell', 'platform-win32', fullScreen && 'is-fullscreen', maximized && 'is-maximized', dark && 'theme-dark', preferences.fontScale === 'large' && 'font-scale-large', preferences.fontScale === 'xlarge' && 'font-scale-xlarge', preferences.density === 'compact' && 'density-compact', preferences.highContrast && 'high-contrast', preferences.reduceMotion && 'reduce-motion')} onDragOver={(event) => event.preventDefault()} onDrop={handleDropFiles} inert={access.locked ? true : undefined} aria-hidden={access.locked ? true : undefined} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: preferences.reduceMotion ? 0 : 0.24 }}>
     <input ref={fileInputRef} type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff" className="hidden-input" onChange={(event) => { if (event.target.files?.length) handleBrowserFiles(event.target.files); event.target.value = ''; }} />
-    <TitleBar mode={mode} maximized={maximized} setMode={setMode} editorTabOpen={editorTabOpen} editorTabTitle={editorTabTitle} onActivateMainTab={activateMainTab} onCloseEditorTab={closeEditorTab} />
-    <motion.div className={cx('app-body', mode === 'edit' && 'app-body-edit')} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.22, delay: 0.07 }}>
-    {mode !== 'edit' && <Sidebar pages={pages} documents={documents} mode={mode} appVersion={appVersion} currentDocument={currentDocument} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setMode={setMode} setModal={setModal} chooseFiles={chooseFiles} removeDocument={removeDocument} />}
-    <motion.main className={cx('main-panel', mode === 'edit' && 'main-panel-edit')} initial={{ opacity: 0, x: 5 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.24, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}>
-    {mode !== 'edit' && <Topbar mode={mode} dark={dark} activePage={activePage} setMode={setMode} setDark={setDark} setModal={setModal} />}
+    <TitleBar mode={mode} maximized={maximized} setMode={setMode} editorTabOpen={editorTabOpen} editorTabTitle={editorTabTitle} photoTabOpen={photoTabOpen} onActivateMainTab={activateMainTab} onCloseEditorTab={closeEditorTab} onClosePhotoTab={closePhotoTab} />
+    <motion.div className={cx('app-body', (mode === 'edit' || mode === 'photo') && 'app-body-edit')} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.22, delay: 0.07 }}>
+    {mode !== 'edit' && mode !== 'photo' && <Sidebar pages={pages} documents={documents} mode={mode} appVersion={appVersion} currentDocument={currentDocument} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setMode={setMode} setModal={setModal} chooseFiles={chooseFiles} removeDocument={removeDocument} />}
+    <motion.main className={cx('main-panel', (mode === 'edit' || mode === 'photo') && 'main-panel-edit')} initial={{ opacity: 0, x: 5 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.24, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}>
+    {mode !== 'edit' && mode !== 'photo' && <Topbar mode={mode} dark={dark} activePage={activePage} setMode={setMode} setDark={setDark} setModal={setModal} />}
     <Suspense fallback={null}>
     {editorTabOpen && <div className={cx('persistent-edit-pdf', mode === 'edit' && 'is-active')} style={{ display: mode === 'edit' ? 'flex' : 'none' }}><EditPdfView active={mode === 'edit'} documents={documents} sourcesRef={sourcesRef} initialDocument={currentDocument} notify={notify} onDirtyChange={setEditorDirty} onTabTitleChange={setEditorTabTitle} onCloseTab={closeEditorTab} /></div>}
-    {mode !== 'edit' && <AnimatePresence mode="wait" initial={false}>
+    {photoTabOpen && <div className={cx('persistent-photo-editing', mode === 'photo' && 'is-active')} style={{ display: mode === 'photo' ? 'flex' : 'none' }}><PhotoEditorView notify={notify} onSessionChange={setPhotoSession} /></div>}
+    {mode !== 'edit' && mode !== 'photo' && <AnimatePresence mode="wait" initial={false}>
     {mode === 'home' && <HomeView key="home" pages={pages} documents={documents} setMode={setMode} setModal={setModal} chooseFiles={chooseFiles} startTool={startTool} />}
     {mode === 'workspace' && <WorkspaceView key="workspace" pages={pages} pagesRef={pagesRef} selectedIds={selectedIds} activeId={activeId} search={search} activePage={activePage} draggingPageId={draggingPageId} landedId={landedId} dropCue={dropCue} suppressPageClickUntil={suppressPageClickUntil} historyRef={historyRef} redoRef={redoRef} filteredPages={filteredPages} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setSearch={setSearch} setModal={setModal} setDraggingPageId={setDraggingPageId} setDropCue={setDropCue} commitPages={commitPages} undo={undo} redo={redo} chooseFiles={chooseFiles} handleBrowserFiles={handleBrowserFiles} selectPage={selectPage} requestDeleteSelected={requestDeleteSelected} rotateSelected={rotateSelected} duplicateSelected={duplicateSelected} addBlankPage={addBlankPage} movePage={movePage} />}
     {mode === 'convert' && <ConvertView key="convert" pages={pages} setModal={setModal} chooseFiles={chooseFiles} startWord={startWordConversion} />}

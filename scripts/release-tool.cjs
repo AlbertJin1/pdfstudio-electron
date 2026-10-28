@@ -39,8 +39,12 @@ if (mode === 'finalize') {
     console.error(`\nERROR: expected publish/ to contain only ${exeName}, found: ${left.join(', ') || '(nothing)'}`);
     process.exit(1);
   }
-  const mb = (fs.statSync(path.join(releaseDir, exeName)).size / 1024 / 1024).toFixed(1);
-  console.log(`\nSingle portable executable ready: publish\\${exeName} (${mb} MB)`);
+  const bytes = fs.statSync(path.join(releaseDir, exeName)).size;
+  const mb = (bytes / 1024 / 1024).toFixed(1);
+  console.log(`\nSingle portable executable ready: publish\\${exeName} (${mb} MiB)`);
+  if (bytes > 250 * 1024 * 1024) {
+    console.warn(`[size] The EXE is larger than 250 MiB. Review the [size] staged-resource report and confirm no unnecessary OCR language models or native Ghostscript bundle were enabled.`);
+  }
   console.log('No installer. No installation or administrator permission needed. Copy it anywhere and run it.');
   process.exit(0);
 }

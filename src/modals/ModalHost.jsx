@@ -4,6 +4,7 @@ import ConfirmDeleteModal from './ConfirmDeleteModal.jsx';
 import CompressionModal from './CompressionModal.jsx';
 import ImageTextModal from './ImageTextModal.jsx';
 import ImageConvertModal from './ImageConvertModal.jsx';
+import PhotoEditorModal from './PhotoEditorModal.jsx';
 import CoverModal from './CoverModal.jsx';
 import ExportModal from './ExportModal.jsx';
 import ExportSelectedModal from './ExportSelectedModal.jsx';
@@ -27,6 +28,7 @@ export default function ModalHost({ workspaceName, workspacePath, hideGuide, set
     {modal?.type === 'word' && <WordModal key="word" file={modal.file || null} pages={pages} setModal={setModal} convertToWord={convertToWord} />}
     {modal?.type === 'imageText' && <ImageTextModal key="imageText" setModal={setModal} notify={notify} />}
     {modal?.type === 'imageConvert' && <ImageConvertModal key="imageConvert" setModal={setModal} notify={notify} />}
+    {modal?.type === 'photoEditor' && <PhotoEditorModal key="photoEditor" setModal={setModal} notify={notify} />}
     {modal?.type === 'compress' && <CompressionModal key="compress" setModal={setModal} compressPdfFile={compressPdfFile} />}
     {modal?.type === 'images' && <ImagesModal key="images" file={modal.file || null} workspaceName={workspaceName} workspacePath={workspacePath} pages={pages} imageFormat={imageFormat} imageQuality={imageQuality} selectedPages={selectedPages} setModal={setModal} setImageFormat={setImageFormat} setImageQuality={setImageQuality} convertToImages={convertToImages} />}
     {modal?.type === 'split' && <SplitModal key="split" file={modal.file || null} workspaceName={workspaceName} workspacePath={workspacePath} pages={pages} setModal={setModal} splitPdf={splitPdf} />}
