@@ -14,7 +14,7 @@ import { classifyDrag, dragHasFiles } from '../utils/pdfFiles.js';
  *   element; a naive handler flickers and gets stuck. Window-level drop/dragend listeners reset it for the
  *   cases where the drag ends somewhere else.
  */
-export function useFileDrop({ onDrop } = {}) {
+export function useFileDrop({ onDrop, kind = 'pdf' } = {}) {
   const [dragState, setDragState] = useState(null);
   const depth = useRef(0);
   const onDropRef = useRef(onDrop);
@@ -39,7 +39,7 @@ export function useFileDrop({ onDrop } = {}) {
       event.preventDefault();
       if (!onDropRef.current) return;
       depth.current += 1;
-      setDragState(classifyDrag(event).state);
+      setDragState(classifyDrag(event, kind).state);
     },
     onDragOver(event) {
       if (!dragHasFiles(event)) return;

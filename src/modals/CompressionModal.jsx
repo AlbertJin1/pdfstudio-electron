@@ -5,10 +5,19 @@ import {
 } from 'lucide-react';
 import ActionButton from '../components/common/ActionButton.jsx';
 import Modal from '../components/common/Modal.jsx';
+import Select from '../components/common/Select.jsx';
 import PdfSourcePicker from '../components/common/PdfSourcePicker.jsx';
 import { usePdfPicker } from '../hooks/usePdfPicker.js';
 import { COMPRESSION_PRESETS, analyzePdf, renderPdfPreview } from '../services/pdf/compress.js';
 import { formatBytes } from '../utils/format.js';
+
+const PRESET_OPTIONS = Object.entries(COMPRESSION_PRESETS).map(([key, option]) => ({ value: key, label: option.label }));
+const TARGET_UNIT_OPTIONS = [{ value: 'percent', label: '% of original' }, { value: 'mb', label: 'MB' }];
+const DPI_OPTIONS = [50, 66, 72, 96, 110, 150, 200, 240, 300, 400].map((dpi) => ({ value: dpi, label: `${dpi} DPI`, hint: dpi === 300 ? 'Print quality' : dpi === 150 ? 'Email / sharing' : undefined }));
+const COLOR_MODE_OPTIONS = [
+  { value: 'color', label: 'Keep color' }, { value: 'grayscale', label: 'Convert to grayscale' },
+  { value: 'monochrome', label: 'Black & white', hint: 'Requires raster fallback' },
+];
 
 const emptyPreview = { original: null, compressed: null };
 
@@ -118,6 +127,7 @@ export default function CompressionModal({ setModal, compressPdfFile }) {
     password, resolutionDpi, quality, colorMode, preserveMetadata, includeAnnotations, allowRasterFallback,
     outputPassword: protectOutput ? outputPassword : '',
     hasDigitalSignatures: Boolean(analysis?.hasDigitalSignatures),
+    scanLike: Boolean(analysis && analysis.pageCount && analysis.imagePaintOperations >= analysis.pageCount && analysis.textCharacters < 40 * analysis.pageCount),
     imageObjectCount: analysis?.resources?.available ? analysis.resources.imageObjects : undefined,
     duplicateImageEstimate: analysis?.resources?.available ? analysis.resources.duplicateImageObjects : undefined,
   });
@@ -245,18 +255,14 @@ export default function CompressionModal({ setModal, compressPdfFile }) {
 
       {mode === 'preset' ? <div className="compress-controls">
         <label className="form-label" htmlFor="compress-preset">Compression preset
-          <select id="compress-preset" className="form-input" value={preset} onChange={(event) => { const next = event.target.value; setPreset(next); setQuality(Math.round(COMPRESSION_PRESETS[next].quality * 100)); setResolutionDpi(COMPRESSION_PRESETS[next].dpi); }}>
-            {Object.entries(COMPRESSION_PRESETS).map(([key, option]) => <option key={key} value={key}>{option.label}</option>)}
-          </select>
+          <Select id="compress-preset" className="form-input" value={preset} options={PRESET_OPTIONS} ariaLabel="Compression preset" onChange={(next) => { setPreset(next); setQuality(Math.round(COMPRESSION_PRESETS[next].quality * 100)); setResolutionDpi(COMPRESSION_PRESETS[next].dpi); }} />
         </label>
         <div className="compress-preset-description"><CheckCircle2 size={16}/><span>{presetDetails.description}</span></div>
       </div> : <div className="compress-controls compress-target-controls">
         <label className="form-label" htmlFor="compress-target">Target output size
           <div className="compress-target-row">
             <input id="compress-target" className="form-input" type="number" min={targetUnit === 'percent' ? '1' : '0.1'} max={targetUnit === 'percent' ? '100' : '2048'} step={targetUnit === 'percent' ? '1' : '0.1'} value={targetValue} onChange={(event) => { setTargetValue(event.target.value); setPickError(''); }} />
-            <select className="form-input" value={targetUnit} onChange={(event) => { setTargetUnit(event.target.value); setTargetValue(event.target.value === 'percent' ? '50' : '5'); setPickError(''); }} aria-label="Target size unit">
-              <option value="percent">% of original</option><option value="mb">MB</option>
-            </select>
+            <Select className="form-input" value={targetUnit} options={TARGET_UNIT_OPTIONS} ariaLabel="Target size unit" onChange={(next) => { setTargetUnit(next); setTargetValue(next === 'percent' ? '50' : '5'); setPickError(''); }} />
           </div>
         </label>
         {file && targetBytes && <div className="compress-target-estimate"><Target size={16}/><span>Requested maximum: <strong>{formatBytes(targetBytes)}</strong> from {formatBytes(file.bytes.byteLength)}</span></div>}
@@ -266,18 +272,14 @@ export default function CompressionModal({ setModal, compressPdfFile }) {
       <button type="button" className="compress-advanced-toggle" aria-expanded={showAdvanced} onClick={() => setShowAdvanced((value) => !value)}><Settings2 size={15}/><span>{showAdvanced ? 'Hide' : 'Show'} advanced settings</span><span className="compress-advanced-current">{colorMode === 'color' ? 'Color' : colorMode === 'grayscale' ? 'Grayscale' : 'Black & white'} · {resolutionDpi} DPI</span></button>
       {showAdvanced && <div className="compress-advanced-panel">
         <label className="form-label" htmlFor="compress-dpi">Maximum output resolution <strong>{resolutionDpi} DPI</strong>
-          <select id="compress-dpi" className="form-input" value={resolutionDpi} onChange={(event) => setResolutionDpi(Number(event.target.value))} disabled={mode === 'preset' && preset === 'lossless'}>
-            {[72, 96, 110, 150, 200, 240, 300, 400].map((dpi) => <option key={dpi} value={dpi}>{dpi} DPI{dpi === 300 ? ' · print quality' : dpi === 150 ? ' · email/sharing' : ''}</option>)}
-          </select>
+          <Select id="compress-dpi" className="form-input" value={resolutionDpi} onChange={setResolutionDpi} options={DPI_OPTIONS} ariaLabel="Image resolution" disabled={mode === 'preset' && preset === 'lossless'} />
         </label>
         <label className="form-label" htmlFor="compress-quality">Image quality <strong>{quality}%</strong>
-          <input id="compress-quality" className="compress-quality-range" type="range" min="25" max="95" step="5" value={quality} onChange={(event) => setQuality(Number(event.target.value))} disabled={mode === 'preset' && preset === 'lossless'} />
+          <input id="compress-quality" className="compress-quality-range" type="range" min="15" max="95" step="5" value={quality} onChange={(event) => setQuality(Number(event.target.value))} disabled={mode === 'preset' && preset === 'lossless'} />
           <span className="compress-field-help">Applies to compressed image streams. Vector text and shapes remain resolution independent when smart optimization is used.</span>
         </label>
         <label className="form-label" htmlFor="compress-colormode">Color handling
-          <select id="compress-colormode" className="form-input" value={colorMode} onChange={(event) => setColorMode(event.target.value)} disabled={mode === 'preset' && preset === 'lossless'}>
-            <option value="color">Keep color</option><option value="grayscale">Convert to grayscale</option><option value="monochrome">Black & white (requires raster fallback)</option>
-          </select>
+          <Select id="compress-colormode" className="form-input" value={colorMode} onChange={setColorMode} options={COLOR_MODE_OPTIONS} ariaLabel="Color mode" disabled={mode === 'preset' && preset === 'lossless'} />
         </label>
         <label className="compress-check-row"><input type="checkbox" checked={preserveMetadata} onChange={(event) => setPreserveMetadata(event.target.checked)} disabled={mode === 'preset' && preset === 'lossless'}/><span><strong>Try to preserve document metadata</strong><small>Keep title, author, subject, keywords, and dates where supported by the selected engine.</small></span></label>
         <label className="compress-check-row"><input type="checkbox" checked={includeAnnotations} onChange={(event) => setIncludeAnnotations(event.target.checked)} disabled={mode === 'preset' && preset === 'lossless'}/><span><strong>Include annotations and form appearances in raster fallback</strong><small>The smart object optimizer tries to preserve annotation objects. This setting controls drawing them into the page if you explicitly choose raster fallback.</small></span></label>

@@ -586,3 +586,48 @@
 :root:root .app-shell.theme-dark.high-contrast .setting-switch {
   border-color: #9aa7b8;
 }
+
+/* ===== v7 fixes: fullscreen button + glitch-free reorder ===== */
+/* .page-thumb-zone is pointer-events:none so drags start on the card; the button must opt back in. */
+:root:root .app-shell .page-thumb-zone .page-thumb-fullscreen { pointer-events: auto; touch-action: manipulation; }
+
+/* Dragged tile stays in the grid as a hollow slot: the layout never reflows mid-drag. */
+:root:root .app-shell .page-card.page-dragging {
+  position: relative !important; width: auto !important; height: auto !important; min-width: 0 !important;
+  padding: 8px 8px 0 !important; margin: 0 !important; overflow: visible !important;
+  opacity: 1 !important; pointer-events: none !important; scale: 1 !important;
+  border: 2px dashed #9a89f2 !important; background: rgb(124 104 237 / .06) !important; box-shadow: none !important;
+}
+:root:root .app-shell .page-card.page-dragging > * { opacity: .18; filter: grayscale(1); }
+:root:root .app-shell.theme-dark .page-card.page-dragging { border-color: #8e88e7 !important; background: rgb(142 136 231 / .08) !important; }
+
+/* Neighbours no longer slide sideways (that shift moved cards under the cursor and caused flicker). */
+:root:root .app-shell .page-card.drop-before,
+:root:root .app-shell .page-card.drop-after { translate: none !important; }
+:root:root .app-shell .page-card.drop-before::before,
+:root:root .app-shell .page-card.drop-after::after,
+:root:root .app-shell .page-card.drop-edge-left::before,
+:root:root .app-shell .page-card.drop-edge-right::after { animation: none; transition: none; }
+:root:root .app-shell .page-grid.is-reordering .page-card { transition: none !important; }
+:root:root .app-shell .page-card.drop-edge-left,
+:root:root .app-shell .page-card.drop-edge-right { border-color: #7762ed; }
+
+.page-drop-label {
+  position: absolute; z-index: 6; left: 50%; top: 42%; transform: translate(-50%, -50%);
+  padding: 6px 12px; border-radius: 999px; background: #6c5ce7; color: #fff;
+  font-size: 11px; font-weight: 750; letter-spacing: .02em; white-space: nowrap;
+  box-shadow: 0 6px 16px rgb(91 72 190 / .35); pointer-events: none;
+}
+:root:root .app-shell .page-card.page-dragging > .page-drop-label { opacity: 1; filter: none; }
+:root:root .app-shell.theme-dark .page-drop-label { background: #8a7bf2; }
+
+/* ===== Viewer: always centred (margin:auto centres when smaller than the stage and still scrolls from the
+   start when larger, unlike flex centring which clips the left/top), middle-mouse pan cursor ===== */
+:root:root .app-shell .page-preview-canvas-stage,
+:root:root .app-shell .page-preview-canvas-stage.is-zoomed { display: flex; align-items: flex-start; justify-content: flex-start; }
+:root:root .app-shell .page-preview-modal .preview-stage,
+:root:root .app-shell .page-preview-canvas-stage.is-zoomed .preview-stage { margin: auto; width: max-content; min-width: 0; align-items: center; justify-content: center; }
+:root:root .app-shell .page-preview-canvas-stage.is-zoomed { cursor: grab; }
+:root:root .app-shell .page-preview-canvas-stage.is-panning,
+:root:root .app-shell .page-preview-canvas-stage.is-panning * { cursor: grabbing !important; user-select: none; }
+:root:root .app-shell .page-preview-canvas-stage { overscroll-behavior: contain; }

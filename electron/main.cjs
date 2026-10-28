@@ -10,6 +10,7 @@ const { isPdfStudioMonitorApiUrl, monitorApiUrlCandidates } = require('./service
 const accessPolicy = require('./services/access-policy.cjs');
 const reviewQueuePolicy = require('./review-queue-policy.cjs');
 const ocrService = require('./ocr-service.cjs');
+const imageTextExtractor = require('./services/image-text-extractor.cjs');
 const ghostscriptCompression = require('./services/ghostscript-compression.cjs');
 const portableUpdateEngine = require('./services/portable-update-engine.cjs');
 
@@ -2355,10 +2356,13 @@ handle('files:open', async (event, options) => {
   // accept: 'images' (Images to PDF) | 'pdf' (PDF tools) | anything else = every supported type.
   const accept = pdfOnly ? 'pdf-single' : (options && options.accept) || 'all';
   const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff'];
+  // Format converter: everything it can decode (HEIC/AVIF/SVG/ICO are not offered to the PDF tools).
+  const CONVERT_EXTS = [...IMAGE_EXTS, 'heic', 'heif', 'hif', 'avif', 'jfif', 'svg', 'ico'];
   const dialogSpec = {
     'pdf-single': { title: 'Select a PDF file', multi: false, filters: [{ name: 'PDF documents', extensions: ['pdf'] }] },
     pdf: { title: 'Select PDF files', multi: true, filters: [{ name: 'PDF documents', extensions: ['pdf'] }] },
     images: { title: 'Select images to convert to PDF', multi: true, filters: [{ name: 'Images', extensions: IMAGE_EXTS }] },
+    convert: { title: 'Select images to convert', multi: true, filters: [{ name: 'Images', extensions: CONVERT_EXTS }] },
     all: { title: 'Add documents to PDF Studio', multi: true, filters: [{ name: 'Supported documents', extensions: ['pdf', ...IMAGE_EXTS] }] },
   }[accept] || null;
   const spec = dialogSpec || { title: 'Add documents to PDF Studio', multi: true, filters: [{ name: 'Supported documents', extensions: ['pdf', ...IMAGE_EXTS] }] };
@@ -2372,11 +2376,13 @@ handle('files:open', async (event, options) => {
   for (const filePath of picked.filePaths) {
     const ext = path.extname(filePath).toLowerCase();
     // Dialog filters are not a security boundary: reject unsupported files here as well.
-    if (ext !== '.pdf' && !IMAGE_EXTS.includes(ext.slice(1))) continue;
+    if (ext !== '.pdf' && !(accept === 'convert' ? CONVERT_EXTS : IMAGE_EXTS).includes(ext.slice(1))) continue;
+    if (accept === 'convert' && ext === '.pdf') continue;
     const raw = await fs.readFile(filePath);
     const mimeByExt = {
       '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
       '.webp': 'image/webp', '.bmp': 'image/bmp', '.gif': 'image/gif', '.tif': 'image/tiff', '.tiff': 'image/tiff',
+      '.heic': 'image/heic', '.heif': 'image/heif', '.hif': 'image/heif', '.avif': 'image/avif', '.jfif': 'image/jpeg', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
     };
     output.push({ name: path.basename(filePath), path: filePath, mime: mimeByExt[ext], kind: ext === '.pdf' ? 'pdf' : 'image', bytes: new Uint8Array(raw) });
   }
@@ -2476,18 +2482,47 @@ handle('pdf:lock', async (_event, payload) => {
   return new Uint8Array(protectedPdf);
 });
 
+const ocrContext = () => ({ resourcesPath: process.resourcesPath, projectRoot: app.getAppPath(), userDataPath: app.getPath('userData') });
+
+// PDF-to-Word OCR: prefer a native Tesseract install, otherwise use the built-in offline engine.
 handle('pdf:ocr-image', async (_event, payload) => {
   assertAccessAllowed();
   if (!payload || typeof payload !== 'object' || !payload.image) throw new TypeError('No image was supplied for OCR.');
   const image = toSafeBuffer(payload.image);
   if (image.length > 25 * 1024 * 1024) throw new RangeError('The rendered page is too large for OCR.');
-  return ocrService.recognizeImage(image, {
+  const native = await ocrService.recognizeImage(image, {
     language: String(payload.language || 'eng'),
     resourcesPath: process.resourcesPath,
     projectRoot: app.getAppPath(),
     timeoutMs: payload.timeoutMs,
   });
+  if (native.available) return native;
+  try {
+    const builtIn = await imageTextExtractor.recognizeImage(image, { language: String(payload.language || 'eng'), psm: 'block', timeoutMs: payload.timeoutMs, ...ocrContext() });
+    return builtIn.available ? builtIn : native;
+  } catch { return native; }
 });
+
+// Image-to-text tool.
+handle('ocr:languages', async () => {
+  assertAccessAllowed();
+  return imageTextExtractor.listLanguages(ocrContext());
+});
+
+handle('ocr:image-text', async (_event, payload) => {
+  assertAccessAllowed();
+  if (!payload || typeof payload !== 'object' || !payload.image) throw new TypeError('No image was supplied for text extraction.');
+  const image = toSafeBuffer(payload.image);
+  if (image.length > 25 * 1024 * 1024) throw new RangeError('The image is too large for text extraction (25 MB maximum).');
+  return imageTextExtractor.recognizeImage(image, {
+    language: String(payload.language || 'eng'),
+    psm: String(payload.psm || 'auto'),
+    timeoutMs: payload.timeoutMs,
+    ...ocrContext(),
+  });
+});
+
+app.on('will-quit', () => { imageTextExtractor.shutdown().catch(() => {}); });
 
 handle('files:save-finalized-pdf', async (event, payload) => {
   assertAccessAllowed();
@@ -2541,6 +2576,61 @@ handle('files:save-batch', async (event, files) => {
   }
   await shell.openPath(folder).catch((error) => console.warn('[PDF Studio] Could not open the export folder:', error?.message || error));
   return { canceled: false, count, folder };
+});
+
+
+// ── Multi-file exports (PDF → images, Split PDF): create a new sub-folder inside the chosen folder, then stream files into it one at a time ──
+const folderExportSessions = new Map(); // token -> { folder, used:Set, written:number }
+handle('files:choose-folder', async (event, options) => {
+  assertAccessAllowed();
+  const defaultPath = typeof options?.defaultPath === 'string' && path.isAbsolute(options.defaultPath) ? options.defaultPath : undefined;
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender) || mainWindow, {
+    title: 'Choose where to save the images', defaultPath, buttonLabel: 'Select folder', properties: ['openDirectory', 'createDirectory'],
+  });
+  if (result.canceled || !result.filePaths[0]) return { canceled: true };
+  return { canceled: false, folder: result.filePaths[0] };
+});
+handle('exports:begin', async (_event, payload) => {
+  assertAccessAllowed();
+  const parent = String(payload?.parent || '');
+  if (!parent || !path.isAbsolute(parent)) throw new Error('Choose a folder to save the images in.');
+  const stat = await fs.stat(parent).catch(() => null);
+  if (!stat?.isDirectory()) throw new Error('The selected folder no longer exists. Choose another folder.');
+  const stem = (safeName(payload?.folderName, 'images').replace(/[. ]+$/, '') || 'images').slice(0, 120);
+  // Never write into or over an existing folder: "name-images", then "name-images (2)", …
+  let folder = '';
+  for (let attempt = 1; attempt <= 500 && !folder; attempt += 1) {
+    const candidate = path.join(parent, attempt === 1 ? stem : `${stem} (${attempt})`);
+    try { await fs.mkdir(candidate); folder = candidate; }
+    catch (error) { if (error?.code !== 'EEXIST') throw new Error(`Could not create the export folder: ${error?.message || error}`); }
+  }
+  if (!folder) throw new Error('Could not find an unused folder name. Choose another location.');
+  const token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  folderExportSessions.set(token, { folder, used: new Set(), written: 0 });
+  return { token, folder };
+});
+handle('exports:write', async (_event, payload) => {
+  assertAccessAllowed();
+  const session = folderExportSessions.get(String(payload?.token || ''));
+  if (!session) throw new Error('This export is no longer active.');
+  const name = safeName(payload?.name, `image-${session.written + 1}.png`);
+  const ext = path.extname(name); const stem = path.basename(name, ext);
+  let candidate = name; let n = 2;
+  while (session.used.has(candidate.toLowerCase())) candidate = `${stem} (${n++})${ext}`;
+  session.used.add(candidate.toLowerCase());
+  await fs.writeFile(path.join(session.folder, candidate), toSafeBuffer(payload.data));
+  session.written += 1;
+  return session.written;
+});
+handle('exports:finish', async (_event, payload) => {
+  assertAccessAllowed();
+  const token = String(payload?.token || '');
+  const session = folderExportSessions.get(token);
+  if (!session) return { count: 0 };
+  folderExportSessions.delete(token);
+  if (session.written === 0) { await fs.rmdir(session.folder).catch(() => {}); return { count: 0 }; }
+  if (payload?.open) await shell.openPath(session.folder).catch((error) => console.warn('[PDF Studio] Could not open the export folder:', error?.message || error));
+  return { count: session.written, folder: session.folder };
 });
 
 

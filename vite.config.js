@@ -14,7 +14,7 @@ export default defineConfig({
     cssMinify: true,
     reportCompressedSize: false,
     // fontkit and the PDF engines are lazy chunks that load on demand, so their size is not a startup cost.
-    chunkSizeWarningLimit: 800,
+    chunkSizeWarningLimit: 2100, // the HEIC decoder (libheif, 2 MB) is a lazy chunk loaded only when a HEIC file is converted
     // Keep the default 500 kB warning meaningful: heavyweight document operations are
     // lazy-loaded, while UI libraries are split into stable cacheable vendor chunks.
     rolldownOptions: {

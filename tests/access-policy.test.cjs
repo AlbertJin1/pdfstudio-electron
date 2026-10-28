@@ -104,7 +104,7 @@ assert.ok(blankReason.reason.length > 0, 'a lock always has an explanation');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'App.jsx'), 'utf8');
   const hooksDir = path.join(__dirname, '..', 'src', 'hooks');
   const hooks = fs.readdirSync(hooksDir).map((file) => fs.readFileSync(path.join(hooksDir, file), 'utf8')).join('\n');
-  for (const channel of ['files:open', 'files:save', 'files:save-batch']) {
+  for (const channel of ['files:open', 'files:save', 'files:save-batch', 'files:choose-folder', 'exports:begin', 'exports:write', 'exports:finish']) {
     assert.match(main, new RegExp(`handle\\('${channel}'[^\\n]*\\n\\s*assertAccessAllowed\\(\\);`), `${channel} is refused by the main process while locked`);
   }
   assert.match(main, /loadAccessCacheSync\(\);\s*createWindow\(\);\s*startAccessControl\(\);/, 'cached lock is in force before the first window exists');

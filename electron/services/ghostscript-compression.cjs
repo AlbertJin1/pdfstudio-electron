@@ -162,25 +162,28 @@ function safeNumber(value, fallback, min, max, round = false) {
 
 function resolveImageFilterMode({ imageFilterMode, preset, quality } = {}) {
   if (imageFilterMode === 'auto' || imageFilterMode === 'jpeg') return imageFilterMode;
-  const presetQuality = ({ high: 90, balanced: 76, small: 62, smallest: 48, target: 76 })[preset] || 76;
-  const qualityPercent = safeNumber(quality, presetQuality, 25, 95, true);
-  return ['small', 'smallest'].includes(preset) || qualityPercent < 65 ? 'jpeg' : 'auto';
+  const presetQuality = ({ high: 85, balanced: 70, small: 55, smallest: 42, ultra: 32, target: 70 })[preset] || 70;
+  const qualityPercent = safeNumber(quality, presetQuality, 15, 95, true);
+  // 'auto' lets Ghostscript pass existing JPEGs through untouched, which is why already-compressed images never shrank.
+  // Only the highest-quality preset may keep that behaviour; everything else re-encodes every image.
+  return preset === 'high' && qualityPercent >= 85 ? 'auto' : 'jpeg';
 }
 
 function buildArgs({ inputPath, outputPath, preset, resolutionDpi, quality, colorMode, preserveMetadata, includeAnnotations, password, imageObjectCount, duplicateImageEstimate, detectDuplicateImages = true, metadataCleanupPath, imageFilterMode }) {
   const presets = {
-    high: { dpi: 300, quality: 90 },
-    balanced: { dpi: 200, quality: 76 },
-    small: { dpi: 150, quality: 62 },
-    smallest: { dpi: 110, quality: 48 },
-    target: { dpi: 200, quality: 76 },
+    high: { dpi: 250, quality: 85 },
+    balanced: { dpi: 150, quality: 70 },
+    small: { dpi: 110, quality: 55 },
+    smallest: { dpi: 85, quality: 42 },
+    ultra: { dpi: 66, quality: 32 },
+    target: { dpi: 150, quality: 70 },
   };
   const defaults = presets[preset] || presets.balanced;
-  const dpi = safeNumber(resolutionDpi, defaults.dpi, 72, 600, true);
-  const qualityPercent = safeNumber(quality, defaults.quality, 25, 95, true);
+  const dpi = safeNumber(resolutionDpi, defaults.dpi, 40, 600, true);
+  const qualityPercent = safeNumber(quality, defaults.quality, 15, 95, true);
   // Ghostscript's Distiller /QFactor convention is inverse to an ordinary quality slider:
   // values nearer 0 retain more JPEG detail; values nearer 1 compress more aggressively.
-  const qFactor = Number((1.02 - (qualityPercent / 100) * 0.86).toFixed(3));
+  const qFactor = Number(Math.min(2.4, qualityPercent >= 50 ? 1.02 - (qualityPercent / 100) * 0.86 : 0.59 + (50 - qualityPercent) * 0.045).toFixed(3));
   const sampling = qualityPercent >= 85 ? '[1 1 1 1]' : '[2 1 1 2]';
   const knownImageCount = Number.isFinite(Number(imageObjectCount)) && imageObjectCount !== null && imageObjectCount !== undefined;
   const imageCount = knownImageCount ? safeNumber(imageObjectCount, 0, 0, 10000000, true) : null;
@@ -202,14 +205,22 @@ function buildArgs({ inputPath, outputPath, preset, resolutionDpi, quality, colo
     '-dPreserveAnnots=true', '-dEmbedAllFonts=true', '-dDownsampleColorImages=true', '-dDownsampleGrayImages=true',
     '-dDownsampleMonoImages=true', '-dColorImageDownsampleType=/Bicubic',
     '-dGrayImageDownsampleType=/Bicubic', '-dMonoImageDownsampleType=/Bicubic',
-    `-dColorImageResolution=${dpi}`, `-dGrayImageResolution=${dpi}`, `-dMonoImageResolution=${Math.min(600, Math.max(dpi, 300))}`,
-    '-dColorImageDownsampleThreshold=1.1', '-dGrayImageDownsampleThreshold=1.1', '-dMonoImageDownsampleThreshold=1.1',
+    `-dColorImageResolution=${dpi}`, `-dGrayImageResolution=${dpi}`, `-dMonoImageResolution=${Math.min(300, Math.max(dpi * 2, 200))}`,
+    '-dColorImageDownsampleThreshold=1.0', '-dGrayImageDownsampleThreshold=1.0', '-dMonoImageDownsampleThreshold=1.0',
     // Choose per content at high/recommended settings. More aggressive profiles force JPEG so
     // target-size mode can make further progress when the adaptive filter remains lossless/large.
-    '-dEncodeColorImages=true', '-dEncodeGrayImages=true',
+    '-dEncodeColorImages=true', '-dEncodeGrayImages=true', '-dEncodeMonoImages=true', '-dMonoImageFilter=/CCITTFaxEncode',
     '-dColorImageFilter=/DCTEncode', '-dGrayImageFilter=/DCTEncode',
   ];
   args.push(...adaptiveFilterArgs);
+  // Strong tiers: smoother downsampling, RGB conversion (drops big ICC/CMYK data) and removal of print-only baggage.
+  const strong = dpi <= 110 || qualityPercent <= 55;
+  if (strong) {
+    args.push('-dColorImageDownsampleType=/Average', '-dGrayImageDownsampleType=/Average',
+      '-dPreserveOverprintSettings=false', '-dPreserveHalftoneInfo=false', '-dTransferFunctionInfo=/Remove',
+      '-dUCRandBGInfo=/Remove', '-dPreserveOPIComments=false', '-dPreserveEPSInfo=false', '-dOmitXMP=true', '-dMaxSubsetPct=100');
+    if (colorMode !== 'grayscale') args.push('-sColorConversionStrategy=sRGB');
+  }
   if (!preserveMetadata) args.push('-dOmitXMP=true', '-dOmitInfoDate=true');
   args.push(`-sOutputFile=${outputPath}`);
   if (colorMode === 'grayscale') args.push('-sColorConversionStrategy=Gray');
@@ -219,7 +230,8 @@ function buildArgs({ inputPath, outputPath, preset, resolutionDpi, quality, colo
   // annotations where supported; post-compression validation rejects lost links/fields.
   void includeAnnotations;
   if (password) args.push(`-sPDFPassword=${String(password)}`);
-  const imageParams = `<< /ColorImageDict << /QFactor ${qFactor} /Blend 1 /ColorTransform 1 /HSamples ${sampling} /VSamples ${sampling} >> /GrayImageDict << /QFactor ${qFactor} /Blend 1 /HSamples ${sampling} /VSamples ${sampling} >> >> setdistillerparams`;
+  const jpegDict = (extra = '') => `<< /QFactor ${qFactor} /Blend 1 ${extra}/HSamples ${sampling} /VSamples ${sampling} >>`;
+  const imageParams = `<< /ColorImageDict ${jpegDict('/ColorTransform 1 ')} /ColorACSImageDict ${jpegDict('/ColorTransform 1 ')} /GrayImageDict ${jpegDict()} /GrayACSImageDict ${jpegDict()} >> setdistillerparams`;
   args.push('-c', imageParams, '-f', inputPath);
   if (!preserveMetadata && metadataCleanupPath) args.push(metadataCleanupPath);
   return args;

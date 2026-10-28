@@ -1,23 +1,11 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { AnimatePresence } from 'motion/react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import { GripVertical, ListFilter, Search, X } from 'lucide-react';
 import ActionButton from '../common/ActionButton.jsx';
 import IconButton from '../common/IconButton.jsx';
 import AddPagesCard from './AddPagesCard.jsx';
 import PageCard from './PageCard.jsx';
 import PageContextMenu from './PageContextMenu.jsx';
-
-function DropPagePlaceholder({ page, position }) {
-  // Keep the placeholder intentionally static during a drag; spring/layout animations
-  // here force expensive grid measurements for every insertion change.
-  return (
-    <div className="page-drop-placeholder" aria-label={`Drop dragged page at position ${position}`}>
-      <div className="page-drop-placeholder-top"><span>MOVE HERE</span><strong>{String(position).padStart(2, '0')}</strong></div>
-      <div className="page-drop-placeholder-thumb">{page?.thumbnail ? <img src={page.thumbnail} alt="Dragged page preview" draggable="false" /> : <span>PDF</span>}</div>
-      <div className="page-drop-placeholder-footer"><strong>Release to place</strong><small>Page position {position}</small></div>
-    </div>
-  );
-}
 
 export default function PageGridPanel({ landedId, duplicateSelected, requestDeleteSelected, pages, pagesRef, selectedIds, activeId, search, draggingPageId, dropCue, suppressPageClickUntil, filteredPages, setSelectedIds, setActiveId, setSearch, setModal, setDraggingPageId, setDropCue, commitPages, chooseFiles, handleBrowserFiles, selectPage, rotateSelected, movePage }) {
   const [menu, setMenu] = useState(null);
@@ -36,127 +24,167 @@ export default function PageGridPanel({ landedId, duplicateSelected, requestDele
     dragSessionRef.current = null;
   }, []);
 
-  // Pointer-driven reorder avoids the browser's throttled HTML5 dragover loop. The
-  // cursor-following page is moved on requestAnimationFrame, while React only updates
-  // when the insertion target actually changes.
+  // Pointer-driven reorder with a LIVE placeholder.
+  //  - The dragged tile stays in the grid as a hollow slot and moves to the slot under the cursor;
+  //    the tiles in between glide one slot over (motion layout animation) so the placeholder always
+  //    shows exactly where the page will land.
+  //  - Hit-testing uses the SLOT rectangles measured once at drag start. The number of grid items never
+  //    changes during a drag, so slot positions are stable even while tiles are animating, which means
+  //    the cursor target can never feed back on itself (no flicker).
+  //  - On release the floating page flies into the placeholder before the move is committed.
   const startPageDrag = useCallback((event, page) => {
     if (search.trim() || event.button !== 0 || dragSessionRef.current) return;
     const startedOnGrip = event.target?.closest?.('.page-drag-grip');
     if (!startedOnGrip && event.target?.closest?.('button, a, input, textarea, select, .page-card-hover-actions')) return;
     const source = event.currentTarget.closest('.page-card');
-    if (!source) return;
+    const scroller = source?.closest('.page-grid-scroll');
+    if (!source || !scroller) return;
 
     const session = {
-      pointerId: event.pointerId,
-      pageId: page.id,
-      source,
-      startX: event.clientX,
-      startY: event.clientY,
-      x: event.clientX,
-      y: event.clientY,
-      lastX: event.clientX,
-      lastY: event.clientY,
-      offsetX: event.clientX - source.getBoundingClientRect().left,
-      offsetY: event.clientY - source.getBoundingClientRect().top,
-      dragging: false,
-      ghost: null,
-      raf: 0,
-      cue: null,
-      onMove: null,
-      onUp: null,
-      onCancel: null,
-      onKeyDown: null,
+      pointerId: event.pointerId, pageId: page.id, source, scroller,
+      startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY,
+      offsetX: event.clientX - source.getBoundingClientRect().left, offsetY: event.clientY - source.getBoundingClientRect().top,
+      dragging: false, finishing: false, ghost: null, raf: 0, cue: null,
+      slots: [], addRect: null, sourceIndex: -1, base: { left: 0, top: 0 },
+      onMove: null, onUp: null, onCancel: null, onKeyDown: null,
     };
 
-    const sameCue = (a, b) => a?.id === b?.id && a?.position === b?.position && a?.edge === b?.edge;
+    const sameCue = (a, b) => a?.id === b?.id && a?.position === b?.position && a?.index === b?.index;
     const updateCue = (next) => {
       if (sameCue(session.cue, next)) return;
       session.cue = next;
       setDropCue(next);
+    };
+    const toContent = (r, base) => ({ left: r.left - base.left + scroller.scrollLeft, right: r.right - base.left + scroller.scrollLeft, top: r.top - base.top + scroller.scrollTop, bottom: r.bottom - base.top + scroller.scrollTop });
+    const measure = () => {
+      const base = scroller.getBoundingClientRect();
+      session.base = { left: base.left, top: base.top };
+      session.slots = [...scroller.querySelectorAll('.page-card[data-page-id]')].map((node) => ({ id: node.dataset.pageId, ...toContent(node.getBoundingClientRect(), base) }));
+      session.sourceIndex = session.slots.findIndex((slot) => slot.id === session.pageId);
+      const add = scroller.querySelector('.page-add-card');
+      session.addRect = add ? toContent(add.getBoundingClientRect(), base) : null;
+    };
+    // Viewport-space rectangle of a slot right now (accounts for any scrolling since measure()).
+    const slotViewportRect = (index) => {
+      const slot = session.slots[index];
+      if (!slot) return null;
+      return { left: slot.left + session.base.left - scroller.scrollLeft, top: slot.top + session.base.top - scroller.scrollTop };
     };
     const createGhost = () => {
       if (session.ghost) return;
       const rect = source.getBoundingClientRect();
       const ghost = source.cloneNode(true);
       ghost.classList.add('page-drag-ghost', 'page-drag-ghost-live');
-      ghost.classList.remove('page-dragging', 'page-selected', 'page-active', 'drop-before', 'drop-after', 'drop-edge-left', 'drop-edge-right', 'drop-edge-top', 'drop-edge-bottom', 'page-landed');
+      ghost.classList.remove('page-dragging', 'page-selected', 'page-active', 'page-landed');
       ghost.removeAttribute('draggable');
       ghost.setAttribute('aria-hidden', 'true');
+      ghost.querySelector('.page-drop-label')?.remove();
       Object.assign(ghost.style, {
         width: `${rect.width}px`, height: `${rect.height}px`, left: '0px', top: '0px',
         position: 'fixed', margin: '0', pointerEvents: 'none', zIndex: '2147483000',
-        transformOrigin: '50% 12%', transition: 'none', animation: 'none',
+        transformOrigin: '50% 12%', transition: 'none', animation: 'none', opacity: '1', translate: 'none', scale: 'none', rotate: 'none',
         willChange: 'transform', contain: 'paint', backfaceVisibility: 'hidden',
       });
       ghost.style.transform = `translate3d(${session.x - session.offsetX}px, ${session.y - session.offsetY}px, 0) rotate(-1deg) scale(1.015)`;
       document.body.appendChild(ghost);
       session.ghost = ghost;
     };
+    const resolveCue = (x, y) => {
+      const bounds = scroller.getBoundingClientRect();
+      if (x < bounds.left - 24 || x > bounds.right + 24 || y < bounds.top - 24 || y > bounds.bottom + 24) return null;
+      const cx = x - session.base.left + scroller.scrollLeft;
+      const cy = y - session.base.top + scroller.scrollTop;
+      const count = session.slots.length;
+      const add = session.addRect;
+      if (add && cx >= add.left && cx <= add.right && cy >= add.top && cy <= add.bottom) return { id: '__end__', index: count - 1 };
+      let best = -1;
+      let bestDistance = Infinity;
+      session.slots.forEach((slot, index) => {
+        const dx = Math.max(slot.left - cx, 0, cx - slot.right);
+        const dy = Math.max(slot.top - cy, 0, cy - slot.bottom);
+        const distance = dx * dx + dy * dy * 4;
+        if (distance < bestDistance) { bestDistance = distance; best = index; }
+      });
+      return best < 0 ? null : { id: null, index: best };
+    };
+    const toCue = (hit) => {
+      if (!hit || hit.index === session.sourceIndex) return null; // dropping on its own slot changes nothing
+      const rest = pagesRef.current.filter((item) => item.id !== session.pageId);
+      if (!rest.length) return null;
+      const at = Math.max(0, Math.min(hit.index, rest.length));
+      const target = at < rest.length ? rest[at] : rest[rest.length - 1];
+      return { id: hit.id === '__end__' ? '__end__' : target.id, position: at < rest.length ? 'before' : 'after', index: at, targetId: target.id };
+    };
     const renderFrame = () => {
       session.raf = 0;
-      if (!session.dragging) return;
-      const { x, y, lastX, lastY, ghost } = session;
+      if (!session.dragging || session.finishing) return;
+      const { x, y, lastX, ghost } = session;
       const dx = x - lastX;
-      const dy = y - lastY;
-      // A restrained tilt keeps the entire page readable while the compositor handles motion.
-      const angle = Math.max(-4, Math.min(4, dx * 0.075 - dy * 0.025));
+      const angle = Math.max(-4, Math.min(4, dx * 0.075));
       if (ghost) ghost.style.transform = `translate3d(${x - session.offsetX}px, ${y - session.offsetY}px, 0) rotate(${angle}deg) scale(1.02)`;
       session.lastX = x;
       session.lastY = y;
-
-      const hit = document.elementFromPoint(x, y);
-      const target = hit?.closest?.('.page-card[data-page-id]');
-      if (target && target.dataset.pageId !== session.pageId) {
-        const rect = target.getBoundingClientRect();
-        // Compare normalized distances: document cards are tall, so raw pixels made
-        // vertical edges win too often and caused surprising insert positions.
-        const normalizedX = (x - (rect.left + rect.width / 2)) / Math.max(1, rect.width);
-        const normalizedY = (y - (rect.top + rect.height / 2)) / Math.max(1, rect.height);
-        const horizontal = Math.abs(normalizedX) >= Math.abs(normalizedY);
-        const position = horizontal ? (normalizedX < 0 ? 'before' : 'after') : (normalizedY < 0 ? 'before' : 'after');
-        const edge = horizontal ? (normalizedX < 0 ? 'left' : 'right') : (normalizedY < 0 ? 'top' : 'bottom');
-        updateCue({ id: target.dataset.pageId, position, edge });
-      } else if (target && target.dataset.pageId === session.pageId) {
-        updateCue(null);
-      } else if (hit?.closest?.('.page-add-card')) {
-        updateCue({ id: '__end__', position: 'after' });
-      } else if (hit?.closest?.('.page-drop-placeholder')) {
-        // The insertion placeholder is visual only; retain the current destination.
-      } else {
-        // Clear stale targets so releasing over blank space never moves a page unexpectedly.
-        updateCue(null);
-      }
+      const bounds = scroller.getBoundingClientRect();
+      const edge = 56;
+      let step = 0;
+      if (y < bounds.top + edge) step = -Math.ceil((bounds.top + edge - y) / 4);
+      else if (y > bounds.bottom - edge) step = Math.ceil((y - (bounds.bottom - edge)) / 4);
+      if (step) scroller.scrollTop += Math.max(-24, Math.min(24, step));
+      updateCue(toCue(resolveCue(x, y)));
+      if (step) session.raf = requestAnimationFrame(renderFrame);
     };
-    const cleanup = (commit, cancelled = false) => {
-      if (session.raf) cancelAnimationFrame(session.raf);
-      session.ghost?.remove();
+    const detach = () => {
       window.removeEventListener('pointermove', session.onMove);
       window.removeEventListener('pointerup', session.onUp);
       window.removeEventListener('pointercancel', session.onCancel);
       window.removeEventListener('keydown', session.onKeyDown);
-      if (session.dragging && commit && !cancelled) {
-        const cue = session.cue;
-        if (cue?.id === '__end__') {
+    };
+    const settle = (commitCue) => {
+      if (commitCue) {
+        if (commitCue.id === '__end__') {
           const lastPage = [...pagesRef.current].reverse().find((item) => item.id !== session.pageId);
           if (lastPage) movePage(session.pageId, lastPage.id, 'after');
-        } else if (cue?.id && cue.id !== session.pageId) {
-          movePage(session.pageId, cue.id, cue.position || 'before');
+        } else if (commitCue.targetId) {
+          movePage(session.pageId, commitCue.targetId, commitCue.position || 'before');
         }
       }
-      if (session.dragging) {
-        suppressPageClickUntil.current = Date.now() + 350;
-        setDraggingPageId(null);
-        setDropCue(null);
-      }
+      session.ghost?.remove();
+      suppressPageClickUntil.current = Date.now() + 350;
+      setDraggingPageId(null);
+      setDropCue(null);
       if (dragSessionRef.current === session) dragSessionRef.current = null;
     };
+    // End of drag: the floating page glides into the placeholder (or back home on cancel) and only
+    // then is the move committed, so the tile never appears twice.
+    const finish = (commit) => {
+      if (session.finishing) return;
+      session.finishing = true;
+      if (session.raf) cancelAnimationFrame(session.raf);
+      session.raf = 0;
+      detach();
+      if (!session.dragging) { if (dragSessionRef.current === session) dragSessionRef.current = null; return; }
+      const cue = commit ? session.cue : null;
+      const destIndex = cue ? cue.index : session.sourceIndex;
+      const dest = slotViewportRect(Math.max(0, Math.min(destIndex, session.slots.length - 1)));
+      const ghost = session.ghost;
+      const reduce = document.querySelector('.reduce-motion') || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      if (!ghost || !dest || reduce || !ghost.animate) { settle(cue); return; }
+      const from = ghost.style.transform;
+      const animation = ghost.animate([
+        { transform: from, boxShadow: '0 16px 38px rgb(29 24 70 / .22)' },
+        { transform: `translate3d(${dest.left}px, ${dest.top}px, 0) rotate(0deg) scale(1)`, boxShadow: '0 2px 6px rgb(29 24 70 / .08)' },
+      ], { duration: 170, easing: 'cubic-bezier(.22,1,.36,1)', fill: 'forwards' });
+      animation.onfinish = () => settle(cue);
+      animation.oncancel = () => settle(cue);
+    };
     session.onMove = (moveEvent) => {
-      if (moveEvent.pointerId !== session.pointerId) return;
+      if (moveEvent.pointerId !== session.pointerId || session.finishing) return;
       session.x = moveEvent.clientX;
       session.y = moveEvent.clientY;
       if (!session.dragging) {
         if (Math.hypot(session.x - session.startX, session.y - session.startY) < 5) return;
         session.dragging = true;
+        measure();
         createGhost();
         suppressPageClickUntil.current = Date.now() + 1000;
         updateCue(null);
@@ -167,22 +195,20 @@ export default function PageGridPanel({ landedId, duplicateSelected, requestDele
     };
     session.onUp = (upEvent) => {
       if (upEvent.pointerId !== session.pointerId) return;
-      // Flush the last pointer location before committing, rather than dropping one
-      // frame behind when pointerup arrives just before the scheduled animation frame.
       session.x = upEvent.clientX;
       session.y = upEvent.clientY;
-      if (session.dragging) {
-        if (session.raf) cancelAnimationFrame(session.raf);
-        session.raf = 0;
-        renderFrame();
+      if (session.dragging && !session.finishing) {
+        // Resolve the final pointer position synchronously so the drop matches where it was released.
+        session.cue = toCue(resolveCue(session.x, session.y));
+        if (session.ghost) session.ghost.style.transform = `translate3d(${session.x - session.offsetX}px, ${session.y - session.offsetY}px, 0) rotate(0deg) scale(1.02)`;
       }
-      cleanup(true);
+      finish(true);
     };
     session.onCancel = (cancelEvent) => {
       if (cancelEvent.pointerId !== session.pointerId) return;
-      cleanup(false, true);
+      finish(false);
     };
-    session.onKeyDown = (keyEvent) => { if (keyEvent.key === 'Escape') cleanup(false, true); };
+    session.onKeyDown = (keyEvent) => { if (keyEvent.key === 'Escape') finish(false); };
     dragSessionRef.current = session;
     window.addEventListener('pointermove', session.onMove, { passive: false });
     window.addEventListener('pointerup', session.onUp);
@@ -198,7 +224,17 @@ export default function PageGridPanel({ landedId, duplicateSelected, requestDele
     setMenu({ x: event.clientX, y: event.clientY, pageId: page.id, ids });
   }, [selectedIds, setActiveId, setSelectedIds]);
   const pageIndexById = new Map(pages.map((item, index) => [item.id, index]));
-  const pageById = new Map(pages.map((item) => [item.id, item]));
+  // While dragging, preview the result: the dragged page sits at its prospective slot and the
+  // pages in between shift over by one, so the hollow tile IS the landing placeholder.
+  let displayPages = filteredPages;
+  if (draggingPageId && dropCue && !search.trim()) {
+    const dragged = pages.find((item) => item.id === draggingPageId);
+    if (dragged) {
+      const rest = pages.filter((item) => item.id !== draggingPageId);
+      rest.splice(Math.max(0, Math.min(dropCue.index ?? rest.length, rest.length)), 0, dragged);
+      displayPages = rest;
+    }
+  }
   const moveToEdge = useCallback((ids, edge) => {
     const set = new Set(ids);
     const current = pagesRef.current;
@@ -209,26 +245,12 @@ export default function PageGridPanel({ landedId, duplicateSelected, requestDele
   }, [commitPages, pagesRef, setSelectedIds]);
   return (
                   <div className="page-grid-panel"><div className="page-grid-toolbar"><div className="page-grid-title"><strong>Pages <span>{pages.length}</span></strong><small>{search.trim() ? 'Clear search to reorder pages' : 'Drag tiles to reorder · use arrows for precise moves'}</small></div><div className="page-grid-options"><div className="search-field"><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a page..." aria-label="Find a page" />{search && <button onClick={() => setSearch('')}><X size={12}/></button>}</div><IconButton icon={ListFilter} label="Reverse page order" onClick={() => commitPages([...pagesRef.current].reverse())} /></div></div>
-                    <div className="page-grid-scroll"><div className={`page-grid${draggingPageId ? ' is-reordering' : ''}`}><AnimatePresence initial={false}>{(() => {
-      const draggedPage = draggingPageId ? pageById.get(draggingPageId) : null;
-      const sourceIndex = draggingPageId ? (pageIndexById.get(draggingPageId) ?? -1) : -1;
-      return filteredPages.map((page) => {
+                    <motion.div layoutScroll className="page-grid-scroll"><div className={`page-grid${draggingPageId ? ' is-reordering' : ''}`}><AnimatePresence initial={false}>{displayPages.map((page, displayIndex) => {
         const pageIndex = pageIndexById.get(page.id) ?? -1;
-        const cuePosition = dropCue?.id === page.id ? dropCue.position : null;
-        const cueEdge = dropCue?.id === page.id ? dropCue.edge : null;
-        const targetIndex = pageIndex;
-        const insertionIndex = targetIndex - (sourceIndex >= 0 && sourceIndex < targetIndex ? 1 : 0) + (cuePosition === 'after' ? 1 : 0);
-        const destinationPosition = Math.max(1, insertionIndex + 1);
-        return <Fragment key={page.id}>
-          {cuePosition === 'before' && draggingPageId && <DropPagePlaceholder page={draggedPage} position={destinationPosition} />}
-          <PageCard key={page.id} page={page} pageIndex={pageIndex} pages={pages} selectedIds={selectedIds} activeId={activeId} search={search} isReordering={!!draggingPageId} isDragging={draggingPageId === page.id} cuePosition={cuePosition} cueEdge={cueEdge} landedId={landedId} onContextMenu={openMenu} suppressPageClickUntil={suppressPageClickUntil} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setModal={setModal} startPageDrag={startPageDrag} selectPage={selectPage} rotateSelected={rotateSelected} movePage={movePage} />
-          {cuePosition === 'after' && draggingPageId && <DropPagePlaceholder page={draggedPage} position={destinationPosition} />}
-        </Fragment>;
-      });
-    })()}</AnimatePresence>
-    {draggingPageId && dropCue?.id === '__end__' && <DropPagePlaceholder page={pageById.get(draggingPageId)} position={pages.length} />}
+        return <PageCard key={page.id} page={page} pageIndex={pageIndex} displayIndex={displayIndex} pages={pages} selectedIds={selectedIds} activeId={activeId} search={search} isReordering={!!draggingPageId} isDragging={draggingPageId === page.id} landedId={landedId} onContextMenu={openMenu} suppressPageClickUntil={suppressPageClickUntil} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setModal={setModal} startPageDrag={startPageDrag} selectPage={selectPage} rotateSelected={rotateSelected} movePage={movePage} />;
+      })}</AnimatePresence>
     <AddPagesCard pagesRef={pagesRef} draggingPageId={draggingPageId} dropCue={dropCue} setDropCue={setDropCue} chooseFiles={chooseFiles} handleBrowserFiles={handleBrowserFiles} movePage={movePage} />
-                    </div>{filteredPages.length === 0 && <div className="no-search-results"><Search size={22}/><strong>No pages match “{search}”</strong><ActionButton size="sm" onClick={() => setSearch('')}>Clear search</ActionButton></div>}</div>
+                    </div>{filteredPages.length === 0 && <div className="no-search-results"><Search size={22}/><strong>No pages match “{search}”</strong><ActionButton size="sm" onClick={() => setSearch('')}>Clear search</ActionButton></div>}</motion.div>
                     <div className="page-grid-bottom"><span><GripVertical size={13} /> {pages.length} pages total</span><span>Shift-click range <b>·</b> Ctrl-click multiple <b>·</b> Drop at + to move to end</span></div>
                     {menu && <PageContextMenu menu={menu} pages={pages} onClose={closeMenu} rotateSelected={rotateSelected} duplicateSelected={duplicateSelected} requestDeleteSelected={requestDeleteSelected} movePage={movePage} moveToEdge={moveToEdge} selectAll={() => setSelectedIds(pagesRef.current.map((p) => p.id))} />}
                   </div>

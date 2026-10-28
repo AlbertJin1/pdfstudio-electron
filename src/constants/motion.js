@@ -13,3 +13,5 @@ export const staggerItemVariants = {
   show: { opacity: 1, y: 0, transition: { duration: 0.24, ease: [0.22, 1, 0.36, 1] } },
 };
 export const interactiveSpring = { type: 'spring', stiffness: 480, damping: 32, mass: 0.55 };
+// Neighbouring tiles glide into place while a dragged page picks its landing slot.
+export const layoutSpring = { type: 'spring', stiffness: 620, damping: 44, mass: 0.7 };

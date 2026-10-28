@@ -17,10 +17,12 @@ export function dragHasFiles(event) {
  * Browsers only expose MIME types during a drag, and not always (the type can be empty), so
  * anything unknown is treated as acceptable and validated properly on drop.
  */
-export function classifyDrag(event) {
+export function classifyDrag(event, kind = 'pdf') {
   const items = Array.from(event?.dataTransfer?.items || []).filter((item) => item.kind === 'file');
   if (!items.length) return { state: 'valid', count: 0 };
   const known = items.filter((item) => item.type);
+  // Image tools: valid unless every file with a known type is something other than an image (HEIC often has no type, so it passes).
+  if (kind === 'image') return { state: known.length === items.length && !known.some((item) => item.type.startsWith('image/')) ? 'invalid' : 'valid', count: items.length };
   const hasPdf = items.some((item) => item.type === PDF_MIME);
   const allKnownNonPdf = known.length === items.length && !hasPdf;
   return { state: allKnownNonPdf ? 'invalid' : 'valid', count: items.length };

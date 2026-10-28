@@ -1,12 +1,24 @@
 import { getPdfJsLib, loadPdfSource } from './pdfjs.js';
 
 export const COMPRESSION_PRESETS = Object.freeze({
-  lossless: { label: 'Lossless only', maxDimension: 2600, quality: 0.88, dpi: 300, description: 'Repack PDF streams/resources without intentional image quality loss or page rasterization. Keeps native text, vectors, links and forms where supported.' },
-  high: { label: 'High quality', maxDimension: 4800, quality: 0.88, dpi: 300, description: 'Smart object compression with a 300 DPI image cap. Prioritizes image detail and preserves vector text/shapes where supported.' },
-  balanced: { label: 'Recommended', maxDimension: 2400, quality: 0.76, dpi: 200, description: 'Object-aware image optimization, duplicate-image reuse, font/stream compression, and a 200 DPI image cap.' },
-  small: { label: 'Smaller file', maxDimension: 1800, quality: 0.65, dpi: 150, description: 'Stronger image-stream compression and 150 DPI cap while retaining vector/text objects when supported.' },
-  smallest: { label: 'Smallest file', maxDimension: 1200, quality: 0.48, dpi: 110, description: 'Most aggressive smart image optimization. Some images lose fine detail, but page text and vectors are not deliberately rasterized.' },
+  lossless: { label: 'Lossless only', maxDimension: 2600, quality: 0.88, dpi: 300, goal: null, ladderStart: 0, description: 'Repack PDF streams/resources without intentional image quality loss or page rasterization. Keeps native text, vectors, links and forms where supported.' },
+  high: { label: 'High quality', maxDimension: 4800, quality: 0.85, dpi: 250, goal: 0.8, ladderStart: 0, description: 'Re-encodes every image (no pass-through) at up to 250 DPI. Visually near-identical; typically 20-50% smaller on image-heavy PDFs.' },
+  balanced: { label: 'Recommended', maxDimension: 2400, quality: 0.7, dpi: 150, goal: 0.55, ladderStart: 1, description: 'Auto-escalating: re-encodes all images at up to 150 DPI and keeps tightening until the file is about half its size (or the quality floor is reached).' },
+  small: { label: 'Smaller file', maxDimension: 1800, quality: 0.55, dpi: 110, goal: 0.38, ladderStart: 2, description: 'Strong compression: 110 DPI image cap, forced JPEG re-encoding, duplicate removal and font subsetting. Auto-escalates toward ~40% of the original size.' },
+  smallest: { label: 'Smallest file', maxDimension: 1200, quality: 0.42, dpi: 85, goal: 0.25, ladderStart: 3, description: 'Very aggressive: 85 DPI images, low JPEG quality and chroma subsampling. Auto-escalates toward ~25% of the original size.' },
+  ultra: { label: 'Ultra compressed', maxDimension: 900, quality: 0.32, dpi: 66, goal: 0.15, ladderStart: 4, description: 'Maximum shrink: 66 DPI images and very low JPEG quality, escalating down to 50 DPI until about 15% of the original size. Ideal for email/upload limits (5 MB to under 1 MB). Fine print inside photos may soften.' },
 });
+
+// Ordered mild-to-strong ladder shared by every non-lossless preset and by target-size mode.
+const SMART_LADDER = [
+  { dpi: 250, quality: 85, imageFilterMode: 'jpeg', label: 'High quality (smart)' },
+  { dpi: 150, quality: 70, imageFilterMode: 'jpeg', label: 'Recommended (smart)' },
+  { dpi: 110, quality: 55, imageFilterMode: 'jpeg', label: 'Smaller (smart)' },
+  { dpi: 85, quality: 42, imageFilterMode: 'jpeg', label: 'Smallest (smart)' },
+  { dpi: 66, quality: 32, imageFilterMode: 'jpeg', label: 'Ultra (smart)' },
+  { dpi: 56, quality: 26, imageFilterMode: 'jpeg', label: 'Ultra+ (smart)' },
+  { dpi: 50, quality: 20, imageFilterMode: 'jpeg', label: 'Extreme (smart)' },
+];
 
 const TARGET_PROFILES = [
   { maxDimension: 3600, quality: 0.88, label: 'High quality' },
@@ -39,8 +51,8 @@ export function validatePdfBytes(inputBytes) {
 export function normalizeCompressionOptions(options = {}) {
   const preset = COMPRESSION_PRESETS[options.preset] ? options.preset : 'balanced';
   const defaults = COMPRESSION_PRESETS[preset];
-  const resolutionDpi = clamp(Math.round(Number(options.resolutionDpi) || defaults.dpi), 72, 400);
-  const quality = clamp(Number(options.quality) || Math.round(defaults.quality * 100), 25, 95);
+  const resolutionDpi = clamp(Math.round(Number(options.resolutionDpi) || defaults.dpi), 50, 400);
+  const quality = clamp(Number(options.quality) || Math.round(defaults.quality * 100), 15, 95);
   const colorMode = ['color', 'grayscale', 'monochrome'].includes(options.colorMode) ? options.colorMode : 'color';
   const targetBytes = Number.isFinite(Number(options.targetBytes)) && Number(options.targetBytes) > 0
     ? Math.floor(Number(options.targetBytes)) : null;
@@ -121,10 +133,10 @@ async function rasterizeWithProfile(input, profile, options = {}) {
   const pages = source.numPages;
   const pdfjsLib = await getPdfJsLib();
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
-  const resolutionDpi = clamp(Number(options.resolutionDpi) || 300, 72, 400);
+  const resolutionDpi = clamp(Number(options.resolutionDpi) || 300, 50, 400);
   const colorMode = ['color', 'grayscale', 'monochrome'].includes(options.colorMode) ? options.colorMode : 'color';
   const maxDimension = clamp(Number(profile.maxDimension) || 2400, 500, 4800);
-  const quality = clamp(Number(profile.quality) || 0.76, 0.25, 0.95);
+  const quality = clamp(Number(profile.quality) || 0.76, 0.15, 0.95);
 
   try {
     for (let index = 1; index <= pages; index += 1) {
@@ -410,13 +422,6 @@ export async function renderPdfPreview(inputBytes, options = {}) {
   } finally { await pdf.destroy?.(); }
 }
 
-const SMART_TARGET_PROFILES = [
-  // Keep target-size search bounded: at most four full PDF rewrite passes.
-  { dpi: 300, quality: 88, imageFilterMode: 'auto', label: 'High quality (smart)' },
-  { dpi: 200, quality: 76, imageFilterMode: 'auto', label: 'Recommended (smart)' },
-  { dpi: 140, quality: 60, imageFilterMode: 'jpeg', label: 'Small (smart)' },
-  { dpi: 72, quality: 40, imageFilterMode: 'jpeg', label: 'Extreme (smart)' },
-];
 
 // Ghostscript is an optional accelerator, not a hard requirement for image-heavy documents.
 // This built-in local path re-encodes supported embedded image XObjects in place using
@@ -429,25 +434,28 @@ const IMAGE_OBJECT_TARGET_PROFILES = [
   { quality: 62, scale: 0.72, label: 'Compact (embedded images)' },
   { quality: 52, scale: 0.60, label: 'Strong compression (embedded images)' },
   { quality: 42, scale: 0.48, label: 'Maximum compression (embedded images)' },
+  { quality: 34, scale: 0.38, label: 'Ultra compression (embedded images)' },
+  { quality: 26, scale: 0.28, label: 'Extreme compression (embedded images)' },
 ];
 
 function imageObjectProfiles({ targetBytes, originalSize, preset, quality, resolutionDpi }) {
   const qualityCap = Math.max(25, Math.min(95, Math.round(Number(quality) * 100)));
-  const dpiScale = Math.max(0.24, Math.min(1, Number(resolutionDpi || 300) / 300));
+  const dpiScale = Math.max(0.16, Math.min(1, Number(resolutionDpi || 300) / 300));
   if (targetBytes) {
     const ratio = targetBytes / Math.max(1, originalSize);
-    const start = ratio >= 0.85 ? 0 : ratio >= 0.65 ? 1 : ratio >= 0.45 ? 2 : 3;
-    return IMAGE_OBJECT_TARGET_PROFILES.slice(start, start + 4).map((profile) => ({
+    const start = ratio >= 0.85 ? 0 : ratio >= 0.65 ? 1 : ratio >= 0.45 ? 2 : ratio >= 0.3 ? 3 : ratio >= 0.2 ? 4 : 5;
+    return IMAGE_OBJECT_TARGET_PROFILES.slice(start, start + 5).map((profile) => ({
       ...profile,
       quality: Math.min(profile.quality, qualityCap),
       scale: Math.min(profile.scale, dpiScale),
     }));
   }
   const presets = {
-    high: { quality: 90, scale: 1, label: 'High quality (embedded images)' },
-    balanced: { quality: 76, scale: 0.9, label: 'Recommended (embedded images)' },
-    small: { quality: 62, scale: 0.72, label: 'Smaller file (embedded images)' },
-    smallest: { quality: 48, scale: 0.55, label: 'Smallest file (embedded images)' },
+    high: { quality: 85, scale: 0.9, label: 'High quality (embedded images)' },
+    balanced: { quality: 70, scale: 0.7, label: 'Recommended (embedded images)' },
+    small: { quality: 55, scale: 0.55, label: 'Smaller file (embedded images)' },
+    smallest: { quality: 42, scale: 0.42, label: 'Smallest file (embedded images)' },
+    ultra: { quality: 30, scale: 0.3, label: 'Ultra compressed (embedded images)' },
   };
   const profile = presets[preset] || presets.balanced;
   return [{ ...profile, quality: Math.min(profile.quality, qualityCap), scale: Math.min(profile.scale, dpiScale) }];
@@ -492,13 +500,14 @@ function bestSafeBytes(input, losslessBytes) {
  * Smart compression tries non-rasterizing pdfwrite before any raster fallback. Raster fallback is
  * deliberately opt-in because it destroys semantic/vector content. The original input is never mutated.
  */
-export async function compressPdf(inputBytes, options = {}) {
+async function compressPdfCore(inputBytes, options = {}) {
   const input = asBytes(inputBytes).slice();
   if (!validatePdfBytes(input)) throw new Error('Choose a valid PDF file to compress.');
   const normalized = normalizeCompressionOptions(options);
   const { preset, targetBytes, resolutionDpi, quality, colorMode, preserveMetadata, includeAnnotations, password, onProgress } = normalized;
   const originalSize = input.byteLength;
-  const allowRasterFallback = options.allowRasterFallback === true;
+  // Scan-like PDFs (images, almost no real text) lose nothing by rasterizing, so the fallback is allowed automatically for them.
+  const allowRasterFallback = options.allowRasterFallback === true || (options.scanLike === true && normalized.preset !== 'lossless' && normalized.preset !== 'high');
   const smartOptimize = typeof options.smartOptimize === 'function' ? options.smartOptimize : null;
   let losslessBytes = null;
   let losslessWarning = '';
@@ -535,6 +544,7 @@ export async function compressPdf(inputBytes, options = {}) {
   let integrity = null;
   let smartTried = false;
   const canSmart = smartOptimize && colorMode !== 'monochrome';
+  const hasTarget = Boolean(targetBytes);
 
   const trySmart = async (profile, attempt, attempts) => {
     smartTried = true;
@@ -563,37 +573,31 @@ export async function compressPdf(inputBytes, options = {}) {
   };
 
   if (canSmart) {
-    const smartProfiles = targetBytes ? (() => {
+    const presetInfo = COMPRESSION_PRESETS[preset] || COMPRESSION_PRESETS.balanced;
+    const startIndex = options.ladderStart != null ? Number(options.ladderStart) : (targetBytes ? (() => {
       const ratio = targetBytes / originalSize;
-      const start = ratio >= 0.82 ? 0 : ratio >= 0.62 ? 1 : ratio >= 0.35 ? 2 : 3;
-      const candidates = SMART_TARGET_PROFILES.slice(start).map((profile) => ({
+      return ratio >= 0.8 ? 0 : ratio >= 0.55 ? 1 : ratio >= 0.35 ? 2 : ratio >= 0.22 ? 3 : ratio >= 0.12 ? 4 : 5;
+    })() : (presetInfo.ladderStart || 0));
+    const smartProfiles = (() => {
+      const seen = new Set();
+      return SMART_LADDER.slice(Math.max(0, Math.min(SMART_LADDER.length - 1, startIndex))).map((profile) => ({
         ...profile,
         preset: 'target',
         dpi: Math.min(Number(profile.dpi), resolutionDpi),
         quality: Math.min(Number(profile.quality), quality * 100),
-      }));
-      // A user's lower DPI/quality ceiling can make adjacent profiles identical. Collapse those
-      // before launching Ghostscript so target search does not repeat an expensive full rewrite.
-      const seen = new Set();
-      return candidates.filter((profile) => {
-        const key = `${profile.dpi}|${profile.quality}|${profile.imageFilterMode}`;
+      })).filter((profile) => {
+        const key = `${profile.dpi}|${profile.quality}`;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
       });
-    })() : [{
-      preset,
-      dpi: Math.min(resolutionDpi, COMPRESSION_PRESETS[preset]?.dpi || resolutionDpi),
-      quality: Math.round(quality * 100),
-      imageFilterMode: ['small', 'smallest'].includes(preset) || quality < 0.65 ? 'jpeg' : 'auto',
-      label: COMPRESSION_PRESETS[preset]?.label || 'Smart object optimization',
-    }];
+    })();
     for (let index = 0; index < smartProfiles.length; index += 1) {
       const candidate = await trySmart(smartProfiles[index], index + 1, smartProfiles.length);
       if (!candidate) break;
       if (candidate.outputSize < best.outputSize) best = candidate;
       if (targetBytes && candidate.outputSize <= targetBytes) break;
-      if (!targetBytes) break;
+      if (!targetBytes && !hasTarget) break;
     }
     const candidateToValidate = best.engine === 'Ghostscript pdfwrite' && best.outputSize < originalSize ? best : null;
     if (candidateToValidate && candidateToValidate.outputSize < originalSize) {
@@ -642,7 +646,7 @@ export async function compressPdf(inputBytes, options = {}) {
   }
   if (shouldTryImageObjectOptimizer) {
     const profiles = imageObjectProfiles({ targetBytes, originalSize, preset, quality, resolutionDpi });
-    const baseInput = losslessBytes || input;
+    const baseInput = (best.engine === 'Ghostscript pdfwrite' && best.outputSize < originalSize ? best.bytes : null) || losslessBytes || input;
     const attempts = profiles.length;
     let acceptedImageCandidate = null;
     for (let index = 0; index < profiles.length; index += 1) {
@@ -737,6 +741,15 @@ export async function compressPdf(inputBytes, options = {}) {
     integrity = { valid: false, skipped: true, warnings: ['Structural integrity comparison is intentionally not considered successful for a rasterized output; verify visual quality and interactive-content loss.'], errors: [] };
   }
 
+  // Final lossless repack (object streams, stream recompression) of whatever won; free extra savings.
+  if (typeof options.losslessOptimize === 'function' && best.bytes && best.outputSize < originalSize && best.engine !== 'None') {
+    try {
+      onProgress({ phase: 'lossless', attempt: 1, attempts: 1, originalSize, targetBytes, profile: 'Final lossless repack' });
+      const repacked = asBytes(await options.losslessOptimize(best.bytes));
+      if (validatePdfBytes(repacked) && repacked.byteLength < best.outputSize) best = { ...best, bytes: repacked, outputSize: repacked.byteLength };
+    } catch { /* keep the existing result */ }
+  }
+
   const outputSize = best.outputSize;
   const unchanged = outputSize >= originalSize;
   const warnings = [...(best.warnings || [])];
@@ -760,6 +773,24 @@ export async function compressPdf(inputBytes, options = {}) {
     imageObjectAttempted,
     imageObjectStats,
   };
+}
+
+/**
+ * Public entry point. Every non-lossless preset carries an internal size goal (a fraction of the original)
+ * so the engine keeps escalating through stronger profiles instead of stopping after one mild pass.
+ * The goal is best-effort: it never surfaces as a failed "user target" and the smallest safe output wins.
+ */
+export async function compressPdf(inputBytes, options = {}) {
+  const input = asBytes(inputBytes);
+  const normalized = normalizeCompressionOptions(options);
+  const info = COMPRESSION_PRESETS[normalized.preset];
+  const autoGoal = !normalized.targetBytes && info?.goal && normalized.preset !== 'lossless' && input.byteLength > 0;
+  if (!autoGoal) return compressPdfCore(inputBytes, options);
+  const goalBytes = Math.max(1024, Math.floor(input.byteLength * info.goal));
+  const result = await compressPdfCore(inputBytes, { ...options, targetBytes: goalBytes, ladderStart: info.ladderStart, __autoGoal: true });
+  const { targetDifferenceBytes, ...rest } = result;
+  const warnings = (rest.warnings || []).filter((w) => !/requested .* target/i.test(w));
+  return { ...rest, targetBytes: null, reachedTarget: true, warnings, warning: warnings.join(' '), goalReached: result.outputSize <= goalBytes, goalBytes };
 }
 
 export function compressionSummary(result) {

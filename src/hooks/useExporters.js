@@ -3,7 +3,9 @@ import { composePdf, loadPdfSource, pdfToDocx, renderPdfImages } from '../servic
 import { rasterizePdfForCompression } from '../services/pdf/rasterize.js';
 import { compressPdf as compressStandalonePdf, validateCompressionIntegrity } from '../services/pdf/compress.js';
 import { saveInBrowser } from '../utils/download.js';
-import { uid } from '../utils/id.js';
+import { cleanFileStem, saveImageExportPrefs } from '../utils/imageExportPrefs.js';
+import { parsePageRange } from '../utils/pageRange.js';
+import { buildSplitPlan, splitFileName } from '../utils/splitPlan.js';
 import { formatBytes } from '../utils/format.js';
 
 export function useExporters({ pages, selectedPages, documents, sourcesRef, notify, setModal, setIsLoading, setLoadingLabel, imageFormat, imageQuality }) {
@@ -18,9 +20,6 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
   const [exportPaperSize, setExportPaperSize] = useState('original');
   const [exportCompression, setExportCompression] = useState('lossless');
   const [exportPassword, setExportPassword] = useState('');
-  const [splitMode, setSplitMode] = useState('each');
-  const [splitEvery, setSplitEvery] = useState('2');
-  const [splitRanges, setSplitRanges] = useState('1-3, 4-6');
 
   const doExportPdf = useCallback(async (onlySelected = false) => {
     const exportPages = onlySelected ? selectedPages : pages;
@@ -113,7 +112,7 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
     finally { setIsLoading(false); setLoadingLabel('Preparing your workspace'); }
   }, [documents, exportAuthor, exportTitle, notify, pages, setIsLoading, setLoadingLabel, setModal, sourcesRef]);
 
-  const compressPdfFile = useCallback(async ({ file, preset = 'balanced', targetBytes = null, password = '', resolutionDpi, quality, colorMode, preserveMetadata, includeAnnotations, allowRasterFallback = false, imageObjectCount, duplicateImageEstimate, detectDuplicateImages, outputPassword = '', previewOnly = false, preparedResult = null } = {}) => {
+  const compressPdfFile = useCallback(async ({ file, preset = 'balanced', targetBytes = null, password = '', resolutionDpi, quality, colorMode, preserveMetadata, includeAnnotations, allowRasterFallback = false, scanLike = false, imageObjectCount, duplicateImageEstimate, detectDuplicateImages, outputPassword = '', previewOnly = false, preparedResult = null } = {}) => {
     if (!file?.bytes?.length) return notify('Choose a PDF file before starting compression.', 'info');
     const originalName = String(file.name || 'document.pdf').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '-').slice(0, 100) || 'document';
     setIsLoading(true);
@@ -138,6 +137,7 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
           preserveMetadata,
           includeAnnotations,
           allowRasterFallback,
+          scanLike,
           imageObjectCount,
           duplicateImageEstimate,
           detectDuplicateImages,
@@ -214,64 +214,163 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
     }
   }, [notify, setIsLoading, setLoadingLabel, setModal]);
 
-  const convertToImages = useCallback(async () => {
-    if (!pages.length) return notify('Open a document before exporting images.', 'info');
-    const exportPages = selectedPages.length > 0 ? selectedPages : pages;
-    setIsLoading(true); setLoadingLabel('Rendering pages as images');
-    try {
-      const pdfBytes = await composePdf(exportPages, sourcesRef.current, { title: 'PDF Studio image export', author: exportAuthor });
-      const pdf = await loadPdfSource(pdfBytes);
-      const sourceId = uid();
-      const map = new Map([[sourceId, { id: sourceId, name: 'Export', mime: 'application/pdf', kind: 'pdf', bytes: pdfBytes, pdf }]]);
-      const rasterPages = Array.from({ length: pdf.numPages }, (_, index) => ({ id: uid(), sourceId, kind: 'pdf', sourcePageIndex: index, rotation: 0, overlays: [] }));
-      const outputs = await renderPdfImages(map, rasterPages, { format: imageFormat, quality: Number(imageQuality) / 100, maxDimension: 1900 });
-      if (window.pdfStudio?.saveBatch) {
-        const result = await window.pdfStudio.saveBatch(outputs);
-        if (result?.canceled) return;
-        setModal(null); notify(`${result.count} image${result.count === 1 ? '' : 's'} exported to ${result.folder}.`);
-      } else {
-        for (const output of outputs) await saveInBrowser(output.data, output.name, imageFormat === 'jpeg' ? 'image/jpeg' : 'image/png');
-        setModal(null); notify(`${outputs.length} images exported.`);
-      }
-    } catch (error) { console.error(error); notify(error?.message || 'Image export failed.', 'error'); }
-    finally { setIsLoading(false); setLoadingLabel('Preparing your workspace'); }
-  }, [exportAuthor, imageFormat, imageQuality, notify, pages, selectedPages]);
+  const convertToImages = useCallback(async (request = {}) => {
+    const standalone = request.file?.bytes ? request.file : null; // PDF picked or dropped in the dialog: never enters the workspace
+    if (!standalone && !pages.length) return notify('Open a PDF before exporting images.', 'info');
+    const format = request.format === 'jpeg' ? 'jpeg' : 'png';
+    const ext = format === 'jpeg' ? 'jpg' : 'png';
+    const quality = Math.min(1, Math.max(0.4, Number(request.quality ?? imageQuality) / 100 || 0.92));
+    const dpi = Math.min(600, Math.max(48, Number(request.dpi) || 150));
+    const baseName = cleanFileStem(request.baseName || (standalone ? standalone.name.replace(/\.[^.]+$/, '') : (documents.length === 1 ? documents[0].name.replace(/\.[^.]+$/, '') : exportTitle || 'PDF-Studio-document')));
+    const folderName = `${baseName}-images`;
+    const bridge = window.pdfStudio;
+    const desktop = Boolean(bridge?.beginFolderExport);
+    if (desktop && !request.parentFolder) return notify('Choose a folder to save the images in.', 'info');
 
-  const splitPdf = useCallback(async () => {
-    if (!pages.length) return notify('Open a PDF before splitting.', 'info');
-    let groups = [];
-    if (splitMode === 'each') groups = pages.map((page) => [page]);
-    else if (splitMode === 'every') {
-      const size = Math.max(1, Math.min(500, Number(splitEvery) || 2));
-      for (let index = 0; index < pages.length; index += size) groups.push(pages.slice(index, index + size));
-    } else {
-      const ranges = splitRanges.split(',').map((part) => part.trim()).filter(Boolean);
-      for (const range of ranges) {
-        const match = range.match(/^(\d+)\s*(?:-\s*(\d+))?$/);
-        if (!match) return notify(`Invalid page range: “${range}”. Use values such as 1-3, 5, 8-10.`, 'error');
-        const start = Number(match[1]); const end = Number(match[2] || match[1]);
-        if (start < 1 || end < start || end > pages.length) return notify(`Range “${range}” is outside the current 1–${pages.length} page workspace.`, 'error');
-        groups.push(pages.slice(start - 1, end));
-      }
-    }
-    setIsLoading(true); setLoadingLabel('Preparing split files');
+    setIsLoading(true); setLoadingLabel('Preparing pages');
+    let pdf = null; let session = null; let written = 0;
     try {
-      const outputs = [];
-      for (let index = 0; index < groups.length; index += 1) {
-        const bytes = await composePdf(groups[index], sourcesRef.current, { title: `PDF Studio split ${index + 1}`, author: exportAuthor });
-        outputs.push({ name: `split-${String(index + 1).padStart(2, '0')}.pdf`, data: bytes });
-      }
-      if (window.pdfStudio?.saveBatch) {
-        const result = await window.pdfStudio.saveBatch(outputs);
-        if (result?.canceled) return;
-        setModal(null); notify(`${result.count} PDF file${result.count === 1 ? '' : 's'} saved to ${result.folder}.`);
+      // 1. Decide which pages of which PDF are rendered, and the number each file is named after.
+      let pageNumbers; let labels; let totalForPadding;
+      if (standalone) {
+        pdf = await loadPdfSource(standalone.bytes.slice());
+        totalForPadding = pdf.numPages;
+        if (request.scope === 'range') {
+          const parsed = parsePageRange(request.rangeText, pdf.numPages);
+          if (parsed.error) throw new Error(parsed.error);
+          pageNumbers = parsed.pages;
+        } else pageNumbers = Array.from({ length: pdf.numPages }, (_, index) => index + 1);
+        labels = pageNumbers;
       } else {
-        for (const output of outputs) await saveInBrowser(output.data, output.name, 'application/pdf');
-        setModal(null); notify(`${outputs.length} split files exported.`);
+        let chosen;
+        if (request.scope === 'selected' && selectedPages.length) {
+          const ids = new Set(selectedPages.map((page) => page.id));
+          chosen = pages.map((page, index) => ({ page, label: index + 1 })).filter((entry) => ids.has(entry.page.id));
+        } else if (request.scope === 'range') {
+          const parsed = parsePageRange(request.rangeText, pages.length);
+          if (parsed.error) throw new Error(parsed.error);
+          chosen = parsed.pages.map((number) => ({ page: pages[number - 1], label: number }));
+        } else chosen = pages.map((page, index) => ({ page, label: index + 1 }));
+        if (!chosen.length) throw new Error('There are no pages to export.');
+        totalForPadding = pages.length;
+        const pdfBytes = await composePdf(chosen.map((entry) => entry.page), sourcesRef.current, { title: 'PDF Studio image export', author: exportAuthor });
+        pdf = await loadPdfSource(pdfBytes);
+        pageNumbers = chosen.map((_, index) => index + 1);
+        labels = chosen.map((entry) => entry.label);
       }
-    } catch (error) { console.error(error); notify(error?.message || 'Could not split this workspace.', 'error'); }
-    finally { setIsLoading(false); setLoadingLabel('Preparing your workspace'); }
-  }, [exportAuthor, notify, pages, splitEvery, splitMode, splitRanges]);
+      const pad = Math.max(3, String(totalForPadding).length);
+      const fileName = (index) => `${baseName}-page-${String(labels[index]).padStart(pad, '0')}.${ext}`;
+
+      // 2. Open the destination before the slow work so a bad folder fails fast.
+      let writeImage; let destination = '';
+      if (desktop) {
+        session = await bridge.beginFolderExport({ parent: request.parentFolder, folderName });
+        destination = session.folder;
+        writeImage = (name, data) => bridge.writeFolderExport({ token: session.token, name, data });
+      } else if (request.directoryHandle) {
+        let target = null;
+        for (let attempt = 1; attempt <= 500 && !target; attempt += 1) {
+          const candidate = attempt === 1 ? folderName : `${folderName} (${attempt})`;
+          try { await request.directoryHandle.getDirectoryHandle(candidate); } catch { target = candidate; }
+        }
+        const dir = await request.directoryHandle.getDirectoryHandle(target, { create: true });
+        destination = `${request.directoryHandle.name}/${target}`;
+        writeImage = async (name, data) => { const handle = await dir.getFileHandle(name, { create: true }); const writable = await handle.createWritable(); await writable.write(data); await writable.close(); };
+      } else {
+        writeImage = (name, data) => saveInBrowser(data, name, format === 'jpeg' ? 'image/jpeg' : 'image/png');
+        destination = 'your Downloads folder';
+      }
+
+      // 3. Render and write one page at a time.
+      await renderPdfImages(pdf, pageNumbers, {
+        format, quality, dpi,
+        onProgress: ({ index, total }) => setLoadingLabel(`Exporting page ${index + 1} of ${total}`),
+        onImage: async ({ data, index }) => { await writeImage(fileName(index), data); written += 1; },
+      });
+
+      saveImageExportPrefs({ folder: desktop ? request.parentFolder : '', dpi });
+      if (session) { await bridge.finishFolderExport({ token: session.token, open: request.openWhenDone !== false }); session = null; }
+      setModal(null);
+      notify(`${written} image${written === 1 ? '' : 's'} exported to ${destination}.`);
+    } catch (error) {
+      console.error(error);
+      notify(error?.message || 'Image export failed.', 'error');
+    } finally {
+      if (session) { try { await bridge.finishFolderExport({ token: session.token, open: false }); } catch { /* ignore */ } }
+      try { await pdf?.destroy?.(); } catch { /* ignore */ }
+      setIsLoading(false); setLoadingLabel('Preparing your workspace');
+    }
+  }, [documents, exportAuthor, exportTitle, imageQuality, notify, pages, selectedPages, setIsLoading, setLoadingLabel, setModal, sourcesRef]);
+
+  const splitPdf = useCallback(async (request = {}) => {
+    const standalone = request.file?.bytes ? request.file : null; // PDF picked or dropped in the dialog: never enters the workspace
+    if (!standalone && !pages.length) return notify('Open a PDF before splitting.', 'info');
+    const baseName = cleanFileStem(request.baseName || (standalone ? standalone.name.replace(/\.[^.]+$/, '') : (documents.length === 1 ? documents[0].name.replace(/\.[^.]+$/, '') : exportTitle || 'PDF-Studio-document')));
+    const folderName = `${baseName}-split`;
+    const bridge = window.pdfStudio;
+    const desktop = Boolean(bridge?.beginFolderExport);
+    if (desktop && !request.parentFolder) return notify('Choose a folder to save the files in.', 'info');
+
+    setIsLoading(true); setLoadingLabel('Reading PDF');
+    let session = null; let written = 0;
+    try {
+      // 1. One source PDF: the picked file as-is, or the whole workspace (edits, rotation and order baked in) composed once.
+      const sourceBytes = standalone ? standalone.bytes.slice() : await composePdf(pages, sourcesRef.current, { title: baseName, author: exportAuthor });
+      const { PDFDocument } = await import('pdf-lib');
+      let source;
+      try { source = await PDFDocument.load(sourceBytes, { ignoreEncryption: false }); }
+      catch (error) { throw new Error(/encrypt|password/i.test(error?.message || '') ? 'This PDF is password-protected. Remove the password first, then split it.' : 'This PDF could not be read for splitting. It may be damaged.'); }
+      const total = source.getPageCount();
+      const plan = buildSplitPlan({ mode: request.mode, every: request.every, rangeText: request.rangeText, total });
+      if (plan.error) throw new Error(plan.error);
+      if (!plan.groups.length) throw new Error('There are no pages to split.');
+
+      // 2. Open the destination before the slow work so a bad folder fails fast.
+      let writeFile; let destination = '';
+      if (desktop) {
+        session = await bridge.beginFolderExport({ parent: request.parentFolder, folderName });
+        destination = session.folder;
+        writeFile = (name, data) => bridge.writeFolderExport({ token: session.token, name, data });
+      } else if (request.directoryHandle) {
+        let target = null;
+        for (let attempt = 1; attempt <= 500 && !target; attempt += 1) {
+          const candidate = attempt === 1 ? folderName : `${folderName} (${attempt})`;
+          try { await request.directoryHandle.getDirectoryHandle(candidate); } catch { target = candidate; }
+        }
+        const dir = await request.directoryHandle.getDirectoryHandle(target, { create: true });
+        destination = `${request.directoryHandle.name}/${target}`;
+        writeFile = async (name, data) => { const handle = await dir.getFileHandle(name, { create: true }); const writable = await handle.createWritable(); await writable.write(data); await writable.close(); };
+      } else {
+        writeFile = (name, data) => saveInBrowser(data, name, 'application/pdf');
+        destination = 'your Downloads folder';
+      }
+
+      // 3. Build and write one part at a time so memory stays flat for large documents.
+      const author = source.getAuthor() || exportAuthor || 'PDF Studio';
+      for (let index = 0; index < plan.groups.length; index += 1) {
+        const group = plan.groups[index];
+        setLoadingLabel(`Creating file ${index + 1} of ${plan.groups.length}`);
+        const part = await PDFDocument.create();
+        const indices = Array.from({ length: group.end - group.start + 1 }, (_, offset) => group.start - 1 + offset);
+        for (const copied of await part.copyPages(source, indices)) part.addPage(copied);
+        part.setTitle(`${baseName} (${group.start === group.end ? `page ${group.start}` : `pages ${group.start}–${group.end}`})`);
+        part.setAuthor(author); part.setCreator('PDF Studio for Desktop'); part.setProducer('PDF Studio'); part.setCreationDate(new Date());
+        await writeFile(splitFileName(baseName, group, total), await part.save());
+        written += 1;
+      }
+
+      saveImageExportPrefs({ folder: desktop ? request.parentFolder : '' });
+      if (session) { await bridge.finishFolderExport({ token: session.token, open: request.openWhenDone !== false }); session = null; }
+      setModal(null);
+      notify(`${written} PDF file${written === 1 ? '' : 's'} saved to ${destination}.`);
+    } catch (error) {
+      console.error(error);
+      notify(error?.message || 'Could not split this PDF.', 'error');
+    } finally {
+      if (session) { try { await bridge.finishFolderExport({ token: session.token, open: false }); } catch { /* ignore */ } }
+      setIsLoading(false); setLoadingLabel('Preparing your workspace');
+    }
+  }, [documents, exportAuthor, exportTitle, notify, pages, setIsLoading, setLoadingLabel, setModal, sourcesRef]);
 
   return {
     exportTitle,
@@ -296,12 +395,6 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
     setExportCompression,
     exportPassword,
     setExportPassword,
-    splitMode,
-    setSplitMode,
-    splitEvery,
-    setSplitEvery,
-    splitRanges,
-    setSplitRanges,
     doExportPdf,
     convertToWord,
     compressPdfFile,

@@ -28,19 +28,30 @@ export default function PagePreview({ page, sources, onAddText, onAddBlock, zoom
     // coordinates anchored to the actual page instead of the full modal viewport.
     const fitRenderedPage = () => {
       if (!alive || !fitToStage || !fitStage || !renderedCanvas || !paperWrap) return;
-      const stageRect = fitStage.getBoundingClientRect();
-      const maxWidth = Math.max(1, stageRect.width - 34);
-      const maxHeight = Math.max(1, stageRect.height - 34);
+      // clientWidth/Height ignore the modal's open animation transform (getBoundingClientRect would
+      // measure the half-scaled card and fit the page too small).
+      const style = getComputedStyle(fitStage);
+      const padX = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+      const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+      const maxWidth = Math.max(1, fitStage.clientWidth - padX);
+      const maxHeight = Math.max(1, fitStage.clientHeight - padY);
       const fitScale = Math.min(maxWidth / renderedCanvas.width, maxHeight / renderedCanvas.height, 1);
       const scale = fitScale * Math.max(0.1, zoomRef.current || 1);
       const displayWidth = Math.max(1, Math.floor(renderedCanvas.width * scale));
       const displayHeight = Math.max(1, Math.floor(renderedCanvas.height * scale));
+      // Remember which point of the page sits at the centre of the viewport so zooming keeps it there.
+      const prevW = Math.max(1, fitStage.scrollWidth);
+      const prevH = Math.max(1, fitStage.scrollHeight);
+      const centerX = (fitStage.scrollLeft + fitStage.clientWidth / 2) / prevW;
+      const centerY = (fitStage.scrollTop + fitStage.clientHeight / 2) / prevH;
       renderedCanvas.style.width = `${displayWidth}px`;
       renderedCanvas.style.height = `${displayHeight}px`;
       holder.style.width = `${displayWidth}px`;
       holder.style.height = `${displayHeight}px`;
       paperWrap.style.width = `${displayWidth}px`;
       paperWrap.style.height = `${displayHeight}px`;
+      fitStage.scrollLeft = Math.max(0, centerX * fitStage.scrollWidth - fitStage.clientWidth / 2);
+      fitStage.scrollTop = Math.max(0, centerY * fitStage.scrollHeight - fitStage.clientHeight / 2);
     };
 
     fitLayoutRef.current = fitRenderedPage;

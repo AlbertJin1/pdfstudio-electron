@@ -16,7 +16,7 @@ import { useFileDrop } from '../../hooks/useFileDrop.js';
  */
 export default function Modal({ title, eyebrow, children, onClose, footer, wide = false, onDropFiles, dropHint }) {
   const cardRef = useRef(null);
-  const { dragState, handlers: dropHandlers } = useFileDrop({ onDrop: onDropFiles });
+  const { dragState, handlers: dropHandlers } = useFileDrop({ onDrop: onDropFiles, kind: dropHint?.kind });
   const titleId = useMemo(() => `dialog-title-${uid()}`, []);
   useEffect(() => {
     const onKey = (event) => { if (event.key === 'Escape') { event.stopPropagation(); onClose(); } };

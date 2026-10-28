@@ -10,6 +10,7 @@ import {
   Files,
   FolderOpen,
   History,
+  ImageDown,
   LayoutDashboard,
   PanelLeftClose,
   PanelLeftOpen,
@@ -158,9 +159,10 @@ export default function Sidebar({ pages, documents, mode, appVersion, currentDoc
 
         <div className="sidebar-divider" />
         <SectionLabel>Quick tools</SectionLabel>
-        <button className="quick-nav" aria-label="Split PDF" {...tip('Split PDF')} onClick={() => setModal({ type: 'split' })} disabled={!pages.length}><span className="quick-icon quick-violet"><Split size={15} /></span><span>Split PDF</span></button>
+        <button className="quick-nav" aria-label="Split PDF" {...tip('Split PDF')} onClick={() => setModal({ type: 'split' })}><span className="quick-icon quick-violet"><Split size={15} /></span><span>Split PDF</span></button>
         <button className="quick-nav" aria-label="PDF to Word" {...tip('PDF to Word')} onClick={() => setModal({ type: 'word' })} disabled={!pages.length}><span className="quick-icon quick-blue"><FileText size={15} /></span><span>PDF to Word</span></button>
-        <button className="quick-nav" aria-label="Export images" {...tip('Export images')} onClick={() => setModal({ type: 'images' })} disabled={!pages.length}><span className="quick-icon quick-orange"><FileImage size={15} /></span><span>Export images</span></button>
+        <button className="quick-nav" aria-label="Export images" {...tip('Export images')} onClick={() => setModal({ type: 'images' })}><span className="quick-icon quick-orange"><FileImage size={15} /></span><span>Export images</span></button>
+        <button className="quick-nav" aria-label="Format converter" {...tip('Format converter')} onClick={() => setModal({ type: 'imageConvert' })}><span className="quick-icon quick-green"><ImageDown size={15} /></span><span>Format converter</span></button>
       </div>
       <div className="sidebar-footer">
         <div className="privacy-card" {...tip('Your files stay yours: processed on this device')}><div className="privacy-icon"><ShieldCheck size={17} /></div><div><strong>Your files stay yours</strong><p>Processed on this device. No uploads.</p></div><CheckCircle2 size={15} className="privacy-check" /></div>

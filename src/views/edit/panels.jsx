@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { COMMON_FONTS, FONT_FAMILIES, TEXT_TYPES, findUnsupported } from '../../services/pdf/textMetrics.js';
 import { cx } from '../../utils/cx.js';
+import Select from '../../components/common/Select.jsx';
 import NumField from './NumField.jsx';
 import PagePicker from './PagePicker.jsx';
 import { UNIT_DEFS } from './units.js';
@@ -115,17 +116,16 @@ export function DocBar({ fileName, dirty, pdfDoc, pageNumber, pageCount, onPage,
   return (
     <div className="ep-docbar" role="toolbar" aria-label="Document controls">
       <div className="ep-docname" {...tipProps(fileName, { side: 'bottom' })}><FileText size={16} aria-hidden="true" /><span>{fileName}</span>{dirty && <em>Unsaved</em>}</div>
-      {workspaceDocs.length > 0 && <select className="ep-select ep-ws-select" aria-label="Switch to a PDF already in your workspace" value={loadedSourceId || ''} onChange={onSwitchDoc} disabled={busy}><option value="">Workspace PDFs…</option>{workspaceDocs.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select>}
+      {workspaceDocs.length > 0 && <Select className="ep-select ep-ws-select" ariaLabel="Switch to a PDF already in your workspace" value={loadedSourceId || ''} onChange={(id) => onSwitchDoc({ target: { value: id } })} disabled={busy} placeholder="Workspace PDFs…" minListWidth={240} options={[{ value: '', label: 'Workspace PDFs…' }, ...workspaceDocs.map((d) => ({ value: d.id, label: d.name }))]} />}
       <span className="ep-divider ep-divider-doc" />
       <PagePicker pdfDoc={pdfDoc} pageNumber={pageNumber} pageCount={pageCount} onPage={onPage} changes={changes} />
       <span className="ep-divider" />
       <div className="ep-group ep-group-zoom" role="group" aria-label="Zoom">
         <Btn icon={ZoomOut} label="Zoom out (Ctrl+-)" onClick={() => onZoomStep(-1)} />
-        <select className="ep-select ep-zoom-select" aria-label="Zoom level" value={zoomMode === 'custom' ? closest : zoomMode} onChange={(event) => (['page', 'width'].includes(event.target.value) ? onFit(event.target.value) : onZoomPreset(Number(event.target.value)))}>
-          <option value="page">Fit page{zoomMode === 'page' ? ` · ${zoomPercent}%` : ''}</option><option value="width">Fit width{zoomMode === 'width' ? ` · ${zoomPercent}%` : ''}</option>
-          {zoomMode === 'custom' && !closest && <option value="">{zoomPercent}%</option>}
-          {presets.map((p) => <option key={p} value={p}>{p}%</option>)}
-        </select>
+        <Select className="ep-select ep-zoom-select" ariaLabel="Zoom level" value={zoomMode === 'custom' ? closest : zoomMode} minListWidth={130}
+          onChange={(next) => (['page', 'width'].includes(next) ? onFit(next) : (next !== '' && onZoomPreset(Number(next))))}
+          options={[{ value: 'page', label: `Fit page${zoomMode === 'page' ? ` · ${zoomPercent}%` : ''}` }, { value: 'width', label: `Fit width${zoomMode === 'width' ? ` · ${zoomPercent}%` : ''}` },
+            ...(zoomMode === 'custom' && !closest ? [{ value: '', label: `${zoomPercent}%` }] : []), ...presets.map((p) => ({ value: String(p), label: `${p}%` }))]} />
         <Btn icon={ZoomIn} label="Zoom in (Ctrl++)" onClick={() => onZoomStep(1)} />
         <span className="ep-seg-icons ep-fit-group">
           <Btn icon={Scan} label="Fit page (Ctrl+0)" active={zoomMode === 'page'} onClick={() => onFit('page')} />
@@ -158,12 +158,13 @@ export function FormatBar({ original, style, onStyle, hasTextTarget, selectionCo
     <div className="ep-formatbar">
       <div className="ep-group" role="group" aria-label="Text formatting">
         <span className={cx('ep-mode', hasTextTarget && 'is-live')} title={hasTextTarget ? 'Changes apply to the selected text' : 'Choose a style for the next text you add, or select text to restyle it'}>{hasTextTarget ? 'Selected text' : 'New text'}</span>
-        <select className="ep-select ep-font-select" aria-label="Font" value={style.fontName || style.family} onChange={(event) => onStyle({ font: event.target.value })}>
-          {original && <option value="__original__">Original: {original}</option>}
-          {style.fontName && !original && !COMMON_FONTS.some((f) => f.name === style.fontName) && <option value={style.fontName}>{style.fontName}</option>}
-          <optgroup label="PDF built-in">{Object.entries(FONT_FAMILIES).map(([id, f]) => <option key={id} value={id}>{f.label}</option>)}</optgroup>
-          <optgroup label="Installed fonts">{COMMON_FONTS.map((f) => <option key={f.name} value={f.name}>{f.name}</option>)}</optgroup>
-        </select>
+        <Select className="ep-select ep-font-select" ariaLabel="Font" value={style.fontName || style.family} onChange={(font) => onStyle({ font })} minListWidth={230}
+          options={[
+            ...(original ? [{ value: '__original__', label: `Original: ${original}` }] : []),
+            ...(style.fontName && !original && !COMMON_FONTS.some((f) => f.name === style.fontName) ? [{ value: style.fontName, label: style.fontName }] : []),
+            ...Object.entries(FONT_FAMILIES).map(([id, f]) => ({ value: id, label: f.label, group: 'PDF built-in' })),
+            ...COMMON_FONTS.map((f) => ({ value: f.name, label: f.name, group: 'Installed fonts' })),
+          ]} />
         <input className="ep-size" aria-label="Font size" list="ep-sizes" type="number" min={4} max={300} step={1} value={Math.round(style.size * 10) / 10} onChange={(event) => { const v = Number(event.target.value); if (v >= 4 && v <= 300) onStyle({ size: v }); }} onKeyDown={(event) => event.stopPropagation()} />
         <datalist id="ep-sizes">{SIZES.map((s) => <option key={s} value={s} />)}</datalist>
         <Btn icon={Bold} label="Bold (Ctrl+B)" active={style.bold} onClick={() => onStyle({ bold: !style.bold })} />
@@ -174,13 +175,11 @@ export function FormatBar({ original, style, onStyle, hasTextTarget, selectionCo
         <Btn icon={AlignLeft} label="Align text left" active={style.align === 'left'} onClick={() => onStyle({ align: 'left' })} />
         <Btn icon={AlignCenter} label="Centre text" active={style.align === 'center'} onClick={() => onStyle({ align: 'center' })} />
         <Btn icon={AlignRight} label="Align text right" active={style.align === 'right'} onClick={() => onStyle({ align: 'right' })} />
-        <select className="ep-select ep-select-narrow" aria-label="Line spacing" title="Line spacing" value={String(style.lineHeight)} onChange={(event) => onStyle({ lineHeight: Number(event.target.value) })}>{[1, 1.15, 1.2, 1.5, 2].map((v) => <option key={v} value={v}>{v}×</option>)}</select>
+        <Select className="ep-select ep-select-narrow" ariaLabel="Line spacing" title="Line spacing" value={String(style.lineHeight)} onChange={(next) => onStyle({ lineHeight: Number(next) })} options={[1, 1.15, 1.2, 1.5, 2].map((v) => ({ value: String(v), label: `${v}×` }))} />
         <label className="ep-color" title="Text colour"><input type="color" value={style.color} onChange={(event) => onStyle({ color: event.target.value })} aria-label="Text colour" /></label>
       </div>
       <div className="ep-group ep-group-arrange" role="group" aria-label="Align and distribute">
-        <select className="ep-select ep-select-narrow" aria-label="Align to" value={alignTo} onChange={(event) => setAlignTo(event.target.value)} title="What to align the selection to">
-          <option value="page">To page</option><option value="margins">To margins</option><option value="selection">To selection</option>
-        </select>
+        <Select className="ep-select ep-select-narrow" ariaLabel="Align to" title="What to align the selection to" value={alignTo} onChange={setAlignTo} minListWidth={140} options={[{ value: 'page', label: 'To page' }, { value: 'margins', label: 'To margins' }, { value: 'selection', label: 'To selection' }]} />
         {AL.map(([mode, Icon, label]) => <Btn key={mode} icon={Icon} label={label} onClick={() => onAlign(mode)} disabled={!canAlign} />)}
         <Btn icon={AlignHorizontalSpaceBetween} label="Distribute horizontally (3+ items)" onClick={() => onDistribute('h')} disabled={!canDistribute} />
         <Btn icon={AlignVerticalSpaceBetween} label="Distribute vertically (3+ items)" onClick={() => onDistribute('v')} disabled={!canDistribute} />
@@ -226,7 +225,7 @@ export function SidePanel({ tab, setTab, unit, setUnit, selected, single, onPatc
               {(!single || !['signature', 'image', 'imageedit'].includes(single.type)) && <label className="ep-field-row">Colour<input type="color" value={single ? (single.color || '#313b50') : (tool === 'highlight' ? defaults.highlight : defaults.color)} onChange={(event) => (single ? onPatch({ color: event.target.value }) : setDefaults(tool === 'highlight' ? { highlight: event.target.value } : { color: event.target.value }))} /></label>}
               {(!single || ['rect', 'ellipse', 'line', 'underline', 'strike', 'draw', 'stamp'].includes(single.type)) && <label className="ep-field-row">Line width <b>{(single?.lineWidth ?? defaults.lineWidth)} pt</b><input type="range" min="0.5" max="12" step="0.5" value={single?.lineWidth ?? defaults.lineWidth} onChange={(event) => (single ? onPatch({ lineWidth: Number(event.target.value) }) : setDefaults({ lineWidth: Number(event.target.value) }))} /></label>}
               {single && ['highlight', 'whiteout', 'rect', 'ellipse', 'image', 'signature', 'imageedit'].includes(single.type) && <label className="ep-field-row">Opacity <b>{Math.round((single.opacity ?? 1) * 100)}%</b><input type="range" min="10" max="100" value={Math.round((single.opacity ?? (single.type === 'highlight' ? 0.34 : 1)) * 100)} onChange={(event) => onPatch({ opacity: Number(event.target.value) / 100 })} /></label>}
-              {!single && tool === 'stamp' && <label className="ep-field-row">Stamp<select className="ep-select" value={stampText} onChange={(event) => setStampText(event.target.value)}>{STAMPS.map((s) => <option key={s}>{s}</option>)}</select></label>}
+              {!single && tool === 'stamp' && <label className="ep-field-row">Stamp<Select className="ep-select" ariaLabel="Stamp" value={stampText} onChange={setStampText} minListWidth={150} options={STAMPS.map((stamp) => ({ value: stamp, label: stamp }))} /></label>}
               {single?.type === 'imageedit' && <button type="button" className="ep-btn" onClick={onReplaceImage}><Replace size={14} /> Replace image</button>}
               {single?.type === 'textedit' && <p className="ep-note">Text edits are overlaid on the original PDF. The editor samples the page background and preserves untouched PDF objects.</p>}
             </section>

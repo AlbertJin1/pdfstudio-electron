@@ -2,9 +2,16 @@ import { useEffect, useState } from 'react';
 import { Activity, AlignLeft, FileText, Image } from 'lucide-react';
 import ActionButton from '../components/common/ActionButton.jsx';
 import Modal from '../components/common/Modal.jsx';
+import Select from '../components/common/Select.jsx';
 import PdfSourcePicker from '../components/common/PdfSourcePicker.jsx';
 import { usePdfPicker } from '../hooks/usePdfPicker.js';
 import { loadPdfSource } from '../services/pdf/index.js';
+
+const OCR_LANGUAGES = [
+  { value: 'eng', label: 'English' }, { value: 'eng+chi_tra', label: 'English + Traditional Chinese' }, { value: 'chi_tra', label: 'Traditional Chinese' },
+  { value: 'eng+chi_sim', label: 'English + Simplified Chinese' }, { value: 'jpn', label: 'Japanese' }, { value: 'kor', label: 'Korean' },
+  { value: 'fra', label: 'French' }, { value: 'deu', label: 'German' }, { value: 'spa', label: 'Spanish' },
+];
 
 export default function WordModal({ pages, file: initialFile = null, setModal, convertToWord }) {
   const [mode, setMode] = useState('auto');
@@ -65,17 +72,7 @@ export default function WordModal({ pages, file: initialFile = null, setModal, c
       {mode !== 'visual' && <div className="word-ocr-options">
         <label className="compress-check-row"><input type="checkbox" checked={ocrEnabled} onChange={(event) => setOcrEnabled(event.target.checked)}/><span><strong>OCR for scan-only or nearly textless pages</strong><small>Uses local Tesseract OCR when the PDF has no usable text layer. Pages that already have text and screenshots are not OCRed indiscriminately, preventing screenshot content from being erased or duplicated.</small></span></label>
         {ocrEnabled && <label className="form-label word-ocr-language">OCR language
-          <select className="form-select" value={ocrLanguage} onChange={(event) => setOcrLanguage(event.target.value)}>
-            <option value="eng">English</option>
-            <option value="eng+chi_tra">English + Traditional Chinese</option>
-            <option value="chi_tra">Traditional Chinese</option>
-            <option value="eng+chi_sim">English + Simplified Chinese</option>
-            <option value="jpn">Japanese</option>
-            <option value="kor">Korean</option>
-            <option value="fra">French</option>
-            <option value="deu">German</option>
-            <option value="spa">Spanish</option>
-          </select>
+          <Select className="form-input" value={ocrLanguage} onChange={setOcrLanguage} options={OCR_LANGUAGES} ariaLabel="OCR language" />
         </label>}
       </div>}
       <div className="modal-note"><Activity size={15}/><span>Automatic hybrid is the best starting point for mixed real-world PDFs: it keeps complex pages on their original coordinates and uses normal Word structure only where it is safer. Layout-preserving and automatic modes use high-resolution artwork only for complex decoration, mask reconstructed table/photo regions out of that artwork, and place editable text, native tables, and individual pictures separately; OCR is limited to scan-only or nearly textless pages to avoid damaging text inside screenshots. Visual replica is the most reliable for exact appearance but is image-only. PDF Studio does not use Acrobat’s proprietary converter, so embedded fonts, unusual graphics, handwriting and OCR may still require review; a universal 100% editable match cannot be guaranteed for every PDF.</span></div>

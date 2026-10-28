@@ -191,12 +191,6 @@ function App() {
     setExportCompression,
     exportPassword,
     setExportPassword,
-    splitMode,
-    setSplitMode,
-    splitEvery,
-    setSplitEvery,
-    splitRanges,
-    setSplitRanges,
     doExportPdf,
     convertToWord,
     compressPdfFile,
@@ -266,9 +260,11 @@ function App() {
 
   const startTool = (tool) => {
   if (tool.action === 'word') startWordConversion();
-  else if (tool.action === 'images') { if (!pages.length) chooseFiles('pdf'); else setModal({ type: 'images' }); }
+  else if (tool.action === 'images') { if (!accessLockedRef.current) setModal({ type: 'images' }); }
   else if (tool.action === 'imagesToPdf') { setMode('workspace'); chooseFiles('images'); }
   else if (tool.action === 'compress') setModal({ type: 'compress' });
+  else if (tool.action === 'imageConvert') { if (!accessLockedRef.current) setModal({ type: 'imageConvert' }); }
+  else if (tool.action === 'imageText') { if (!accessLockedRef.current) setModal({ type: 'imageText' }); }
   else { setMode(tool.mode || 'workspace'); if (!pages.length && tool.mode !== 'edit') chooseFiles(); }
   };
 
@@ -295,7 +291,7 @@ function App() {
     </motion.div>
     <LoadingOverlay isLoading={isLoading} loadingLabel={loadingLabel} />
     <Toast toast={toast} setToast={setToast} />
-    <ModalHost hideGuide={preferences.hideGuide} setHideGuide={setHideGuide} pages={pages} sources={sourcesRef.current} mode={mode} guideStep={guideStep} setGuideStep={setGuideStep} chooseFiles={chooseFiles} readyUpdate={readyUpdate} applyingUpdate={applyingUpdate} modal={modal} textValue={textValue} textColor={textColor} textSize={textSize} coverColor={coverColor} exportTitle={exportTitle} exportAuthor={exportAuthor} exportPageNumbers={exportPageNumbers} exportWatermarkMode={exportWatermarkMode} exportWatermark={exportWatermark} exportWatermarkOpacity={exportWatermarkOpacity} exportWatermarkAngle={exportWatermarkAngle} exportWatermarkColor={exportWatermarkColor} exportPaperSize={exportPaperSize} exportCompression={exportCompression} exportPassword={exportPassword} splitMode={splitMode} splitEvery={splitEvery} splitRanges={splitRanges} imageFormat={imageFormat} imageQuality={imageQuality} appVersion={appVersion} selectedPages={selectedPages} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setMode={setMode} setSettingsTab={setSettingsTab} setModal={setModal} setTextValue={setTextValue} setTextColor={setTextColor} setTextSize={setTextSize} setCoverColor={setCoverColor} setExportTitle={setExportTitle} setExportAuthor={setExportAuthor} setExportPageNumbers={setExportPageNumbers} setExportWatermarkMode={setExportWatermarkMode} setExportWatermark={setExportWatermark} setExportWatermarkOpacity={setExportWatermarkOpacity} setExportWatermarkAngle={setExportWatermarkAngle} setExportWatermarkColor={setExportWatermarkColor} setExportPaperSize={setExportPaperSize} setExportCompression={setExportCompression} setExportPassword={setExportPassword} setSplitMode={setSplitMode} setSplitEvery={setSplitEvery} setSplitRanges={setSplitRanges} setImageFormat={setImageFormat} setImageQuality={setImageQuality} deleteSelected={deleteSelected} requestDeleteSelected={requestDeleteSelected} rotateSelected={rotateSelected} duplicateSelected={duplicateSelected} addTextOverlay={addTextOverlay} addCoverOverlay={addCoverOverlay} doExportPdf={doExportPdf} convertToWord={convertToWord} compressPdfFile={compressPdfFile} convertToImages={convertToImages} splitPdf={splitPdf} deferReadyUpdate={deferReadyUpdate} applyReadyUpdate={applyReadyUpdate} notify={notify} />
+    <ModalHost workspaceName={documents.length === 1 ? documents[0].name.replace(/\.[^.]+$/, '') : (exportTitle || '')} workspacePath={documents.length === 1 ? (documents[0].path || '') : ''} hideGuide={preferences.hideGuide} setHideGuide={setHideGuide} pages={pages} sources={sourcesRef.current} mode={mode} guideStep={guideStep} setGuideStep={setGuideStep} chooseFiles={chooseFiles} readyUpdate={readyUpdate} applyingUpdate={applyingUpdate} modal={modal} textValue={textValue} textColor={textColor} textSize={textSize} coverColor={coverColor} exportTitle={exportTitle} exportAuthor={exportAuthor} exportPageNumbers={exportPageNumbers} exportWatermarkMode={exportWatermarkMode} exportWatermark={exportWatermark} exportWatermarkOpacity={exportWatermarkOpacity} exportWatermarkAngle={exportWatermarkAngle} exportWatermarkColor={exportWatermarkColor} exportPaperSize={exportPaperSize} exportCompression={exportCompression} exportPassword={exportPassword} imageFormat={imageFormat} imageQuality={imageQuality} appVersion={appVersion} selectedPages={selectedPages} setSelectedIds={setSelectedIds} setActiveId={setActiveId} setMode={setMode} setSettingsTab={setSettingsTab} setModal={setModal} setTextValue={setTextValue} setTextColor={setTextColor} setTextSize={setTextSize} setCoverColor={setCoverColor} setExportTitle={setExportTitle} setExportAuthor={setExportAuthor} setExportPageNumbers={setExportPageNumbers} setExportWatermarkMode={setExportWatermarkMode} setExportWatermark={setExportWatermark} setExportWatermarkOpacity={setExportWatermarkOpacity} setExportWatermarkAngle={setExportWatermarkAngle} setExportWatermarkColor={setExportWatermarkColor} setExportPaperSize={setExportPaperSize} setExportCompression={setExportCompression} setExportPassword={setExportPassword} setImageFormat={setImageFormat} setImageQuality={setImageQuality} deleteSelected={deleteSelected} requestDeleteSelected={requestDeleteSelected} rotateSelected={rotateSelected} duplicateSelected={duplicateSelected} addTextOverlay={addTextOverlay} addCoverOverlay={addCoverOverlay} doExportPdf={doExportPdf} convertToWord={convertToWord} compressPdfFile={compressPdfFile} convertToImages={convertToImages} splitPdf={splitPdf} deferReadyUpdate={deferReadyUpdate} applyReadyUpdate={applyReadyUpdate} notify={notify} />
     </motion.div>
     <AnimatePresence>{access.locked && <AccessLockScreen key="access-lock" access={access} checking={accessChecking} notice={accessNotice} dark={dark} onRecheck={recheckAccess} onQuit={quitFromLock} />}</AnimatePresence>
     </MotionConfig>

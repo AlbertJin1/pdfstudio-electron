@@ -9,14 +9,14 @@ import {
   validatePdfBytes,
 } from '../src/services/pdf/compress.js';
 
-assert.deepEqual(Object.keys(COMPRESSION_PRESETS), ['lossless', 'high', 'balanced', 'small', 'smallest']);
+assert.deepEqual(Object.keys(COMPRESSION_PRESETS), ['lossless', 'high', 'balanced', 'small', 'smallest', 'ultra']);
 const packageManifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 const lockManifest = JSON.parse(await readFile(new URL('../package-lock.json', import.meta.url), 'utf8'));
 assert.ok(packageManifest.dependencies?.['compress-pdf-lib'], 'built-in object optimizer must be a production dependency');
 assert.equal(lockManifest.packages?.['node_modules/compress-pdf-lib']?.version, '1.0.5', 'lockfile must pin the tested image-object optimizer version');
 assert.equal(COMPRESSION_PRESETS.lossless.maxDimension, 2600);
-assert.equal(COMPRESSION_PRESETS.high.dpi, 300);
-assert.equal(COMPRESSION_PRESETS.smallest.quality, 0.48);
+assert.equal(COMPRESSION_PRESETS.high.dpi, 250);
+assert.equal(COMPRESSION_PRESETS.smallest.quality, 0.42);
 assert.equal(detectPdfSignatures(new Uint8Array(Buffer.from('%PDF-1.7\n<< /ByteRange [0 1 2 3] >>'))), true);
 assert.equal(detectPdfSignatures(new Uint8Array(Buffer.from('%PDF-1.7\nordinary document'))), false);
 
@@ -25,11 +25,11 @@ assert.equal(validatePdfBytes(new Uint8Array(Buffer.from('\u0000\u0001\u0002%PDF
 assert.equal(validatePdfBytes(new Uint8Array([1, 2, 3, 4, 5])), false);
 assert.deepEqual(
   (({ preset, resolutionDpi, quality, colorMode, preserveMetadata, includeAnnotations }) => ({ preset, resolutionDpi, quality, colorMode, preserveMetadata, includeAnnotations }))(normalizeCompressionOptions({})),
-  { preset: 'balanced', resolutionDpi: 200, quality: 0.76, colorMode: 'color', preserveMetadata: true, includeAnnotations: true },
+  { preset: 'balanced', resolutionDpi: 150, quality: 0.7, colorMode: 'color', preserveMetadata: true, includeAnnotations: true },
 );
 const normalized = normalizeCompressionOptions({ preset: 'high', resolutionDpi: 900, quality: 15, colorMode: 'invalid', preserveMetadata: false, includeAnnotations: false });
 assert.equal(normalized.resolutionDpi, 400);
-assert.equal(normalized.quality, 0.25);
+assert.equal(normalized.quality, 0.15);
 assert.equal(normalized.colorMode, 'color');
 assert.equal(normalized.preserveMetadata, false);
 assert.equal(normalized.includeAnnotations, false);

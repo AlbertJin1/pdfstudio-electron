@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Expand, ZoomIn, ZoomOut } from 'lucide-react';
 import ActionButton from '../components/common/ActionButton.jsx';
 import Modal from '../components/common/Modal.jsx';
@@ -11,6 +11,9 @@ const clampZoom = (value) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.round(va
 
 export default function PagePreviewModal({ pages, sources, modal, setModal, setActiveId, setSelectedIds }) {
   const [zoom, setZoom] = useState(1);
+  const [panning, setPanning] = useState(false);
+  const stageRef = useRef(null);
+  const panRef = useRef(null);
   const pageIndex = Math.max(0, pages.findIndex((page) => page.id === modal.pageId));
   const page = pages[pageIndex] || pages[0];
 
@@ -51,11 +54,45 @@ export default function PagePreviewModal({ pages, sources, modal, setModal, setA
 
   if (!pages.length || !page) return null;
 
-  const handleWheel = (event) => {
-    if (!(event.ctrlKey || event.metaKey)) return;
-    event.preventDefault();
-    if (event.deltaY < 0) zoomIn();
-    else if (event.deltaY > 0) zoomOut();
+  // Ctrl/Cmd + wheel zooms. Registered natively (non-passive) so the browser's own page zoom is blocked.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return undefined;
+    const onWheel = (event) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      event.preventDefault();
+      if (event.deltaY < 0) zoomIn();
+      else if (event.deltaY > 0) zoomOut();
+    };
+    stage.addEventListener('wheel', onWheel, { passive: false });
+    return () => stage.removeEventListener('wheel', onWheel);
+  }, [zoomIn, zoomOut, page?.id]);
+
+  // Hold the middle mouse button (or drag with the left button while zoomed in) to pan the page.
+  const canPan = () => { const stage = stageRef.current; return !!stage && (stage.scrollWidth > stage.clientWidth + 1 || stage.scrollHeight > stage.clientHeight + 1); };
+  const startPan = (event) => {
+    const middle = event.button === 1;
+    if (!middle && !(event.button === 0 && canPan())) return;
+    if (middle) event.preventDefault(); // stops the OS auto-scroll circle on middle press
+    if (!canPan()) return;
+    const stage = stageRef.current;
+    panRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, left: stage.scrollLeft, top: stage.scrollTop };
+    try { stage.setPointerCapture(event.pointerId); } catch { /* pointer may already be released */ }
+    setPanning(true);
+  };
+  const movePan = (event) => {
+    const pan = panRef.current;
+    if (!pan || pan.id !== event.pointerId) return;
+    const stage = stageRef.current;
+    stage.scrollLeft = pan.left - (event.clientX - pan.x);
+    stage.scrollTop = pan.top - (event.clientY - pan.y);
+  };
+  const endPan = (event) => {
+    const pan = panRef.current;
+    if (!pan || (event && pan.id !== event.pointerId)) return;
+    try { stageRef.current?.releasePointerCapture(pan.id); } catch { /* already released */ }
+    panRef.current = null;
+    setPanning(false);
   };
 
   return (
@@ -67,7 +104,7 @@ export default function PagePreviewModal({ pages, sources, modal, setModal, setA
       footer={<>
         <ActionButton icon={ChevronLeft} disabled={pageIndex <= 0} onClick={() => goToPage(pageIndex - 1)}>Previous page</ActionButton>
         <ActionButton icon={ChevronRight} disabled={pageIndex >= pages.length - 1} onClick={() => goToPage(pageIndex + 1)}>Next page</ActionButton>
-        <span className="page-preview-shortcut-help">← / → pages · + / − zoom · 0 or F fit · Esc close</span>
+        <span className="page-preview-shortcut-help">← / → pages · + / − zoom · 0 or F fit · hold middle mouse to pan · Esc close</span>
         <ActionButton variant="primary" onClick={() => setModal(null)}>Close viewer</ActionButton>
       </>}
     >
@@ -84,7 +121,7 @@ export default function PagePreviewModal({ pages, sources, modal, setModal, setA
             <button type="button" className="page-preview-fit-button" title="Fit entire page (0 or F)" onClick={fitPage}><Expand size={14} /> Fit page</button>
           </div>
         </div>
-        <div className={`page-preview-canvas-stage${zoom > 1 ? ' is-zoomed' : ''}`} onWheel={handleWheel}>
+        <div ref={stageRef} className={`page-preview-canvas-stage${zoom > 1 ? ' is-zoomed' : ''}${panning ? ' is-panning' : ''}`} onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onPointerCancel={endPan} onMouseDown={(event) => { if (event.button === 1) event.preventDefault(); }} onAuxClick={(event) => event.preventDefault()}>
           <PagePreview page={page} sources={sources} zoom={zoom} showQuickTools={false} fitToStage />
         </div>
       </div>
