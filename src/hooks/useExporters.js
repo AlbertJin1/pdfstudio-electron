@@ -84,7 +84,7 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
 
   const convertToWord = useCallback(async (request = 'editable') => {
     const conversionOptions = typeof request === 'string' ? { mode: request } : (request && typeof request === 'object' ? request : {});
-    const conversionMode = ['visual', 'layout'].includes(conversionOptions.mode) ? conversionOptions.mode : 'editable';
+    const conversionMode = ['auto', 'editable', 'layout', 'visual'].includes(conversionOptions.mode) ? conversionOptions.mode : 'auto';
     const standalone = conversionOptions.file?.bytes ? conversionOptions.file : null; // PDF picked directly for Word: never enters the workspace
     if (!standalone && !pages.length) return notify('Open a PDF before converting it to Word.', 'info');
     setIsLoading(true); setLoadingLabel('Reading PDF layout and text');
@@ -94,7 +94,7 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
         mode: conversionMode,
         ocrEnabled: conversionOptions.ocrEnabled !== false,
         ocrLanguage: conversionOptions.ocrLanguage || 'eng',
-        onProgress: ({ page, pages: total, phase, profile }) => setLoadingLabel(phase === 'building' ? 'Building native Word elements' : phase === 'ocr' ? `OCR · page ${page} of ${total}` : phase === 'validation' ? 'Verifying Word package and text' : (profile || `Reconstructing page ${page} of ${total}`)),
+        onProgress: ({ page, pages: total, phase, profile }) => setLoadingLabel(phase === 'building' ? (profile || 'Building Word document') : phase === 'ocr' ? `OCR · page ${page} of ${total}` : phase === 'validation' ? 'Verifying Word package and text' : (profile || `Reconstructing page ${page} of ${total}`)),
       });
       const baseName = (standalone ? standalone.name.replace(/\.[^.]+$/, '') : exportTitle || (documents.length === 1 ? documents[0].name.replace(/\.[^.]+$/, '') : 'PDF-Studio-converted')).replace(/[\\/:*?"<>|]/g, '-').slice(0, 100);
       const result = window.pdfStudio?.saveFile ? await window.pdfStudio.saveFile({ name: `${baseName}.docx`, data: conversion.bytes, filters: [{ name: 'Word document', extensions: ['docx'] }] }) : await saveInBrowser(conversion.bytes, `${baseName}.docx`, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');

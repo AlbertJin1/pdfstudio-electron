@@ -582,6 +582,39 @@ function detectGridTables(imageData, width, height, scale, items) {
 
 
 /**
+ * Returns a compact profile of a detected table candidate. A real table can have many rows, but
+ * hundreds of very narrow columns usually mean the detector has grouped independent form controls
+ * (date boxes, number boxes, checkbox rows) into a single page-wide table. Emitting such a grid can
+ * explode DOCX XML size and causes some versions of Word to reject or badly render the file.
+ */
+function tableComplexityProfile(table, pageWidth = 0) {
+  const xEdges = Array.isArray(table?.xEdges) ? table.xEdges.map(Number).filter(Number.isFinite) : [];
+  const yEdges = Array.isArray(table?.yEdges) ? table.yEdges.map(Number).filter(Number.isFinite) : [];
+  const columns = Math.max(0, xEdges.length - 1);
+  const rows = Math.max(0, yEdges.length - 1);
+  const cells = (table?.cells || []).reduce((sum, row) => sum + (Array.isArray(row) ? row.length : 0), 0);
+  const tableWidth = xEdges.length >= 2 ? Math.max(0, xEdges[xEdges.length - 1] - xEdges[0]) : Math.max(0, Number(table?.right) - Number(table?.left));
+  const averageColumnWidth = columns ? tableWidth / columns : 0;
+  const pageCoverage = Number(pageWidth) > 0 ? tableWidth / Number(pageWidth) : 0;
+  const hasExcessiveColumns = columns > 48;
+  const hasPathologicalCellCount = cells > 1400 || rows > 120;
+  const resemblesMergedFormControls = columns > 24 && averageColumnWidth < 5.2 && pageCoverage >= 0.45;
+  return {
+    columns,
+    rows,
+    cells,
+    tableWidth,
+    averageColumnWidth,
+    pageCoverage,
+    suspicious: hasExcessiveColumns || hasPathologicalCellCount || resemblesMergedFormControls,
+  };
+}
+
+function needsLayoutPreservingFallback(tables, pageWidth = 0) {
+  return (tables || []).some((table) => tableComplexityProfile(table, pageWidth).suspicious);
+}
+
+/**
  * Reconstructs clearly ruled tables as normal Word tables, including rows whose cells are merged.
  * Unlike the layout-preserving detector, this detector does not require every vertical rule to run
  * through every row; that requirement incorrectly rejects common forms and report templates.
@@ -820,7 +853,10 @@ function collectPageImageRegions(operatorList, viewport, pdfjsLib) {
     const height = bottom - top;
     const area = width * height;
     const pageArea = Math.max(1, viewport.width * viewport.height);
-    if (!Number.isFinite(left + top + width + height) || width < 18 || height < 14 || area < 420 || area > pageArea * 0.78) continue;
+    // Signatures, initials, check marks and small ID photos are often legitimate placed image XObjects.
+    // The previous 18x14 pt / 420 pt² floor discarded many of these and left them baked into a page bitmap.
+    // Keep small but real image objects; the minimum area check still filters single-pixel artifacts.
+    if (!Number.isFinite(left + top + width + height) || width < 6 || height < 5 || area < 50 || area > pageArea * 0.78) continue;
     regions.push({ x: Math.max(0, left), y: Math.max(0, top), width, height, source: 'pdf-image-object' });
   }
 
@@ -859,7 +895,7 @@ function collectPageImageRegions(operatorList, viewport, pdfjsLib) {
       if (edge > region.x + 8 && edge < originalRight - 2) region.width = edge - region.x;
     }
   }
-  return unique.filter((region) => region.width >= 14 && region.height >= 12).slice(0, 64).sort((a, b) => a.y - b.y || a.x - b.x);
+  return unique.filter((region) => region.width >= 6 && region.height >= 5).slice(0, 128).sort((a, b) => a.y - b.y || a.x - b.x);
 }
 
 /** Keeps placed image objects eligible for asset extraction even when native text overlaps them.
@@ -867,13 +903,13 @@ function collectPageImageRegions(operatorList, viewport, pdfjsLib) {
  * while ordinary photos with real overlaid captions use the normal render. Excluding the entire banner here would
  * lose its rules/fills/logo fragments instead of preserving those graphics with the heading rebuilt as Word text. */
 function filterSemanticImageRegions(regions, viewport, nativeItems, pdfjsLib) {
-  return (regions || []).filter((region) => region.width >= 14 && region.height >= 12
+  return (regions || []).filter((region) => region.width >= 6 && region.height >= 5
     && Number.isFinite(region.x + region.y + region.width + region.height))
-    .slice(0, 64)
+    .slice(0, 128)
     .sort((a, b) => a.y - b.y || a.x - b.x);
 }
 
-function getImageOverlayTextItems(region, textGeometry) {
+function getImageOverlayTextItems(region, textGeometry, minRatio = 0.3) {
   const left = Number(region?.x) || 0;
   const top = Number(region?.y) || 0;
   const right = left + Math.max(0, Number(region?.width) || 0);
@@ -888,7 +924,7 @@ function getImageOverlayTextItems(region, textGeometry) {
     const intersection = Math.max(0, Math.min(right, itemRight) - Math.max(left, itemLeft))
       * Math.max(0, Math.min(bottom, itemBottom) - Math.max(top, itemTop));
     const itemArea = Math.max(1, (itemRight - itemLeft) * (itemBottom - itemTop));
-    return intersection / itemArea >= 0.3;
+    return intersection / itemArea >= minRatio;
   });
 }
 
@@ -896,8 +932,12 @@ function imageRegionHasTextOverlay(region, textGeometry) {
   return getImageOverlayTextItems(region, textGeometry).length > 0;
 }
 
+// Text only counts as "burned into" a picture when it sits (almost) entirely inside it. A signature or logo that just
+// grazes a caption/name must not swallow that text: it stays editable and the picture is cropped text-free.
+const BAKED_TEXT_MIN_INSIDE = 0.8;
+
 function shouldCropImageFromNormalRender(region, pageWidth, pageHeight, textGeometry) {
-  const overlayItems = getImageOverlayTextItems(region, textGeometry);
+  const overlayItems = getImageOverlayTextItems(region, textGeometry, BAKED_TEXT_MIN_INSIDE);
   if (!overlayItems.length) return false;
   // Text that cannot safely be rebuilt as editable text must stay baked into its image region, even when
   // the region is a wide banner. For supported text, broad header composites are cropped text-free and rebuilt.
@@ -989,8 +1029,33 @@ function makeRun(item, TextRun, outputScale = 1) {
   });
 }
 
+// PDF producers often split one word into several text fragments (kerning pairs, ligatures, "ref"+"er"). Joining
+// them with tab stops breaks the word in Word (search, spell-check, copy/paste). Fragments with the same style whose
+// gap is far smaller than a space are fused back into a single run; real gaps keep their exact tab position.
+function fuseAdjacentFragments(items) {
+  const fused = [];
+  for (const item of items) {
+    const previous = fused[fused.length - 1];
+    if (previous && previous.source !== 'ocr' && item.source !== 'ocr') {
+      const gap = item.x - (previous.x + previous.width);
+      const size = Math.max(previous.fontSize || 0, item.fontSize || 0) || 10;
+      const sameStyle = previous.wordFont === item.wordFont && Boolean(previous.bold) === Boolean(item.bold)
+        && Boolean(previous.italic) === Boolean(item.italic) && Math.abs((previous.fontSize || 0) - (item.fontSize || 0)) < 0.6
+        && (previous.textColor || '') === (item.textColor || '') && Math.abs((previous.baseline || 0) - (item.baseline || 0)) < size * 0.25;
+      const tail = String(previous.text || '').slice(-1);
+      const head = String(item.text || '').slice(0, 1);
+      if (sameStyle && gap > -size * 0.35 && gap < size * 0.14 && /\S/.test(tail) && /\S/.test(head)) {
+        fused[fused.length - 1] = { ...previous, text: `${previous.text}${item.text}`, width: Math.max(previous.width, item.x + item.width - previous.x), bottom: Math.max(previous.bottom, item.bottom), top: Math.min(previous.top, item.top) };
+        continue;
+      }
+    }
+    fused.push(item);
+  }
+  return fused;
+}
+
 function makeEditableLayout(row, pageWidth, outputScale = 1, { excludeTableItems = true } = {}) {
-  const items = row.items.filter((item) => !item.keepInArtwork && (!excludeTableItems || !item.tableCellKey)).sort((a, b) => a.x - b.x);
+  const items = fuseAdjacentFragments(row.items.filter((item) => !item.keepInArtwork && (!excludeTableItems || !item.tableCellKey)).sort((a, b) => a.x - b.x));
   if (!items.length) return { runs: [], tabStops: [], items: [] };
   const tabStops = items.slice(1).map((item) => ({
     type: 'left', position: twips(clamp((item.x - row.minX) * outputScale, 0, Math.max(0, pageWidth - row.minX) * outputScale)),
@@ -1074,7 +1139,7 @@ function makeTextFreeFilter(pdfjsLib) {
 
 // Text pixels = pixels that differ between the full render and the text-free render. The true glyph colour is
 // the colour of the pixels that differ the most (the solid glyph core), not an average with anti-aliased edges.
-function sampleGlyphColorFromDifference(fullData, artData, width, height, item, scale) {
+function sampleGlyphColorFromDifference(fullData, artData, width, height, item, scale, minDistance = 60, minSamples = 1) {
   const mask = item.mask;
   const left = Math.round(clamp(mask.x * scale, 0, width - 1));
   const top = Math.round(clamp(mask.y * scale, 0, height - 1));
@@ -1085,17 +1150,17 @@ function sampleGlyphColorFromDifference(fullData, artData, width, height, item, 
     for (let x = left; x < right; x += 1) {
       const offset = (y * width + x) * 4;
       const distance = Math.abs(fullData[offset] - artData[offset]) + Math.abs(fullData[offset + 1] - artData[offset + 1]) + Math.abs(fullData[offset + 2] - artData[offset + 2]);
-      if (distance > 60) samples.push([distance, fullData[offset], fullData[offset + 1], fullData[offset + 2]]);
+      if (distance > minDistance) samples.push([distance, fullData[offset], fullData[offset + 1], fullData[offset + 2]]);
     }
   }
-  if (!samples.length) return null;
+  if (samples.length < minSamples) return null;
   samples.sort((a, b) => b[0] - a[0]);
   const core = samples.slice(0, Math.max(3, Math.ceil(samples.length * 0.3)));
   return toHex([1, 2, 3].map((channel) => core.reduce((sum, sample) => sum + sample[channel], 0) / core.length));
 }
 
 async function renderPageBackdrop(page, baseViewport, nativeItems, options = {}) {
-  const { editable = true, maxDimension = 2600, imageType = 'jpg', onProgress = () => {}, pageIndex = 1, pages = 1, pdfjsLib, ocrEnabled = false, ocrLanguage = 'eng', shouldOcr = false, detectTables = false, semanticTables = false, imageRegions: imageRegionCandidates = [], captureOriginalImage = false } = options;
+  const { editable = true, maxDimension = 2600, imageType = 'jpg', onProgress = () => {}, pageIndex = 1, pages = 1, pdfjsLib, ocrEnabled = false, ocrLanguage = 'eng', shouldOcr = false, detectTables = false, semanticTables = false, imageRegions: imageRegionCandidates = [], captureOriginalImage = false, maskEditableRegions = false } = options;
   const scale = Math.min(4.0, maxDimension / Math.max(baseViewport.width, baseViewport.height));
   const viewport = page.getViewport({ scale });
   const canvas = document.createElement('canvas');
@@ -1121,11 +1186,9 @@ async function renderPageBackdrop(page, baseViewport, nativeItems, options = {})
   const normalRenderImageRegions = semanticTables && imageRegionCandidates.length
     ? imageRegionCandidates.filter((image) => shouldCropImageFromNormalRender(image, baseViewport.width, baseViewport.height, cropTextGeometry))
     : imageRegionCandidates;
-  const isInsideNormalRenderImage = (item) => normalRenderImageRegions.some((image) => {
-    const centerX = item.x + item.width / 2;
-    const centerY = item.top + (item.bottom - item.top) / 2;
-    return centerX >= image.x && centerX <= image.x + image.width && centerY >= image.y && centerY <= image.y + image.height;
-  });
+  const isInsideNormalRenderImage = (item) => normalRenderImageRegions.some((image) => (
+    getImageOverlayTextItems(image, [item], BAKED_TEXT_MIN_INSIDE).length > 0
+  ));
   // Only suppress text that remains visible in a photo crop. Text on a text-free banner crop is reconstructed
   // separately as editable content, so removing it from the text stream would make it disappear entirely.
   const directGeometry = semanticTables && imageRegionCandidates.length
@@ -1135,7 +1198,7 @@ async function renderPageBackdrop(page, baseViewport, nativeItems, options = {})
     ? ocr.words.filter((word) => !isInsideNormalRenderImage(getOcrGeometry(word, scale)))
     : ocr.words;
   const hybrid = mergeHybridText(directGeometry, ocrWordsForDocument, scale);
-  const geometryItems = hybrid.items;
+  let geometryItems = hybrid.items;
   for (const item of geometryItems) item.characterSpacingPt = estimateCharacterSpacing(item);
 
   const textFreeFilter = makeTextFreeFilter(pdfjsLib);
@@ -1174,8 +1237,9 @@ async function renderPageBackdrop(page, baseViewport, nativeItems, options = {})
     ? (semanticTables ? detectFlowTables(sourceImageData, canvas.width, canvas.height, scale, geometryItems) : detectGridTables(sourceImageData, canvas.width, canvas.height, scale, geometryItems))
     : [];
   if (semanticTables && imageAssets.length && tables.length) attachFlowImagesToTables(imageAssets, tables);
-  const grouped = groupTextIntoLines(geometryItems);
-  const rows = grouped.rows;
+  let grouped = groupTextIntoLines(geometryItems);
+  let rows = grouped.rows;
+  let hiddenTextSpans = 0;
 
   // Preferred path: draw the page again with the PDF's own text-drawing operators removed. The result is the exact
   // artwork (rules, fills, logos, signatures, photos) with no text, so nothing has to be painted over and no
@@ -1197,6 +1261,21 @@ async function renderPageBackdrop(page, baseViewport, nativeItems, options = {})
         await page.render({ canvasContext: context, viewport, background: '#ffffff', intent: 'print', operationsFilter: textFreeFilter }).promise;
         artworkData = context.getImageData(0, 0, canvas.width, canvas.height);
       }
+      // Text that leaves no pixels (white-on-white, clipped away, or covered by a later opaque shape) is invisible
+      // in the PDF viewer and must not show up in Word. Acrobat drops it too; keeping it printed stray fragments such as
+      // "(V01, 07/2017)" or "MEMBER 'S P" on top of the form.
+      const visibleItems = [];
+      for (const item of geometryItems) {
+        const color = sampleGlyphColorFromDifference(sourceImageData.data, artworkData.data, canvas.width, canvas.height, item, scale, 24, 2);
+        if (!color && !item.keepInArtwork && /\S/.test(item.text || '') && item.source !== 'ocr') { hiddenTextSpans += 1; continue; }
+        visibleItems.push(item);
+      }
+      if (hiddenTextSpans) {
+        geometryItems = visibleItems;
+        for (const table of tables) for (const tableRow of table.cells || []) for (const cell of tableRow || []) cell.items = (cell.items || []).filter((item) => visibleItems.includes(item));
+        grouped = groupTextIntoLines(geometryItems);
+        rows = grouped.rows;
+      }
       for (const item of geometryItems) {
         const color = sampleGlyphColorFromDifference(sourceImageData.data, artworkData.data, canvas.width, canvas.height, item, scale);
         if (color) item.textColor = color;
@@ -1216,16 +1295,45 @@ async function renderPageBackdrop(page, baseViewport, nativeItems, options = {})
     onProgress({ phase: 'layout', page: pageIndex, pages, profile: 'Rebuilding editable text layer' });
     masks = maskTextAreas(sourceImageData, canvas.width, canvas.height, rows, scale, context);
   }
-  // When the image-crop render was reused for text extraction, transfer the text-free pixels back to the page
-  // canvas before exporting the backdrop. The comparison rendering below must never be included in this asset.
+  // Restore text-free artwork before quality comparison. Keep an unmodified copy because the comparison
+  // pass draws editable text into the canvas and native table/photo regions must be masked only afterwards.
   if (artworkData) context.putImageData(artworkData, 0, 0);
-  const bytes = await blobBytes(canvas, imageType === 'png' ? 'image/png' : 'image/jpeg', imageType === 'png' ? undefined : 0.97);
+  const cleanArtwork = context.getImageData(0, 0, canvas.width, canvas.height);
   let visualSimilarity = null;
   if (editable && masks.length) {
     drawTextForComparison(context, rows, scale);
     const reconstructed = context.getImageData(0, 0, canvas.width, canvas.height).data;
     visualSimilarity = compareTextRegions(sourceImageData.data, reconstructed, canvas.width, masks);
+    context.putImageData(cleanArtwork, 0, 0);
   }
+
+  // In layout-preserving Word mode the full-page image is only a carrier for complex vector art and
+  // unrecognized decoration. Blank out any region that will be a real Word object, otherwise users see
+  // an editable table/photo sitting directly on top of a duplicate raster copy of the same content.
+  if (maskEditableRegions) {
+    const safeTables = tables.length && !needsLayoutPreservingFallback(tables, baseViewport.width) ? tables : [];
+    context.fillStyle = '#FFFFFF';
+    for (const table of safeTables) {
+      const pad = 1.0;
+      const left = Math.round(clamp((table.left - pad) * scale, 0, canvas.width));
+      const top = Math.round(clamp((table.top - pad) * scale, 0, canvas.height));
+      const right = Math.round(clamp((table.right + pad) * scale, left, canvas.width));
+      const bottom = Math.round(clamp((table.bottom + pad) * scale, top, canvas.height));
+      if (right > left && bottom > top) context.fillRect(left, top, right - left, bottom - top);
+    }
+    for (const image of imageAssets) {
+      const coveredByNativeTable = safeTables.some((table) => image.x >= table.left - 1 && image.y >= table.top - 1
+        && image.x + image.width <= table.right + 1 && image.y + image.height <= table.bottom + 1);
+      if (coveredByNativeTable) continue;
+      const pad = 0.6;
+      const left = Math.round(clamp((image.x - pad) * scale, 0, canvas.width));
+      const top = Math.round(clamp((image.y - pad) * scale, 0, canvas.height));
+      const right = Math.round(clamp((image.x + image.width + pad) * scale, left, canvas.width));
+      const bottom = Math.round(clamp((image.y + image.height + pad) * scale, top, canvas.height));
+      if (right > left && bottom > top) context.fillRect(left, top, right - left, bottom - top);
+    }
+  }
+  const bytes = await blobBytes(canvas, imageType === 'png' ? 'image/png' : 'image/jpeg', imageType === 'png' ? undefined : 0.97);
   canvas.width = 0;
   canvas.height = 0;
   if (textFreeCanvas) { textFreeCanvas.width = 0; textFreeCanvas.height = 0; }
@@ -1247,6 +1355,7 @@ async function renderPageBackdrop(page, baseViewport, nativeItems, options = {})
     editableSpans: geometryItems.filter((item) => !item.keepInArtwork).length,
     imageObjectCount: 0,
     textOperatorsRemoved: Boolean(artworkData),
+    hiddenTextSpans,
     sourceImageData,
     sourceText: geometryItems.map((item) => item.text).filter(Boolean).join('\n'),
   };
@@ -1265,6 +1374,29 @@ function makePageImageRun(pageImage, viewport, ImageRun, outputScale = 1) {
       lockAnchor: true,
       layoutInCell: true,
     },
+  });
+}
+
+function makePlacedImageParagraph(image, docxApi, outputScale = 1) {
+  const width = Math.max(1, Math.round(image.width * outputScale * 4 / 3));
+  const height = Math.max(1, Math.round(image.height * outputScale * 4 / 3));
+  const run = new docxApi.ImageRun({
+    data: image.data,
+    type: image.type || 'jpg',
+    transformation: { width, height },
+    floating: {
+      horizontalPosition: { relative: 'page', offset: pointsToEmu(image.x * outputScale) },
+      verticalPosition: { relative: 'page', offset: pointsToEmu(image.y * outputScale) },
+      behindDocument: false,
+      allowOverlap: true,
+      lockAnchor: true,
+      layoutInCell: true,
+    },
+  });
+  return new docxApi.Paragraph({
+    children: [run],
+    spacing: { before: 0, after: 0, line: 1, lineRule: 'exact' },
+    widowControl: false,
   });
 }
 
@@ -1308,19 +1440,34 @@ function buildCellLineParagraphs(cell, Paragraph, TextRun, outputScale) {
   });
 }
 
-function buildNativeTable(table, docxApi, outputScale) {
+function buildNativeTable(table, docxApi, outputScale, { visibleBorders = false, includeImages = true } = {}) {
   const { Table, TableRow, TableCell, Paragraph, TextRun } = docxApi;
   const noBorder = { style: 'none', size: 0, color: 'FFFFFF' };
-  const borders = { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder, insideHorizontal: noBorder, insideVertical: noBorder };
+  const visibleBorder = { style: 'single', size: 4, color: '777777' };
+  const edge = visibleBorders ? visibleBorder : noBorder;
+  const borders = { top: edge, bottom: edge, left: edge, right: edge, insideHorizontal: edge, insideVertical: edge };
   const columnWidths = table.xEdges.slice(1).map((edge, index) => Math.max(1, twips((edge - table.xEdges[index]) * outputScale)));
   const rows = table.cells.map((cellRow, rowIndex) => new TableRow({
-    children: cellRow.map((cell, colIndex) => new TableCell({
-      children: buildCellLineParagraphs(cell, Paragraph, TextRun, outputScale),
-      width: { size: columnWidths[colIndex], type: 'dxa' },
-      margins: { top: 0, bottom: 0, left: 0, right: 0 },
-      verticalAlign: 'top',
-      borders,
-    })),
+    children: cellRow.map((cell, colIndex) => {
+      const colStart = Number.isInteger(cell.colStart) ? cell.colStart : colIndex;
+      const colSpan = Math.max(1, Number(cell.colSpan) || 1);
+      const cellWidth = columnWidths.slice(colStart, colStart + colSpan).reduce((sum, value) => sum + value, 0) || columnWidths[colIndex] || 1;
+      const textParagraphs = buildCellLineParagraphs(cell, Paragraph, TextRun, outputScale);
+      const imageParagraphs = includeImages && Array.isArray(cell.images) && cell.images.length
+        ? buildFlowImageParagraphGroups(cell.images, docxApi, outputScale, Math.max(12, cell.width - 4), { before: 0, after: 0 }).map((block) => block.paragraph)
+        : [];
+      // Keep signatures and other placed assets as independent Word drawings inside their corresponding table cells.
+      const children = [...textParagraphs, ...imageParagraphs];
+      if (!children.length) children.push(new Paragraph({ children: [], spacing: { before: 0, after: 0, line: 1, lineRule: 'exact' } }));
+      return new TableCell({
+        children,
+        width: { size: cellWidth, type: 'dxa' },
+        ...(colSpan > 1 ? { columnSpan: colSpan } : {}),
+        margins: { top: 0, bottom: 0, left: 0, right: 0 },
+        verticalAlign: 'top',
+        borders,
+      });
+    }),
     height: { value: Math.max(1, twips((table.yEdges[rowIndex + 1] - table.yEdges[rowIndex]) * outputScale)), rule: 'atLeast' },
   }));
   return new Table({
@@ -2009,6 +2156,50 @@ function assertXmlWellFormed(xml, label) {
   }
 }
 
+function getWordTableGridColumnCounts(documentXml) {
+  return [...String(documentXml).matchAll(/<w:tblGrid\b[^>]*>([\s\S]*?)<\/w:tblGrid>/g)]
+    .map((match) => (match[1].match(/<w:gridCol\b/g) || []).length);
+}
+
+function normalizePackagePath(value) {
+  const stack = [];
+  for (const segment of String(value || '').replace(/\\/g, '/').split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') stack.pop();
+    else stack.push(segment);
+  }
+  return stack.join('/');
+}
+
+function parseXmlAttributes(xmlTag) {
+  const attributes = {};
+  for (const match of String(xmlTag).matchAll(/([A-Za-z_:][\w:.-]*)\s*=\s*(["'])(.*?)\2/g)) attributes[match[1]] = match[3];
+  return attributes;
+}
+
+async function validateDocxPackageRelationships(zip) {
+  let relationshipCount = 0;
+  for (const entry of Object.values(zip.files).filter((file) => !file.dir && file.name.endsWith('.rels'))) {
+    const xml = await entry.async('string');
+    assertXmlWellFormed(xml, entry.name);
+    const sourceDirectory = entry.name === '_rels/.rels' ? '' : (entry.name.match(/^(.*)\/_rels\/[^/]+\.rels$/)?.[1] || '');
+    const seenIds = new Set();
+    for (const match of xml.matchAll(/<Relationship\b[^>]*\/?\s*>/g)) {
+      const relationship = parseXmlAttributes(match[0]);
+      if (!relationship.Id || !relationship.Target || !relationship.Type) throw new Error(`The Word package contains an incomplete relationship in ${entry.name}.`);
+      if (seenIds.has(relationship.Id)) throw new Error(`The Word package contains duplicate relationship ID ${relationship.Id} in ${entry.name}.`);
+      seenIds.add(relationship.Id);
+      relationshipCount += 1;
+      if (relationship.TargetMode === 'External') continue;
+      const target = relationship.Target.startsWith('/')
+        ? normalizePackagePath(relationship.Target.slice(1))
+        : normalizePackagePath([sourceDirectory, relationship.Target].filter(Boolean).join('/'));
+      if (!zip.file(target)) throw new Error(`The Word package relationship in ${entry.name} points to missing part ${target}.`);
+    }
+  }
+  return relationshipCount;
+}
+
 async function finalizeAndValidateDocx(bytes, frames, expectedText, sourceText = expectedText, expectedReadingOrder = expectedText) {
   const module = await import('jszip');
   const JSZip = module.default || module;
@@ -2041,15 +2232,31 @@ async function finalizeAndValidateDocx(bytes, frames, expectedText, sourceText =
   }
   documentXml = ensureDrawingNamespaces(documentXml);
   zip.file('word/document.xml', documentXml);
+  // Guard against the exact failure seen in form-heavy PDFs: a false-positive detector can emit a
+  // table with well over a hundred grid columns. The adaptive layout path should prevent this; this
+  // final safety net refuses to ship a DOCX with an oversized generated table grid to Microsoft Word.
+  const tableGridColumnCounts = getWordTableGridColumnCounts(documentXml);
+  const maxTableGridColumns = Math.max(0, ...tableGridColumnCounts);
+  if (maxTableGridColumns > 64) {
+    throw new Error(`The generated Word document contains an unsafe table grid (${maxTableGridColumns} columns). The converter should preserve this page's layout instead of emitting a giant table; please retry with the latest PDF Studio build.`);
+  }
   const textAfterPatch = extractWordText(documentXml);
   const coverage = tokenCoverage(expectedText, textAfterPatch);
   const sourceCoverage = tokenCoverage(sourceText, textAfterPatch);
   const orderCoverage = readingOrderCoverage(expectedReadingOrder, textAfterPatch);
-  // Validate every required XML part, not just document.xml. This catches malformed content types,
-  // root relationships, styles, or document relationships before the file is handed to Word.
-  for (const partName of requiredParts) {
-    const xmlPart = await zip.file(partName).async('string');
-    assertXmlWellFormed(xmlPart, partName);
+  // Validate every XML/relationship part in the package, not just a short required-part list.
+  // Also verify internal relationship targets and content-type overrides, so a DOCX is not offered
+  // for download if it would ask Word to open a missing XML, image, style or header/footer part.
+  for (const entry of Object.values(zip.files).filter((file) => !file.dir && /\.(?:xml|rels)$/i.test(file.name))) {
+    const xmlPart = await entry.async('string');
+    assertXmlWellFormed(xmlPart, entry.name);
+  }
+  const relationshipCount = await validateDocxPackageRelationships(zip);
+  const contentTypesXml = await zip.file('[Content_Types].xml').async('string');
+  for (const match of contentTypesXml.matchAll(/<Override\b[^>]*\/>/g)) {
+    const attributes = parseXmlAttributes(match[0]);
+    const target = String(attributes.PartName || '').replace(/^\//, '');
+    if (!target || !zip.file(target)) throw new Error(`The Word package declares a content type for missing part ${target || '(empty target)'}.`);
   }
   if (frames.length && insertedFrames !== frames.length) throw new Error('Not all editable text blocks were placed in the Word document.');
   if (!/<w:document\b/.test(documentXml) || !/<w:body\b/.test(documentXml) || !/<\/w:document>/.test(documentXml)) throw new Error('The Word document XML failed structural validation.');
@@ -2058,6 +2265,11 @@ async function finalizeAndValidateDocx(bytes, frames, expectedText, sourceText =
   const referencedIds = [...documentXml.matchAll(/\b(?:r:id|r:embed|r:link)="([^"]+)"/g)].map((match) => match[1]);
   const danglingRelationships = referencedIds.filter((id) => !relationshipIds.has(id));
   if (danglingRelationships.length) throw new Error(`The Word file has missing image or hyperlink relationships (${danglingRelationships.length}).`);
+  // Report actual native object counts from the finished DOCX package, not only detector estimates.
+  // This helps catch regressions where detected tables or pictures were never written into Word.
+  const nativeWordTables = (documentXml.match(/<w:tbl(?=\s|>)/g) || []).length;
+  const embeddedImageReferences = (documentXml.match(/\br:embed="[^"]+"/g) || []).length;
+  const embeddedMediaFiles = Object.values(zip.files).filter((file) => !file.dir && file.name.startsWith('word/media/')).length;
   const finalBytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', compressionOptions: { level: 6 } });
   // Re-open the written package after serialization to catch corrupted ZIP records before offering it to the user.
   const roundTrip = await JSZip.loadAsync(finalBytes, { checkCRC32: true });
@@ -2068,6 +2280,13 @@ async function finalizeAndValidateDocx(bytes, frames, expectedText, sourceText =
       validPackage: true,
       roundTripZipValid: true,
       requiredPartsPresent: true,
+      xmlPartsWellFormed: true,
+      relationshipsValidated: true,
+      relationshipCount,
+      maxTableGridColumns,
+      nativeWordTables,
+      embeddedImageReferences,
+      embeddedMediaFiles,
       positionedTextFrames: insertedFrames,
       editableTextCoverage: coverage,
       sourceTextCoverage: sourceCoverage,
@@ -2110,20 +2329,67 @@ function countOperatorFeatures(operatorList, pdfjsLib) {
   return features;
 }
 
+function summarizePageForPreflight(content, viewport, pageIndex) {
+  const textItems = (content?.items || []).filter((item) => typeof item?.str === 'string' && item.str.trim());
+  const text = textItems.map((item) => item.str).join(' ');
+  return {
+    page: pageIndex,
+    width: Number(viewport?.width) || 0,
+    height: Number(viewport?.height) || 0,
+    nativeTextSpans: textItems.length,
+    nativeTextCharacters: text.replace(/\s+/g, '').length,
+    hasNativeText: textItems.length > 0,
+  };
+}
+
 /**
- * Hybrid PDF → DOCX conversion. Default editable mode reconstructs normal Word paragraphs, native
- * tables for detected ruled grids, and separate image assets. The optional layout mode retains the
- * legacy page-artwork/text-frame strategy, while visual mode keeps page images. OCR uses an optional
- * local Tesseract installation. Complex/ambiguous layouts remain heuristic; this is not Acrobat's
- * licensed semantic-conversion engine.
+ * Chooses the safest default conversion strategy for an individual page.
+ * PDFs made from forms, reports, screenshots, signatures or many vector rules are very
+ * sensitive to Word's reflow. For those pages we retain the original text-free artwork and
+ * place extracted text at the PDF coordinates. Only simple text-first pages use normal-flow
+ * Word paragraphs by default. An explicit user-selected mode always takes precedence.
+ */
+function chooseAutoPageMode({ requestedMode = 'auto', nativeTextSpans = 0, nativeTextCharacters = 0, operatorFeatures = {}, preflightPage = {} } = {}) {
+  const supportedModes = ['auto', 'editable', 'layout', 'visual'];
+  const chosen = supportedModes.includes(requestedMode) ? requestedMode : 'auto';
+  if (chosen !== 'auto') return chosen;
+
+  const spans = Math.max(0, Number(nativeTextSpans ?? preflightPage.nativeTextSpans) || 0);
+  const characters = Math.max(0, Number(nativeTextCharacters ?? preflightPage.nativeTextCharacters) || 0);
+  const images = Math.max(0, Number(operatorFeatures.imageObjects) || 0);
+  const paths = Math.max(0, Number(operatorFeatures.paths) || 0);
+  const vectors = Math.max(0, Number(operatorFeatures.vectorOperations) || 0);
+
+  // These are strong signs that normal-flow reconstruction could move labels, signatures,
+  // photos, page headers or cell contents away from their original positions.
+  if (spans === 0 || images > 0 || paths >= 8 || vectors >= 90 || spans >= 48 || characters >= 650) return 'layout';
+  return 'editable';
+}
+
+/** OCR is safest on scan-only (or effectively textless) pages. Running full-page OCR merely
+ * because a page contains a screenshot can mistake UI text inside that screenshot for document
+ * text, mask it out of the background artwork, and damage the screenshot. */
+function shouldRunPageOcr({ enabled = true, engineUnavailable = false, nativeTextSpans = 0, nativeTextCharacters = 0 } = {}) {
+  if (!enabled || engineUnavailable) return false;
+  return Math.max(0, Number(nativeTextSpans) || 0) === 0 || Math.max(0, Number(nativeTextCharacters) || 0) < 24;
+}
+
+/**
+ * Hybrid PDF → DOCX conversion. Conversion is deliberately split into a document-wide preflight
+ * analysis and a reconstruction pass. The preflight reads page geometry and native text before Word
+ * elements are emitted; the reconstruction pass then selects semantic tables/paragraphs where safe
+ * and preserves original page artwork with editable text frames for unusually dense form grids.
+ * OCR uses an optional local Tesseract installation. This is a local approximation, not Acrobat's
+ * proprietary conversion engine.
  */
 export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
   const docxApi = await import('docx');
   const { Document, Paragraph, TextRun, ImageRun, Table, TableRow, TableCell, Packer } = docxApi;
   const pdfjsLib = await getPdfJsLib();
   const pdf = pdfSource || await loadPdfSource(pdfBytes, options.password);
-  const mode = ['visual', 'layout'].includes(options.mode) ? options.mode : 'editable';
-  // Editable mode produces normal Word paragraphs/tables; layout mode retains the legacy fixed-page positioning.
+  const mode = ['auto', 'editable', 'layout', 'visual'].includes(options.mode) ? options.mode : 'auto';
+  // Auto is the default: use fixed-position text over clean page artwork for complex pages, and
+  // normal-flow paragraphs/tables only when the page looks safe to reflow in Word.
   const ocrEnabled = mode !== 'visual' && options.ocrEnabled !== false;
   const ocrLanguage = String(options.ocrLanguage || 'eng');
   const sections = [];
@@ -2144,14 +2410,41 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
   let ocrEngineUnavailable = false;
   const warnings = [];
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+  // Declared outside the try block: the summary is built during pass 1 but is also returned in the
+  // final result and quality report, which are assembled after the try/finally has closed.
+  let preflightSummary = { pages: 0, pagesWithNativeText: 0, pagesLikelyScanned: 0, nativeTextSpans: 0, nativeTextCharacters: 0 };
 
   try {
+    // Pass 1: read the complete document's page sizes and native text layer before constructing any
+    // Word sections. The second pass uses the resulting document profile to report progress and then
+    // performs detailed font/vector analysis, image extraction, table detection and DOCX generation.
+    const preflightPages = [];
     for (let pageIndex = 1; pageIndex <= pdf.numPages; pageIndex += 1) {
-      onProgress({ page: pageIndex, pages: pdf.numPages, phase: 'extracting' });
+      onProgress({ page: pageIndex, pages: pdf.numPages, phase: 'analysis', profile: `Analyzing source page ${pageIndex} of ${pdf.numPages}` });
+      const page = await pdf.getPage(pageIndex);
+      try {
+        const viewport = page.getViewport({ scale: 1 });
+        const content = await page.getTextContent({ includeMarkedContent: true, disableNormalization: true });
+        preflightPages.push(summarizePageForPreflight(content, viewport, pageIndex));
+      } finally {
+        page.cleanup?.();
+      }
+    }
+    preflightSummary = {
+      pages: preflightPages.length,
+      pagesWithNativeText: preflightPages.filter((page) => page.hasNativeText).length,
+      pagesLikelyScanned: preflightPages.filter((page) => !page.hasNativeText).length,
+      nativeTextSpans: preflightPages.reduce((sum, page) => sum + page.nativeTextSpans, 0),
+      nativeTextCharacters: preflightPages.reduce((sum, page) => sum + page.nativeTextCharacters, 0),
+    };
+    onProgress({ page: pdf.numPages, pages: pdf.numPages, phase: 'analysis-complete', profile: 'PDF analysis complete; preparing Word reconstruction' });
+
+    // Pass 2: each page is rebuilt using the preflight profile above. Operator-list loading precedes
+    // styled text extraction so PDF.js has loaded the embedded fonts before bold/italic are inferred.
+    for (let pageIndex = 1; pageIndex <= pdf.numPages; pageIndex += 1) {
+      onProgress({ page: pageIndex, pages: pdf.numPages, phase: 'extracting', profile: `Reconstructing analyzed page ${pageIndex} of ${pdf.numPages}` });
       const page = await pdf.getPage(pageIndex);
       const viewport = page.getViewport({ scale: 1 });
-      // Reading the operator list first makes pdf.js load every embedded font. Only then do the font objects
-      // report their real names and bold/italic flags, which is what keeps headings and labels bold in Word.
       let operatorList = null;
       let operatorFeatures = { imageObjects: 0, vectorOperations: 0, textOperations: 0, paths: 0 };
       try {
@@ -2173,21 +2466,64 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
       textItems += rawTextSpanCount;
       imageObjectsDetected += operatorFeatures.imageObjects;
       vectorOperationsDetected += operatorFeatures.vectorOperations;
-      // Run OCR on scanned or mixed pages: a blank text layer or any embedded image is enough to trigger a hybrid pass.
       const nativeCharacterCount = normalizedItems.reduce((sum, item) => sum + item.str.length, 0);
-      const shouldOcr = ocrEnabled && !ocrEngineUnavailable && (rawTextSpanCount === 0 || operatorFeatures.imageObjects > 0 || nativeCharacterCount < 24);
-      const maxDimension = Number.isFinite(options.maxImageDimension) ? clamp(options.maxImageDimension, 1400, 3600) : (mode === 'visual' ? 3200 : 2800);
-      const imageRegionCandidates = mode === 'editable' ? collectPageImageRegions(operatorList, viewport, pdfjsLib) : [];
-      const semanticImageRegions = mode === 'editable'
+      const preflightPage = preflightPages[pageIndex - 1] || {};
+      const pageMode = chooseAutoPageMode({
+        requestedMode: mode,
+        nativeTextSpans: rawTextSpanCount,
+        nativeTextCharacters: nativeCharacterCount,
+        operatorFeatures,
+        preflightPage,
+      });
+      const shouldOcr = shouldRunPageOcr({
+        enabled: ocrEnabled,
+        engineUnavailable: ocrEngineUnavailable,
+        nativeTextSpans: rawTextSpanCount,
+        nativeTextCharacters: nativeCharacterCount,
+      });
+      const maxDimension = Number.isFinite(options.maxImageDimension)
+        ? clamp(options.maxImageDimension, 1400, 3600)
+        : (pageMode === 'visual' ? 3600 : pageMode === 'layout' ? 3300 : 2800);
+      // PNG keeps thin form rules, small logos, signatures and screenshot UI text crisp in fidelity-first paths.
+      const pageImageType = ['visual', 'layout'].includes(pageMode) ? 'png' : 'jpg';
+      const imageRegionCandidates = pageMode !== 'visual' ? collectPageImageRegions(operatorList, viewport, pdfjsLib) : [];
+      const semanticImageRegions = pageMode !== 'visual'
         ? filterSemanticImageRegions(imageRegionCandidates, viewport, normalizedItems, pdfjsLib)
         : [];
       const backdrop = await renderPageBackdrop(page, viewport, normalizedItems, {
-        editable: mode !== 'visual', maxDimension, imageType: mode === 'visual' ? 'png' : 'jpg',
+        editable: pageMode !== 'visual', maxDimension, imageType: pageImageType,
         onProgress, pageIndex, pages: pdf.numPages, pdfjsLib, ocrEnabled, ocrLanguage, shouldOcr,
-        detectTables: mode === 'editable' ? normalizedItems.length >= 4 : (mode === 'layout' && operatorFeatures.paths >= 4 && normalizedItems.length >= 8),
-        semanticTables: mode === 'editable', imageRegions: semanticImageRegions,
-        captureOriginalImage: mode === 'editable' && normalizedItems.length === 0,
+        // Analyze tables/images for every editable strategy, including layout-preserving pages. Layout mode
+        // still uses a positioned artwork layer for complex vector decoration, but recognized tables become
+        // native floating Word tables and placed image objects are emitted separately after their art regions
+        // are removed from the backdrop.
+        detectTables: pageMode !== 'visual' && (normalizedItems.length >= 4 || (shouldOcr && ocrEnabled)),
+        semanticTables: pageMode !== 'visual', imageRegions: semanticImageRegions,
+        maskEditableRegions: pageMode !== 'visual',
+        captureOriginalImage: pageMode === 'editable' && normalizedItems.length === 0,
       });
+      const detectedTableCandidates = backdrop.tables.length;
+      const adaptiveLayoutFallback = pageMode !== 'visual' && needsLayoutPreservingFallback(backdrop.tables, viewport.width);
+      if (adaptiveLayoutFallback) {
+        const denseProfiles = backdrop.tables.map((table) => tableComplexityProfile(table, viewport.width)).filter((profile) => profile.suspicious);
+        // Do not let independent short box dividers become hundreds of columns in one giant Word table.
+        // The text spans remain editable, while the clean text-free PDF artwork supplies the original
+        // rules, logos, checkbox boxes and page geometry. This is safer and materially closer to Acrobat
+        // for official forms than a falsely reconstructed table grid.
+        for (const row of backdrop.rows) for (const item of row.items || []) item.tableCellKey = '';
+        for (const table of backdrop.tables) for (const row of table.cells || []) for (const cell of row || []) {
+          for (const item of cell.items || []) item.tableCellKey = '';
+        }
+        backdrop.tables = [];
+        for (const image of backdrop.imageRegions || []) {
+          image.tableId = '';
+          delete image.cellRow;
+          delete image.cellCol;
+        }
+        const widestGrid = Math.max(0, ...denseProfiles.map((profile) => profile.columns));
+        warnings.push(`Page ${pageIndex} contained an ambiguous form grid (${widestGrid} inferred columns); used a layout-preserving page-artwork and editable-text reconstruction instead of generating a fragile Word table.`);
+        onProgress({ page: pageIndex, pages: pdf.numPages, phase: 'analysis', profile: `Complex form grid detected on page ${pageIndex}; preserving layout with editable text` });
+      }
       ocrWords += backdrop.ocr.words.length;
       allSourceText.push(backdrop.sourceText || '');
       rejectedOcrDuplicates += backdrop.rejectedOcrDuplicates;
@@ -2208,7 +2544,7 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
         return layout.items.map((item) => item.text).join('\t');
       }).join('\n');
       const tableText = backdrop.tables.flatMap((table) => table.cells.flatMap((cellRow) => cellRow.flatMap((cell) => cell.items.filter((item) => !item.keepInArtwork).map((item) => item.text)))).join('\t');
-      const scanOnlyPage = mode === 'editable' && normalizedItems.length === 0 && Boolean(backdrop.originalBytes);
+      const scanOnlyPage = pageMode === 'editable' && normalizedItems.length === 0 && Boolean(backdrop.originalBytes);
       const scanOcrOverlayFallback = scanOnlyPage && backdrop.editableSpans > 0;
       const semanticScanFallback = scanOnlyPage && !scanOcrOverlayFallback;
       allExpectedText.push(semanticScanFallback ? '' : editableText, semanticScanFallback ? '' : tableText);
@@ -2216,13 +2552,14 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
 
       let sectionFooters;
       let footerDistance = 14;
-      let useZeroMargins = mode !== 'editable' || semanticScanFallback;
-      if (mode === 'visual') {
+      let useZeroMargins = pageMode !== 'editable' || semanticScanFallback || adaptiveLayoutFallback;
+      if (pageMode === 'visual') {
         const pageImageRun = makePageImageRun(backdrop, viewport, ImageRun, outputScale);
         children.push(new Paragraph({ children: [pageImageRun], spacing: { before: 0, after: 0, line: 1, lineRule: 'exact' }, widowControl: false }));
-      } else if (mode === 'layout') {
-        // Layout-preserving fallback: retain the original page artwork and pin supported text lines to
-        // the same page coordinates. This remains available when the user prefers the original look.
+      } else if (pageMode === 'layout' || adaptiveLayoutFallback) {
+        // Layout-preserving reconstruction: retain the text-free page artwork and pin supported text lines
+        // to their source coordinates. Dense/ambiguous form grids automatically take this branch even
+        // when the user selected editable mode, keeping the document readable and the text selectable.
         const pageImageRun = makePageImageRun(backdrop, viewport, ImageRun, outputScale);
         children.push(new Paragraph({ children: [pageImageRun], spacing: { before: 0, after: 0, line: 1, lineRule: 'exact' }, widowControl: false }));
         const emittedTables = new Set();
@@ -2231,7 +2568,7 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
           for (const tableId of rowTableIds) {
             if (emittedTables.has(tableId)) continue;
             const table = backdrop.tables.find((candidate) => candidate.id === tableId);
-            if (table) { children.push(buildNativeTable(table, docxApi, outputScale)); emittedTables.add(tableId); }
+            if (table) { children.push(buildNativeTable(table, docxApi, outputScale, { visibleBorders: true, includeImages: true })); emittedTables.add(tableId); }
           }
           if (!bodyRows.includes(row)) continue;
           const layout = makeEditableLayout(row, viewport.width, outputScale, { excludeTableItems: true });
@@ -2256,7 +2593,15 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
             height: Math.max(6, row.lineHeight * 1.45 * outputScale),
           });
         }
-        for (const table of backdrop.tables) if (!emittedTables.has(table.id)) children.push(buildNativeTable(table, docxApi, outputScale));
+        for (const table of backdrop.tables) if (!emittedTables.has(table.id)) children.push(buildNativeTable(table, docxApi, outputScale, { visibleBorders: true, includeImages: true }));
+        // Images outside recognized tables are real Word image objects with their own page coordinates,
+        // not a flattened part of the full-page artwork. Images within tables are inserted in their native cells.
+        for (const image of backdrop.imageRegions || []) {
+          if (image.tableId) continue;
+          children.push(makePlacedImageParagraph(image, docxApi, outputScale));
+        }
+        useZeroMargins = true;
+        if (adaptiveLayoutFallback) warnings.push(`Page ${pageIndex} used automatic layout preservation because its detected grid was too dense for a reliable native Word table.`);
         if (!bodyRows.length && !backdrop.tables.length && backdrop.ocr.warning) warnings.push(`Page ${pageIndex}: ${backdrop.ocr.warning}`);
       } else if (scanOcrOverlayFallback) {
         // A scan-only page with successful OCR keeps its page artwork (with safe text areas masked) and places
@@ -2333,6 +2678,7 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
       if (backdrop.unsupportedSpans > 0 || (shouldOcr && !backdrop.ocr.available && !visibleNativeItems)) pagesWithPartialText += 1;
       const pageReport = {
         page: pageIndex,
+        conversionStrategy: pageMode,
         width: viewport.width,
         height: viewport.height,
         nativeTextSpans: visibleNativeItems,
@@ -2344,7 +2690,8 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
         imageObjects: operatorFeatures.imageObjects,
         separateImageAssets: backdrop.imageRegions?.length || 0,
         vectorOperations: operatorFeatures.vectorOperations,
-        tableCandidates: backdrop.tables.length,
+        tableCandidates: detectedTableCandidates,
+        adaptiveLayoutFallback,
         paragraphCandidates: backdrop.rows.filter((row) => row.paragraphStart).length,
         listCandidates: backdrop.rows.filter((row) => row.listType && row.listType !== 'none').length,
         columnsDetected: backdrop.columnSeparator != null,
@@ -2383,17 +2730,39 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
     title: 'Converted from PDF',
     subject: 'PDF to Word conversion',
     description: mode === 'visual'
-      ? 'Visual replica exported by PDF Studio. Page contents are represented as page images.'
+      ? 'Visual replica exported by PDF Studio. Page contents are represented as high-resolution page images.'
       : mode === 'layout'
-        ? 'Layout-preserving conversion by PDF Studio. The page artwork remains in place and supported text is reconstructed as editable positioned Word frames.'
-        : 'Editable Word conversion by PDF Studio. Text is reconstructed as normal Word paragraphs and native tables where ruled table structure can be inferred. Detected raster images are inserted as separate image assets.',
+        ? 'Layout-preserving conversion by PDF Studio. Page artwork remains in place and recognized text is reconstructed as editable positioned Word content.'
+        : mode === 'auto'
+          ? 'Automatic hybrid PDF-to-Word conversion by PDF Studio. Each page is analyzed before reconstruction; complex layouts preserve page artwork with editable text, while simpler text-first pages use normal Word paragraphs and tables.'
+          : 'Editable Word conversion by PDF Studio. Text is reconstructed as normal Word paragraphs and native tables where ruled table structure can be inferred. Dense form grids automatically use a layout-preserving page-artwork layer with editable positioned text. Detected raster images are inserted as separate image assets.',
     sections,
   });
-  onProgress({ page: pdf.numPages, pages: pdf.numPages, phase: 'building', profile: mode === 'editable' ? 'Building flowing Word paragraphs, tables, and image assets' : (mode === 'layout' ? 'Building the layout-preserving Word document' : 'Building visual-replica pages') });
+  const layoutPageCount = pageReports.filter((report) => report.conversionStrategy === 'layout' || report.adaptiveLayoutFallback).length;
+  const editablePageCount = pageReports.filter((report) => report.conversionStrategy === 'editable').length;
+  const buildProfile = mode === 'auto'
+    ? `Building adaptive DOCX (${layoutPageCount} layout-preserving page${layoutPageCount === 1 ? '' : 's'}, ${editablePageCount} reflowable page${editablePageCount === 1 ? '' : 's'})`
+    : mode === 'editable'
+      ? 'Building Word paragraphs and native tables'
+      : mode === 'layout'
+        ? 'Building the layout-preserving Word document'
+        : 'Building high-resolution visual-replica pages';
+  onProgress({ page: pdf.numPages, pages: pdf.numPages, phase: 'building', profile: buildProfile });
   const blob = await Packer.toBlob(document);
   const rawBytes = new Uint8Array(await blob.arrayBuffer());
   const expectedText = mode === 'visual' ? '' : allExpectedText.join('\n');
-  const packaged = await finalizeAndValidateDocx(rawBytes, frameDescriptors, expectedText, mode === 'visual' ? '' : allSourceText.join('\n'), mode === 'visual' ? '' : allExpectedReadingOrder.join('\n'));
+  let packaged;
+  try {
+    packaged = await finalizeAndValidateDocx(rawBytes, frameDescriptors, expectedText, mode === 'visual' ? '' : allSourceText.join('\n'), mode === 'visual' ? '' : allExpectedReadingOrder.join('\n'));
+  } catch (error) {
+    // A final package-level guard protects Word against rare grids missed by page detection.
+    // Retry once using fixed-position layout mode, which does not build semantic tables from a page.
+    if (mode !== 'visual' && !options._safeLayoutRetry && /unsafe table grid|oversized generated table grid/i.test(String(error?.message || error))) {
+      onProgress({ phase: 'analysis', page: pdf.numPages, pages: pdf.numPages, profile: 'An unsafe table grid was caught; retrying with layout-preserving reconstruction' });
+      return pdfToDocx(pdfBytes, pdfSource, { ...options, mode: 'layout', _safeLayoutRetry: true });
+    }
+    throw error;
+  }
   const totalNativeSpans = pageReports.reduce((sum, report) => sum + report.nativeTextSpans, 0);
   const totalMergedSpans = pageReports.reduce((sum, report) => sum + report.mergedTextSpans, 0);
   const totalEditableSpans = pageReports.reduce((sum, report) => sum + report.editableTextSpans, 0);
@@ -2401,6 +2770,11 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
   const similarityScores = pageReports.map((report) => report.visualSimilarity).filter((score) => Number.isFinite(score));
   const quality = {
     mode,
+    preflight: preflightSummary,
+    adaptiveLayoutFallbackPages: pageReports.filter((report) => report.adaptiveLayoutFallback).map((report) => report.page),
+    automaticLayoutPages: pageReports.filter((report) => report.conversionStrategy === 'layout' || report.adaptiveLayoutFallback).map((report) => report.page),
+    automaticEditablePages: pageReports.filter((report) => report.conversionStrategy === 'editable').map((report) => report.page),
+    pageStrategies: pageReports.map(({ page, conversionStrategy, imageObjects, vectorOperations, tableCandidates, adaptiveLayoutFallback }) => ({ page, conversionStrategy, imageObjects, vectorOperations, tableCandidates, adaptiveLayoutFallback })),
     validDocxPackage: packaged.validation.validPackage,
     editableTextCoveragePercent: packaged.validation.editableTextCoverage.percent,
     sourceTextCoveragePercent: packaged.validation.sourceTextCoverage.percent,
@@ -2422,8 +2796,11 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
     paragraphCandidates: pageReports.reduce((sum, report) => sum + report.paragraphCandidates, 0),
     listCandidates: pageReports.reduce((sum, report) => sum + report.listCandidates, 0),
     pagesWithColumns,
-    imageObjectsRetainedInArtwork: imageObjectsDetected,
+    imageObjectsDetectedFromPdf: imageObjectsDetected,
     separateWordImageAssets: pageReports.reduce((sum, report) => sum + (report.separateImageAssets || 0), 0),
+    nativeWordTablesVerified: packaged.validation.nativeWordTables,
+    embeddedImageReferencesVerified: packaged.validation.embeddedImageReferences,
+    embeddedMediaFilesVerified: packaged.validation.embeddedMediaFiles,
     vectorOperationsRetainedInArtwork: vectorOperationsDetected,
     repeatedHeadersDetected: repeatedRegions.headerCandidates,
     repeatedFootersDetected: repeatedRegions.footerCandidates,
@@ -2431,16 +2808,16 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
     warnings: [...new Set(warnings)],
     pageReports: pageReports.map(({ rows, ...report }) => report),
   };
-  if (mode === 'editable' && totalNativeSpans && quality.editableTextCoveragePercent < 98) {
+  if (mode !== 'visual' && totalNativeSpans && quality.editableTextCoveragePercent < 98) {
     quality.warnings.push(`Editable text coverage check was ${quality.editableTextCoveragePercent}%; inspect missing words in the DOCX.`);
   }
-  if (mode === 'editable' && allSourceText.join('').trim() && quality.sourceTextCoveragePercent < 98) {
+  if (mode !== 'visual' && allSourceText.join('').trim() && quality.sourceTextCoveragePercent < 98) {
     quality.warnings.push(`Only ${quality.sourceTextCoveragePercent}% of extracted native/OCR words appear as editable Word text; some content may remain only in the background artwork or have been omitted.`);
   }
-  if (mode === 'editable' && quality.readingOrderContinuityPercent < 90) {
+  if (mode !== 'visual' && quality.readingOrderContinuityPercent < 90) {
     quality.warnings.push(`Reading-order continuity check was ${quality.readingOrderContinuityPercent}%; review column/table order in Word.`);
   }
-  if (mode === 'editable' && quality.approximateTextRegionSimilarity !== null && quality.approximateTextRegionSimilarity < 82) {
+  if (mode !== 'visual' && quality.approximateTextRegionSimilarity !== null && quality.approximateTextRegionSimilarity < 82) {
     quality.warnings.push(`Approximate reconstructed text-region similarity is ${quality.approximateTextRegionSimilarity}%; some fonts, spacing, or text colors may need review.`);
   }
   onProgress({ phase: 'validation', page: pdf.numPages, pages: pdf.numPages, profile: 'DOCX package and editable-text checks passed' });
@@ -2454,6 +2831,7 @@ export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
     visualPages: pdf.numPages,
     quality,
     validation: packaged.validation,
+    preflight: preflightSummary,
   };
 }
 
@@ -2471,9 +2849,18 @@ export const __docxInternals = {
   wrapParagraphInDrawingTextBox,
   wrapParagraphInFrame,
   ensureDrawingNamespaces,
+  makePlacedImageParagraph,
+  buildNativeTable,
   countOperatorFeatures,
   detectGridTables,
   detectFlowTables,
+  tableComplexityProfile,
+  needsLayoutPreservingFallback,
+  summarizePageForPreflight,
+  chooseAutoPageMode,
+  shouldRunPageOcr,
+  getWordTableGridColumnCounts,
+  normalizePackagePath,
   buildFlowTable,
   collectPageImageRegions,
   filterSemanticImageRegions,

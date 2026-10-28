@@ -32,5 +32,5 @@ assert.match(ps, /ActiveApiUrl/, 'one API route remains pinned throughout a resu
 assert.match(ps, /rejected the ZIP package format/, 'monitors that explicitly reject ZIP are retried with raw EXE');
 assert.match(ps, /PDFSTUDIO_MONITOR_KEY/, 'API key can be supplied securely through environment');
 assert.doesNotMatch(ps, /X-Api-Key\s*=\s*['"](?:[a-f0-9]{16,}|.{20,})['"]/, 'no hardcoded API key');
-assert.match(changelog, /^## 3\.0\.5/m, 'release notes include current version section');
+assert.match(changelog, /^## 3\.0\.4/m, 'release notes include current version section');
 console.log('V3 release target, compressed package, fallback, and Monitor publisher regression checks passed.');

@@ -2,7 +2,6 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('pdfStudio', Object.freeze({
   notifyReady: () => ipcRenderer.invoke('app:renderer-ready'),
-  reportStartupError: (report) => ipcRenderer.invoke('app:renderer-startup-error', report),
   openFiles: (options) => ipcRenderer.invoke('files:open', options),
   getEditorInit: () => ipcRenderer.invoke('editor:init'),
   closeEditor: () => ipcRenderer.invoke('editor:close'),

@@ -4,16 +4,14 @@
 
 - `package.json` parses; `npm start` now builds the Vite frontend before launching Electron, fixing the reported `ERR_FILE_NOT_FOUND` for `dist/index.html`. The only release target is the Windows `portable` EXE.
 - Electron checks that the frontend HTML exists and displays an actionable startup diagnostics page instead of an empty white window if the page is missing or cannot load.
-- The renderer reports failed startup to Electron through a narrow preload IPC bridge; the main process loads a diagnostic page before removing the splash, with a 22-second native watchdog as a final safety net.
-- The branded splash now completes its entrance/progress animation before the main app is shown; update validation and telemetry only begin after the main window is visible.
-- `node tests/startup-splash.test.cjs` checks the ready/error handshake, delayed splash exit, diagnostics-first failure path, and startup watchdog.
+- The renderer includes a startup watchdog for frontend script/load failures that prevent React from mounting.
 - `node --check electron/main.cjs`, `package.json` parsing, and the inline startup-watchdog JavaScript syntax check passed.
 - Build and publish scripts point to the Windows portable artifact and do not publish an NSIS setup executable.
 - Electron main process stores user data in `%AppData%\PDF Studio` and never creates a folder beside the portable EXE.
 
 ## Required on-machine validation
 
-Static source validation was performed for this startup fix, but this environment has not verified a real Electron bundle build because this checkout does not include `node_modules`. On the target Windows machine, run `npm install`, then `npm start`; `npm start` now builds the frontend automatically. Verify that `dist/index.html` is generated before Electron opens. Also run `npm run check`. Before production release, build on Windows with Node.js/npm; verify `publish\PdfStudio.exe` (built by `build_publish.bat`) reports `ProductName=PDF Studio` and `FileVersion=3.0.6`; confirm no installer/UAC appears; and upload the actual portable EXE to the monitor.
+Static source validation was performed for this startup fix, but this environment has not verified a real Electron bundle build because this checkout does not include `node_modules`. On the target Windows machine, run `npm install`, then `npm start`; `npm start` now builds the frontend automatically. Verify that `dist/index.html` is generated before Electron opens. Also run `npm run check`. Before production release, build on Windows with Node.js/npm; verify `publish\PdfStudio.exe` (built by `build_publish.bat`) reports `ProductName=PDF Studio` and `FileVersion=3.0.0.x`; confirm no installer/UAC appears; and upload the actual portable EXE to the monitor.
 ## UI/UX and settings update
 
 - JSX syntax verified with the TypeScript TSX parser; no syntax diagnostics.
@@ -123,3 +121,12 @@ Regression tests now verify that Electron never loads or sends `X-Api-Key`, acce
 - Removed the arbitrary 92 pt limit for external image groups and the 150/180 pt default height limits for inline/cell image groups. Source PDF placement dimensions are now retained in Word when they fit. If an image group exceeds available page/cell width, it is scaled proportionally to fit; its original aspect ratio is maintained.
 - Added regression assertions using the supplied PDF's image sizes and a width-overflow case. The complete `npm run test:pdf` suite and access/telemetry/review policy tests passed after the changes.
 - A fresh production DOCX conversion and Electron 45 runtime verification are still outstanding in this workspace because the installed dependency tree is incomplete (`pdfjs-dist` is unavailable); the tests validate the generated Word image extents from the production layout helpers, not a fresh full GUI conversion. On Windows, run `npm ci`, `npm run test:pdf`, `npm run web:build`, and compare the regenerated Editable DOCX against the PDF and Acrobat DOCX before release.
+
+
+## PDF-to-Word form-grid and Word-open reliability fix (2026-10-28)
+
+- Added a document-wide preflight pass that reads page dimensions and native text spans before Word elements are created. The conversion pass then loads fonts, inspects vector/image operations, reconstructs page content, and reports progress through analysis and conversion phases.
+- Added table-complexity profiling. Tables with excessive grid columns, pathological cell counts, or page-wide groups of very narrow columns are treated as false-positive form grids; those pages instead preserve the clean text-free page artwork and overlay editable text frames. This targets the supplied Loyalty Card Plus form, whose prior DOCX contained 117–145-column tables and visible striped blank areas.
+- DOCX validation now checks all XML and relationship parts, internal relationship targets, duplicate/dangling relationship IDs, content-type override targets, ZIP CRC integrity, and a maximum 64-column generated-table safety limit.
+- Added regression tests for the 145-column form-grid case, safe native-table selection, page preflight summaries, grid-size guards, and package-path validation. `node --experimental-default-type=module tests/pdf-word-layout.test.mjs`, `node tests/pdf-word-policy.test.cjs`, and JavaScript syntax checks passed in this workspace.
+- Build limitation: this archive has no `node_modules` directory, so a fresh Electron/Vite build and a new DOCX generated from the supplied PDF could not be verified in this workspace. The provided failing DOCX confirms the false-positive giant-grid behavior; LibreOffice can read that old DOCX, but Microsoft Word opening the fixed output still must be checked on Windows after `npm ci` and a new conversion. These source changes are not a claim of exact Acrobat parity.

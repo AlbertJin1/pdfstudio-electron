@@ -1,6 +1,6 @@
 {
   "name": "pdf-studio-windows",
-  "version": "3.0.6",
+  "version": "3.0.4",
   "private": true,
   "description": "PDF Studio — a modern, local-first Windows PDF workspace built with Electron, React, Node.js and Tailwind CSS.",
   "author": "Jessie Albert Regualos",
@@ -14,21 +14,18 @@
     "web:dev": "npm run prepare:pdfjs-assets && vite --host 127.0.0.1",
     "web:build": "npm run prepare:pdfjs-assets && vite build",
     "build": "npm run build:win",
-    "prebuild:win": "node scripts/release-tool.cjs clean && node scripts/prepare-bundled-resources.cjs",
+    "prebuild:win": "node scripts/check-no-real-env.cjs && node scripts/release-tool.cjs clean",
     "build:win": "npm run web:build && electron-builder --win portable --x64",
     "postbuild:win": "node scripts/release-tool.cjs finalize",
     "check": "npm run web:build",
     "test:access": "node tests/access-policy.test.cjs && node tests/monitor-telemetry.test.cjs && node tests/review-queue-policy.test.cjs",
     "prepare:pdfjs-assets": "node scripts/copy-pdfjs-assets.cjs",
-    "test:pdf": "node tests/ghostscript-compression.test.cjs && node tests/pdf-compression.test.mjs && node tests/pdf-word-policy.test.cjs && node tests/ocr-service.test.cjs && node --experimental-default-type=module tests/pdf-word-layout.test.mjs",
+    "test:pdf": "node tests/ghostscript-compression.test.cjs && node tests/pdf-compression.test.mjs && node tests/pdf-word-policy.test.cjs && node tests/ocr-service.test.cjs && node --experimental-default-type=module tests/pdf-word-layout.test.mjs && node tests/pdf-to-docx-e2e.test.mjs",
     "test:branding": "node tests/branding-ui.test.cjs",
     "test:theme-ux": "node tests/theme-ux.test.cjs",
     "test:workspace-ui": "node tests/workspace-ui.test.cjs",
     "test:update": "node tests/portable-update-engine.test.cjs",
-    "test:release-script": "node tests/release-script.test.cjs",
-    "prepare:bundle-resources": "node scripts/prepare-bundled-resources.cjs",
-    "test:build-size": "node tests/build-size-policy.test.cjs",
-    "test:startup": "node tests/startup-splash.test.cjs"
+    "test:release-script": "node tests/release-script.test.cjs"
   },
   "dependencies": {
     "@jspawn/ghostscript-wasm": "0.0.2",
@@ -94,7 +91,7 @@
       "executableName": "PdfStudio",
       "artifactName": "PdfStudio.exe",
       "requestedExecutionLevel": "asInvoker",
-      "compression": "maximum",
+      "compression": "store",
       "electronLanguages": [
         "en-US"
       ],
@@ -112,14 +109,14 @@
         ]
       },
       {
-        "from": "build-resources/ocr",
+        "from": "resources/ocr",
         "to": "ocr",
         "filter": [
           "**/*"
         ]
       },
       {
-        "from": "build-resources/ghostscript",
+        "from": "resources/ghostscript",
         "to": "ghostscript",
         "filter": [
           "**/*"
