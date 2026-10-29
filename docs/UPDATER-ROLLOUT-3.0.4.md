@@ -6,7 +6,7 @@
 - Every downloaded delta chunk is decompressed and SHA-256-verified. The reconstructed executable must match the Monitor's published total size and SHA-256 before it can be staged.
 - If delta metadata is absent, a delta request fails, or too much of the file changed, the client tries the Monitor's SHA-256-verified ZIP containing `PdfStudio.exe`. It extracts only that entry and separately verifies the rebuilt EXE. The old raw-EXE endpoint remains the final fallback.
 - Existing V3.0.3 clients do not contain this new updater code. Their one-time bootstrap update to 3.0.4 therefore uses the old raw-EXE endpoint; it is not possible to make an already-shipped client understand ZIP/delta responses without first updating its executable. Once 3.0.4 is installed, later V3 updates can use delta/ZIP paths. Likewise, the V2-to-V3 architecture transition must fetch the V3 executable once; it cannot reuse C# V2 chunks that do not match the Electron launcher.
-- The patched V2 source prefers the compressed migration ZIP only after it is compiled and published as a bridge executable. Already-installed 2.8.15 binaries cannot gain this behavior retroactively; making every already-installed 2.8.15 client use the new compressed migration path would require a separately versioned bridge release, which would add an extra step to the rollout.
+- The legacy updater supports the V2-to-V3 migration through the built-in updater: it verifies the V3 portable EXE before replacing the old executable, or launches a verified per-user copy when the old folder is protected. Builds with compressed-package support prefer the Monitor ZIP and fall back to the raw EXE; already-installed binaries use only the transfer formats their embedded updater understands, but still do not require a separate manual V3 download.
 
 ## Required rollout sequence
 
@@ -30,7 +30,7 @@ This is a server-enforced staged release path, not remote control over an alread
    npm run build:win
    ```
 
-4. Publish the newly built `publish/PdfStudio.exe` with `release.bat`. Choose the public zrok URL or local Monitor URL. The release script uploads a compressed ZIP when smaller and supported; Monitor validates the ZIP and the EXE SHA-256, stores the portable EXE, and prepares the content-defined delta manifest. Verify the published version, size, and SHA-256 on the Monitor.
+4. Publish the newly built `publish/PdfStudio.exe` with `release.bat auto` (or choose public/local explicitly). Automatic mode checks the LAN endpoint first and falls back to public zrok before an upload session is accepted; after `begin` succeeds, all chunks and `finish` stay pinned to that exact endpoint. The release script uploads a compressed ZIP when smaller and supported; Monitor validates the ZIP and the EXE SHA-256, stores the portable EXE, and prepares the content-defined delta manifest. Verify the published version, size, and SHA-256 on the Monitor.
 5. Keep the release `2.8.15` downloadable before publishing 3.0.4 or any later 3.x release.
 6. Test these version routes against the deployed Monitor: `2.8.14` -> `2.8.15`; `2.8.15` -> latest 3.x; `3.0.3` -> `3.0.4`. The 3.0.3-to-3.0.4 bootstrap will use its old full-EXE transfer; then publish a later V3 release and verify a 3.0.4 client uses `action=manifest` and POST `action=delta` when the payload is smaller than the ZIP fallback.
 

@@ -1,14 +1,34 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ExePath,
     [Parameter(Mandatory = $true)][string]$Changelog,
     [Parameter(Mandatory = $true)][string]$MonitorUrl,
+    [string]$FallbackMonitorUrl = '',
     [switch]$Force,
     [switch]$NoZip,
-    [string]$ApiKeyFile = (Join-Path $PSScriptRoot 'monitor-key.txt')
+    # Resolve this after parameter binding: on some Windows PowerShell invocation paths,
+    # $PSScriptRoot is empty while default parameter expressions are evaluated.
+    [string]$ApiKeyFile = ''
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Establish a reliable script directory without evaluating Join-Path in a parameter default.
+$script:PublishScriptRoot = [string]$PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($script:PublishScriptRoot)) {
+    $pathHint = [string]$PSCommandPath
+    if ([string]::IsNullOrWhiteSpace($pathHint)) { $pathHint = [string]$MyInvocation.MyCommand.Path }
+    if (-not [string]::IsNullOrWhiteSpace($pathHint)) {
+        try { $script:PublishScriptRoot = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($pathHint)) } catch { }
+    }
+}
+if ([string]::IsNullOrWhiteSpace($script:PublishScriptRoot)) { $script:PublishScriptRoot = (Get-Location).Path }
+$script:PublishScriptRoot = [System.IO.Path]::GetFullPath($script:PublishScriptRoot)
+if ([string]::IsNullOrWhiteSpace($ApiKeyFile)) {
+    $ApiKeyFile = [System.IO.Path]::Combine($script:PublishScriptRoot, 'monitor-key.txt')
+} elseif (-not [System.IO.Path]::IsPathRooted($ApiKeyFile)) {
+    $ApiKeyFile = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($script:PublishScriptRoot, $ApiKeyFile))
+}
 $script:ApiUrls = @()
 $script:ApiKey = ''
 $script:LastApiUrl = ''
@@ -158,12 +178,41 @@ function Invoke-MonitorApi([string]$Query, [string]$Method = 'Post', [object]$Bo
         catch {
             $lastError = $_
             $status = Get-HttpStatus $_
-            if ($i -lt ($candidates.Count - 1) -and ($status -eq 403 -or $status -eq 404)) { continue }
+            # Retry an alternate route/base only while no upload session has been accepted.
+            # 0 means a connection/timeout failure; 401 also permits trying another configured Monitor
+            # deployment when its API-key configuration differs. Other statuses cover tunnel/WAF
+            # failures or a temporarily unavailable primary Monitor. Never switch
+            # after begin succeeds because upload IDs are scoped to the accepting endpoint.
+            $retryableRouteStatuses = @([int]0, [int]401, [int]403, [int]404, [int]408, [int]429)
+            if ($status -ge 500 -or ($i -lt ($candidates.Count - 1) -and $retryableRouteStatuses -contains $status)) {
+                if ($i -lt ($candidates.Count - 1)) { continue }
+            }
             throw
         }
     }
     if ($null -ne $lastError) { throw $lastError }
     throw 'Monitor API request failed for an unknown reason.'
+}
+
+function Test-MonitorTcpEndpoint([Uri]$Uri, [int]$TimeoutMs = 1800) {
+    $client = $null; $async = $null
+    try {
+        $port = if ($Uri.IsDefaultPort) { if ($Uri.Scheme -eq 'https') { 443 } else { 80 } } else { $Uri.Port }
+        $client = New-Object System.Net.Sockets.TcpClient
+        $async = $client.BeginConnect($Uri.Host, $port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return $false }
+        $client.EndConnect($async)
+        return $true
+    } catch { return $false }
+    finally {
+        if ($async -and $async.AsyncWaitHandle) { $async.AsyncWaitHandle.Close() }
+        if ($client) { $client.Close() }
+    }
+}
+
+function Get-MonitorPageFromApiUrl([string]$ApiUrl) {
+    $pageBase = $ApiUrl -replace '/(?:public/)?api/upload\.php$', '' -replace '/upload\.php$', ''
+    return $pageBase.TrimEnd('/') + '/releases.php'
 }
 
 function Assert-ApiSuccess($Response, [string]$Context) {
@@ -213,6 +262,27 @@ try {
         Write-Host 'WARNING: this Monitor uses HTTP. The API key is sent across the network; use this only on a trusted private LAN.' -ForegroundColor Yellow
     }
 
+    $baseUrls = New-Object System.Collections.Generic.List[string]
+    [void]$baseUrls.Add($base)
+    $fallbackBase = $FallbackMonitorUrl.Trim().TrimEnd('/')
+    if (-not [string]::IsNullOrWhiteSpace($fallbackBase)) {
+        $fallbackUri = $null
+        if (-not [Uri]::TryCreate($fallbackBase, [UriKind]::Absolute, [ref]$fallbackUri) -or $fallbackUri.Scheme -notin @('http', 'https')) {
+            throw 'FallbackMonitorUrl must be an absolute HTTP or HTTPS URL to the Monitor root.'
+        }
+        if ($fallbackUri.Query -or $fallbackUri.Fragment) { throw 'FallbackMonitorUrl cannot contain a query string or fragment.' }
+        if ($fallbackBase -ne $base) {
+            # Avoid making users wait through long HTTP timeouts when the primary LAN server is offline.
+            # Once an upload session starts, all subsequent operations remain pinned to that exact URL.
+            if (-not (Test-MonitorTcpEndpoint $baseUri)) {
+                Write-Host 'Primary Monitor is not reachable; trying the configured fallback first.' -ForegroundColor Yellow
+                [void]$baseUrls.Insert(0, $fallbackBase)
+            } else {
+                [void]$baseUrls.Add($fallbackBase)
+            }
+        }
+    }
+
     $file = Get-Item -LiteralPath $ExePath
     $info = $file.VersionInfo
     if ($info.ProductName -ne 'PDF Studio') { throw "ProductName must be 'PDF Studio'; found '$($info.ProductName)' ." }
@@ -224,11 +294,13 @@ try {
     $exeSize = [long]$file.Length
     # Prefer the current Monitor API, then the public/API subdirectory used by some hosted configurations,
     # then the legacy PDF Studio endpoint. The uploader validates JSON and never mistakes a web page for success.
-    $script:ApiUrls = @(
-        ($base + '/api/upload.php'),
-        ($base + '/public/api/upload.php'),
-        ($base + '/upload.php')
-    )
+    $apiCandidates = New-Object System.Collections.Generic.List[string]
+    foreach ($apiBase in $baseUrls) {
+        [void]$apiCandidates.Add($apiBase + '/api/upload.php')
+        [void]$apiCandidates.Add($apiBase + '/public/api/upload.php')
+        [void]$apiCandidates.Add($apiBase + '/upload.php')
+    }
+    $script:ApiUrls = @($apiCandidates | Select-Object -Unique)
     $script:ApiKey = Get-ApiKey
 
     $uploadPath = $ExePath
@@ -336,10 +408,11 @@ try {
             $chunkAccepted = $false
             while (-not $chunkAccepted -and $retry -lt 5) {
                 try {
-                    # Current Monitor API accepts base64 to avoid gateways treating ZIP bytes as HTML/blocked content.
-                    # Legacy /upload.php expects the original binary chunk, so use raw only for that endpoint.
+                    # Send a raw EXE as raw binary. Base64 is only needed for ZIP packages that may be
+                    # blocked by WAF/tunnel content inspection. Sending a 145 MB EXE as base64 adds
+                    # 33% transport overhead and creates an extra server-side decode path at finalization.
                     $legacyEndpoint = $script:LastApiUrl -notmatch '/(?:public/)?api/upload\.php$'
-                    if ($legacyEndpoint) {
+                    if ($legacyEndpoint -or -not $useZip) {
                         $query = 'action=chunk&upload_id=' + [Uri]::EscapeDataString($script:UploadId) + '&offset=' + $offset
                         $body = $buffer
                         $contentType = 'application/octet-stream'
@@ -391,14 +464,31 @@ try {
     finally { $stream.Dispose(); Write-Progress -Activity "Publishing PDF Studio $version" -Completed }
 
     Write-Host ('Uploaded {0:N1} MB. Monitor is verifying and publishing...' -f ($uploadSize / 1MB))
-    $finish = Invoke-MonitorApi -Query ('action=finish&upload_id=' + [Uri]::EscapeDataString($script:UploadId)) -Method 'Post' -Body '{}'
+    try {
+        $finish = Invoke-MonitorApi -Query ('action=finish&upload_id=' + [Uri]::EscapeDataString($script:UploadId)) -Method 'Post' -Body '{}'
+    } catch {
+        $status = Get-HttpStatus $_
+        $bodyText = Get-HttpErrorBody $_
+        $errorMessage = ''
+        if (-not [string]::IsNullOrWhiteSpace($bodyText)) {
+            try {
+                $errorObject = $bodyText | ConvertFrom-Json -ErrorAction Stop
+                $errorMessage = [string]$errorObject.error
+            } catch { $errorMessage = $bodyText.Trim() }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($errorMessage)) {
+            throw ("Finalize release failed (HTTP {0}): {1}" -f $status, $errorMessage)
+        }
+        if ($status -gt 0) { throw ("Finalize release failed (HTTP {0}); Monitor did not return a readable error body. Original error: {1}" -f $status, $_.Exception.Message) }
+        throw
+    }
     Assert-ApiSuccess $finish 'Finalize release'
     Remove-TempPackage
     $script:UploadId = $null
     Write-Host ''
     Write-Host ([string]$finish.message) -ForegroundColor Green
     Write-Host "Published version: $($finish.version)"
-    Write-Host "Monitor release page: $base/releases.php"
+    Write-Host ("Monitor release page: " + (Get-MonitorPageFromApiUrl $script:LastApiUrl))
     exit 0
 }
 catch {
