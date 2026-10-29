@@ -1,40 +1,67 @@
-## Unreleased
-
-### Format converter (new tool)
-- Fixed: dropped or picked images were rejected as "the file is empty" in newer Chromium/Electron (where File.bytes is a method, not data).
-- Reachable from Overview, the Convert files view (which now also lists Image to text) and the sidebar Quick tools.
-- Converts HEIC/HEIF, WebP, PNG, JPG, AVIF, TIFF, GIF, BMP, SVG and ICO into JPG, PNG, WebP or BMP, in batches, entirely offline. The real format is detected from the file contents, so a mislabelled file still converts.
-- **Privacy shield**: shows what each photo secretly carries (GPS location, camera, date, serial number, owner, embedded thumbnail) and lets you remove everything, keep camera and date but drop location and personal info (JPG output), or keep all details. Converted files get a freshly built EXIF block, so removed data cannot linger in unused bytes.
-- **File size limit**: squeezes each JPG/WebP under 100 KB - 5 MB by choosing the best quality that fits, shrinking the picture only when it must.
-- Resize to a maximum side, quality slider, background color for transparent areas (JPG/BMP), EXIF orientation handled, save one file or a whole folder.
-- New dependencies: `libheif-js` (HEIC decoding, WebAssembly, loaded only when a HEIC file is converted) and `utif` (TIFF). libheif-js is LGPL-3.0: keep its licence notice with releases.
-- The drag-and-drop overlay now says "Only images..." for image tools instead of "Only PDF files".
-
-### Image to text
-- Pasting a screenshot (Ctrl+V) now replaces the previous image and its extracted text, so the next extraction always shows fresh output. Adding files with the picker or drag-and-drop still appends to the queue.
-- Emoji recognition: emoji in the image are located, matched to the closest standard emoji from the system emoji font and written back into the text at the right place (new "Recognize emoji" option, on by default). Emoji are painted out of the OCR copy so they no longer appear as junk such as `&)`.
-- Stray low-confidence punctuation specks (for example the edge of an avatar) are removed from lines that contain real words.
-- "Save as .txt" writes a UTF-8 byte-order mark when the text has emoji or accents so Notepad shows them correctly.
-- OCR results number paragraphs by their position in `paragraphs`, which keeps word/line indexes aligned.
-
-# v9
-
-- Compression: new Ultra preset, auto-escalating size goals, forced image re-encoding, RGB/ICC stripping, stacked engines, final lossless repack, auto-raster for scans.
-- New tool: Image to text (offline OCR via bundled tesseract.js; English, Filipino and Cebuano models included; add more *.traineddata in resources/ocr/tessdata).
-- PDF to Word OCR now falls back to the built-in engine when native Tesseract is not installed.
-
 # PDF Studio Changelog
-
-## Unreleased
-
-- Rebuilt the PDF-to-Word hybrid path so detected tables remain real, editable Word tables even on layout-preserving pages; table regions are cleared from the page-artwork layer to avoid a flattened duplicate. Placed PDF image objects, including small signature-sized objects, are emitted as independent Word pictures or embedded in the corresponding table cell. The DOCX quality report now includes package-verified counts for native Word tables and embedded image references/media, alongside existing text coverage and XML/relationship checks.
-- PDF-to-Word Acrobat-parity pass: (1) text that is invisible in the PDF (covered by a later opaque shape, white-on-white, clipped) is now detected from the text-free render and no longer exported, so stray fragments like "(V01, 07/2017)" or "MEMBER 'S P" no longer print on forms; (2) a signature/logo picture that only grazes a name no longer swallows it - text is treated as burned into a picture only when at least 80% of it lies inside, which fixed the missing "OMAR IAN F. NALIPONGUIT" in editable mode; (3) kerning fragments of one word ("ref" + "er") are fused into a single run instead of being separated by a tab. Added regression assertions to tests/pdf-to-docx-e2e.test.mjs and Node harness tools (tools/convert.mjs, tools/score.py, tools/scoreall.sh) that score word recall and visual similarity against the source PDF.
-- Fixed PDF-to-Word conversion failing on every file with "preflightSummary is not defined": the preflight summary was declared inside the analysis `try` block but read after it closed. It is now declared in function scope. Added an end-to-end `pdfToDocx` regression test (tests/pdf-to-docx-e2e.test.mjs, part of `npm run test:pdf`) covering Automatic hybrid, Editable, Layout-preserving and Visual replica modes.
-- Improved PDF-to-Word reliability with whole-document preflight analysis and per-page Automatic Hybrid mode; dense forms, signature-heavy reports, and screenshot-rich pages use high-resolution layout preservation with editable positioned text instead of fragile wide tables. Limited OCR to scan-only/nearly textless pages to avoid damaging screenshot content, added a one-time layout-preserving retry for unsafe table grids, and strengthened DOCX XML/relationship validation.
 
 ## 3.0.4
 
-- Added verified differential update support for compatible V3-to-V3 portable executable updates.
-- Added compressed-package fallback and SHA-256 verification before a downloaded executable is staged.
-- Improved the release workflow with selectable public zrok and local Monitor upload targets.
-- Kept the portable Windows release as a single `PdfStudio.exe` deliverable.
+_PDF Studio 3 is a ground-up rebuild of PDF Studio on Electron, and the first release after the legacy 2.8.x line. Your documents are still processed on your own computer._
+
+### Highlights
+- **All-new app.** A new interface with light and dark themes, six accent colors, a fast page workspace and a built-in guided tour (press F1 any time).
+- **One portable file.** PDF Studio ships as a single `PdfStudio.exe`. There is no installer, no admin prompt and nothing else to download.
+- **Four new tools.** Image to text (OCR), Format converter, Photo Editing and a much bigger Edit PDF workspace.
+- **Smarter updates.** Later updates download only what changed and are verified before you are asked to install.
+
+### New tools
+- **Edit PDF.** Click existing text or images to change them, add text, images, signatures, highlights, underline, strikeout, freehand ink, rectangles, ovals, lines, sticky notes and status stamps. Rulers, guides, margins and snapping keep everything lined up. Saved signatures can be drawn, typed or uploaded. Save As creates a new PDF and never touches your original.
+- **Image to text.** Offline OCR for photos, screenshots and scans, with English, Filipino and Cebuano built in. Paste a screenshot with Ctrl+V, copy the result or save it as .txt. Emoji in the picture are recognized and kept in the text.
+- **Format converter.** Convert HEIC, WebP, PNG, JPG, AVIF, TIFF, GIF, BMP, SVG and ICO to JPG, PNG, WebP or BMP in batches, fully offline. A privacy shield shows hidden GPS, camera and owner data and lets you strip it. You can also compress each file to fit a size limit from 100 KB to 5 MB.
+- **Photo Editing.** A dedicated workspace to crop, rotate, flip, resize, adjust brightness, contrast and saturation, blur, add a text watermark and remove EXIF/GPS data.
+
+### Page workspace
+- Open PDFs, images and Word files together and arrange them as pages. Drag to reorder, select with click, Ctrl or Shift, then rotate, duplicate, delete, reverse or insert blank pages, with full undo and redo.
+- Full-screen page preview, page search, and a Recent sources list for the session.
+- Export in the current order or only the selected pages, with paper-size fitting, page numbers, diagonal watermarks and optional AES-256 password protection.
+- Split a PDF by every page, every N pages or custom ranges such as 1-3, 4, 6-8.
+
+### Convert and compress
+- **PDF to Word** has four modes: Automatic hybrid, Editable, Layout-preserving and Visual replica. Tables stay real Word tables, pictures and signatures come across as separate images, and hidden or covered text is no longer exported. A quality report checks the result.
+- **PDF to images** exports pages as PNG or JPG.
+- **Compress PDF** has quality presets, an Ultra mode, a target size in MB or percent, a side-by-side preview and integrity checks. It keeps text, links and forms wherever possible, skips signed PDFs, and only uses page rasterizing if you allow it.
+- **Images to PDF** builds a PDF from your image files.
+
+### Look, feel and accessibility
+- Light, dark or system theme, six accent colors, three text sizes, compact or comfortable density, high contrast and a Reduce motion option.
+- Keyboard shortcuts throughout, including Ctrl+O, Ctrl+1 to 5, Ctrl+S, Ctrl+Z and Ctrl+Y.
+- Rate PDF Studio from the About window. Reviews made offline are saved and sent later.
+
+### Updating
+- Installs on 2.8.15 or later are offered V3 through the in-app updater. Older installs are offered 2.8.15 first.
+- V3 to V3 updates download only the changed parts and check SHA-256 before you are asked to choose Update now or Update later.
+
+### Good to know
+- Whiteout and text cover-ups are visual only. They are not secure redaction.
+- PDF to Word is not Acrobat-grade. Check complex forms, scans and merged tables in Word.
+- Not carried over from 2.8.x: certified redaction and some legacy editor features.
+
+## Developer and release notes (3.0.4)
+
+_Not shown in the update window. The uploader only sends the `## 3.0.4` section above._
+
+### Stack
+- Electron 45, React 19, Vite 8, Tailwind CSS 3, Motion 13, PDF.js 6, pdf-lib, `docx`, tesseract.js, libheif-js, utif and Ghostscript WASM.
+- Security: context isolation and sandbox on, Node integration off, a small allow-listed preload bridge, and hardened Electron fuses.
+- User data lives in `%AppData%\PDF Studio`. The portable EXE never writes next to itself.
+
+### Build and release
+- Single x64 portable `publish\PdfStudio.exe` built with `compression: maximum`. Optional OCR and native Ghostscript runtimes are staged only when requested (see `docs/PORTABLE-SIZE-OPTIMIZATION-3.0.5.md`).
+- `release.bat` validates product name `PDF Studio`, EXE version against `package.json`, and this changelog heading, then uploads to the Monitor over LAN or public zrok in resumable, SHA-256-verified chunks.
+- The Monitor must be 2.4.24 or newer for the launcher to be accepted, and 2.8.15 must stay downloadable. See `RELEASE-UPLOAD.md` and `docs/UPDATER-ROLLOUT-3.0.4.md`.
+
+### Updater
+- Content-defined chunk delta for V3 to V3, with a Monitor ZIP fallback and then the raw EXE. Every chunk and the final EXE are verified, and nothing runs until the user picks Update now.
+- 3.0.3 clients lack this code, so their first update to 3.0.4 uses the full EXE.
+
+### Known server requirement
+- Review submissions need Monitor 2.4.19 or newer, whose gateway accepts the `review` event. Older gateways return HTTP 400 and the app keeps the review queued.
+
+### Test commands
+- `npm run test:pdf`, `test:access`, `test:update`, `test:release-script`, `test:build-size`, `test:photo-editor`, `test:branding`, `test:theme-ux`, `test:workspace-ui`

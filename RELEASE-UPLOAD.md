@@ -1,11 +1,36 @@
 # Publishing the Electron V3 release
 
-Run `release.bat auto` to check the LAN Monitor first, or choose `local` or `public`. The auto preflight checks whether `192.168.254.110:8080` accepts a TCP connection; if it is unavailable, the script selects the public zrok URL.
+`release.bat` and `publish_to_monitor.ps1` are now the **same workflow as the legacy 2.8.x project**.
 
-The release script builds the portable Electron EXE, verifies that its ProductName is `PDF Studio` and that its FileVersion matches `package.json`, extracts the version's release notes, then calls `publish_to_monitor.ps1`. The publisher explicitly sets Monitor app id `pdfstudio`, uses the universal `/api/upload.php` endpoint, compresses only when ZIP is smaller and supported, uploads resumable 4 MiB chunks, sends raw EXE chunks as binary and uses base64 transport only for ZIP packages, and verifies the completed package and EXE hashes. Finalization failures include the Monitor response body so server-side validation errors are visible instead of only showing an HTTP status.
+```bat
+release.bat              build, then choose 1 public / 2 local / 3 automatic (default 3)
+release.bat local        build and upload straight to http://192.168.254.110:8080/pdfstudio-monitor
+release.bat auto         LAN first, public zrok fallback
+release.bat public       public zrok only
+release.bat local -Force replace an identical release
+release.bat noupload     build only
+```
 
-For a migration-safe rollout, ensure V2.8.15 has already been published before publishing V3. The Monitor stores both releases under the same `pdfstudio` app, each by its own version.
+Retry an upload without rebuilding:
 
-Set `PDFSTUDIO_MONITOR_KEY` or create an ignored local `monitor-key.txt` with the publishing key. `release.bat` now passes the key-file path explicitly, and `publish_to_monitor.ps1` resolves this path after parameter binding (so PowerShell cannot fail on an empty `$PSScriptRoot` in a default parameter). If the file is absent and the environment variable is unset, the publisher prompts securely. Do not add a key to BAT files or commits.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File publish_to_monitor.ps1 -Target local
+```
 
-The public downloads catalogue at `downloads.php` lists the latest release and renders every retained older version under **Earlier versions**, expanded by default. Each historical version has its own version-specific download button; downloads still require the configured server-side Cloudflare Turnstile validation.
+## What it does
+1. Validates the EXE: product name `PDF Studio`, File version equals `package.json`, and CHANGELOG.md has a `## 3.0.4` (or `## [3.0.4]`) heading.
+2. Zips the EXE only if that saves at least 5% (the NSIS portable file is already compressed, so it normally uploads raw).
+3. Uploads resumable 4 MiB chunks (`begin` / `chunk` / `finish`) with SHA-256 verification. Raw chunks are used on the LAN and for raw EXEs; base64 chunks are used only for ZIPs on a public route.
+4. **Prints the Monitor's own error text** if anything is rejected (`UPLOAD FAILED: ... (HTTP 422): <reason>`).
+
+API key: `PDFSTUDIO_MONITOR_KEY`, or `monitor-key.txt` next to the script, or a secure prompt. Never put it in a BAT file or the app.
+
+## Why the old uploader failed with HTTP 422
+electron-builder's `portable` file is an NSIS launcher, which is a 32-bit (x86) PE that starts the 64-bit Electron app. Monitor 2.4.23 rejected every V3 file that was not x64/ARM64 at the final `finish` step, and the old PowerShell 5.1 `Invoke-RestMethod` code hid the message. **Monitor 2.4.24 accepts the launcher and records it as x64** - deploy it before uploading V3.
+
+## Required order
+1. Deploy Monitor 2.4.24 (copy the patch files over the Monitor folder; no database change).
+2. Make sure 2.8.15 is already published (legacy `release.bat`).
+3. Publish V3 with `release.bat`.
+
+Clients: below 2.8.15 are offered 2.8.15; 2.8.15+ are offered V3 through the in-app updater; V3 -> V3 uses chunk-level delta updates when the Monitor has a manifest.

@@ -1,206 +1,228 @@
-﻿[CmdletBinding()]
+﻿<#
+  PDF Studio V3 - uploads publish\PdfStudio.exe to the PDF Studio Monitor (through zrok or the LAN endpoint) and sends the
+  release notes of that version from CHANGELOG.md. Called by release.bat; can also be run by hand:
+
+      powershell -ExecutionPolicy Bypass -File publish_to_monitor.ps1 [-Target auto|public|local] [-Force] [-NoZip]
+
+  This is the same uploader as the legacy 2.8.x project (System.Net.Http.HttpClient, begin/chunk/finish, LAN-first routing,
+  resumable 4 MiB chunks, SHA-256 verification), adapted for the Electron portable EXE:
+    * the version comes from the EXE's File version (what the Monitor reads) and must match package.json;
+    * release notes come from the CHANGELOG.md heading "## 3.0.4" or "## [3.0.4]";
+    * the EXE is zipped only when the ZIP is actually smaller (an Electron/NSIS portable EXE is already compressed);
+    * every Monitor error body is printed, so a rejected release always says WHY.
+  API key: -ApiKey, PDFSTUDIO_MONITOR_KEY, monitor-key.txt next to this script, or a secure prompt. It is never stored in the app.
+  Target auto tries the LAN Monitor first and falls back to the public zrok URL when the LAN service is unavailable.
+  PDFSTUDIO_LOCAL_MONITOR_URL / PDFSTUDIO_MONITOR_URL override the API bases (they point at the .../api folder).
+#>
 param(
-    [Parameter(Mandatory = $true)][string]$ExePath,
-    [Parameter(Mandatory = $true)][string]$Changelog,
-    [Parameter(Mandatory = $true)][string]$MonitorUrl,
-    [string]$FallbackMonitorUrl = '',
+    [string]$ExePath   = '',
+    [string]$Changelog = '',
+    [string]$BaseUrl   = '',
+    [string]$ApiKey    = $env:PDFSTUDIO_MONITOR_KEY,
+    [string]$ApiKeyFile = '',
+    [ValidateSet('auto', 'public', 'local')][string]$Target = 'auto',
     [switch]$Force,
-    [switch]$NoZip,
-    # Resolve this after parameter binding: on some Windows PowerShell invocation paths,
-    # $PSScriptRoot is empty while default parameter expressions are evaluated.
-    [string]$ApiKeyFile = ''
+    [switch]$NoZip
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+Add-Type -AssemblyName System.Net.Http
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# Establish a reliable script directory without evaluating Join-Path in a parameter default.
-$script:PublishScriptRoot = [string]$PSScriptRoot
-if ([string]::IsNullOrWhiteSpace($script:PublishScriptRoot)) {
-    $pathHint = [string]$PSCommandPath
-    if ([string]::IsNullOrWhiteSpace($pathHint)) { $pathHint = [string]$MyInvocation.MyCommand.Path }
-    if (-not [string]::IsNullOrWhiteSpace($pathHint)) {
-        try { $script:PublishScriptRoot = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($pathHint)) } catch { }
-    }
-}
-if ([string]::IsNullOrWhiteSpace($script:PublishScriptRoot)) { $script:PublishScriptRoot = (Get-Location).Path }
-$script:PublishScriptRoot = [System.IO.Path]::GetFullPath($script:PublishScriptRoot)
-if ([string]::IsNullOrWhiteSpace($ApiKeyFile)) {
-    $ApiKeyFile = [System.IO.Path]::Combine($script:PublishScriptRoot, 'monitor-key.txt')
-} elseif (-not [System.IO.Path]::IsPathRooted($ApiKeyFile)) {
-    $ApiKeyFile = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($script:PublishScriptRoot, $ApiKeyFile))
-}
-$script:ApiUrls = @()
-$script:ApiKey = ''
-$script:LastApiUrl = ''
-$script:ActiveApiUrl = $null
-$script:TempPackage = $null
-$script:UploadId = $null
+function Fail([string]$msg) { Write-Host ''; Write-Host ('UPLOAD FAILED: ' + $msg) -ForegroundColor Red; exit 1 }
+function Mb([double]$n) { return ('{0:N1} MB' -f ($n / 1MB)) }
 
-function Get-HttpStatus([System.Management.Automation.ErrorRecord]$Record) {
-    try {
-        $response = $Record.Exception.Response
-        if ($null -ne $response -and $null -ne $response.StatusCode) { return [int]$response.StatusCode }
-    } catch { }
-    return 0
-}
+# ---------- settings / route selection ----------
+# $PSScriptRoot can be empty while parameter defaults are evaluated on some Windows PowerShell paths, so resolve it here.
+$root = [string]$PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($root) -and -not [string]::IsNullOrWhiteSpace([string]$PSCommandPath)) { $root = [IO.Path]::GetDirectoryName($PSCommandPath) }
+if ([string]::IsNullOrWhiteSpace($root)) { $root = (Get-Location).Path }
+if ([string]::IsNullOrWhiteSpace($ExePath))   { $ExePath   = Join-Path $root 'publish\PdfStudio.exe' }
+if ([string]::IsNullOrWhiteSpace($Changelog)) { $Changelog = Join-Path $root 'CHANGELOG.md' }
+if ([string]::IsNullOrWhiteSpace($ApiKeyFile)) { $ApiKeyFile = Join-Path $root 'monitor-key.txt' }
+elseif (-not [IO.Path]::IsPathRooted($ApiKeyFile)) { $ApiKeyFile = Join-Path $root $ApiKeyFile }
 
-function Get-HttpErrorBody([System.Management.Automation.ErrorRecord]$Record) {
-    try {
-        $response = $Record.Exception.Response
-        if ($null -eq $response) { return '' }
-        if ($response -is [System.Net.Http.HttpResponseMessage]) { return $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() }
-        $stream = $response.GetResponseStream()
-        if ($null -eq $stream) { return '' }
-        $reader = New-Object System.IO.StreamReader($stream)
-        try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
-    } catch { return '' }
+if ([string]::IsNullOrWhiteSpace($ApiKey) -and (Test-Path -LiteralPath $ApiKeyFile -PathType Leaf)) {
+    $ApiKey = [IO.File]::ReadAllText($ApiKeyFile).Trim()
 }
-
-function Get-ApiKey {
-    $key = [string]$env:PDFSTUDIO_MONITOR_KEY
-    if (-not [string]::IsNullOrWhiteSpace($key)) { return $key.Trim() }
-    if (Test-Path -LiteralPath $ApiKeyFile -PathType Leaf) {
-        $key = [System.IO.File]::ReadAllText($ApiKeyFile).Trim()
-        if (-not [string]::IsNullOrWhiteSpace($key)) { return $key }
-    }
+if ([string]::IsNullOrWhiteSpace($ApiKey)) {
     Write-Host 'A Monitor publishing API key is required. It will not be written into the application or release package.' -ForegroundColor Yellow
-    $secure = Read-Host 'Monitor API key' -AsSecureString
-    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    try { $key = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
-    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
-    if ([string]::IsNullOrWhiteSpace($key)) { throw 'No Monitor API key was provided.' }
-    return $key.Trim()
+    $secureKey = Read-Host 'Monitor API key' -AsSecureString
+    $keyPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
+    try { $ApiKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPtr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPtr) }
 }
+$ApiKey = ([string]$ApiKey).Trim()
 
-function Get-ReleaseNotes([string]$Path, [string]$Version) {
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Changelog not found: $Path" }
-    $text = [System.IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
-    $escapedVersion = [regex]::Escape($Version)
-    $headingPattern = '(?im)^(#{1,6})\s+(?:\[\s*)?v?' + $escapedVersion + '(?:\s*\])?(?=\s|$|[-:-]).*$'
-    $heading = [regex]::Match($text, $headingPattern)
-    if (-not $heading.Success) { throw "CHANGELOG.md has no section heading for EXE version $Version. Add a heading such as '## $Version' before publishing." }
-    $level = $heading.Groups[1].Value.Length
-    $start = $heading.Index + $heading.Length
-    $remainder = $text.Substring($start)
-    $nextHeading = [regex]::Match($remainder, '(?m)^#{1,' + $level + '}\s+.*$')
-    if ($nextHeading.Success) { $section = $remainder.Substring(0, $nextHeading.Index) } else { $section = $remainder }
-    $lines = New-Object System.Collections.Generic.List[string]
-    foreach ($raw in ($section -split '\r?\n')) {
-        $line = [regex]::Replace($raw.TrimEnd(), '\[([^\]]+)\]\([^)]*\)', '$1')
-        $line = $line -replace '\*\*', '' -replace '`', ''
-        if ($line -match '^\s*#{2,6}\s+(.*)$') {
-            if ($lines.Count -gt 0) { $lines.Add('') }
-            $lines.Add($Matches[1].Trim().ToUpperInvariant())
-            continue
-        }
-        if ($line -match '^\s*[-*]\s+(.*)$') { $lines.Add([string][char]0x2022 + ' ' + $Matches[1].Trim()); continue }
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $lines.Add($line.Trim())
+$publicDefault = 'https://pdfstudio.shares.zrok.io/pdfstudio-monitor/api'
+$localDefault = $env:PDFSTUDIO_LOCAL_MONITOR_URL
+if ([string]::IsNullOrWhiteSpace($localDefault)) { $localDefault = 'http://192.168.254.110:8080/pdfstudio-monitor/api' }
+$localDefault = $localDefault.Trim().TrimEnd('/')
+
+# Explicit -BaseUrl wins, then the environment override, then the legacy source constant.
+$configuredBase = $BaseUrl
+if ([string]::IsNullOrWhiteSpace($configuredBase)) { $configuredBase = $env:PDFSTUDIO_MONITOR_URL }
+if ([string]::IsNullOrWhiteSpace($configuredBase)) { $configuredBase = $publicDefault }
+$configuredBase = $configuredBase.Trim().TrimEnd('/')
+
+switch ($Target) {
+    'local'  { $primaryBase = $localDefault; $fallbackBase = $null }
+    'public' { $primaryBase = $configuredBase; $fallbackBase = $null }
+    default  {
+        # Auto mode prefers the LAN endpoint to bypass public-tunnel POST filtering; fall back to the configured/public URL.
+        $primaryBase = $localDefault
+        if ($configuredBase -eq $localDefault) { $fallbackBase = $publicDefault }
+        else { $fallbackBase = $configuredBase }
+        if ($fallbackBase -eq $primaryBase) { $fallbackBase = $null }
     }
-    $notes = ($lines -join "`n").Trim()
-    if ([string]::IsNullOrWhiteSpace($notes)) { throw "The CHANGELOG section for $Version is empty." }
-    if ($notes.Length -gt 3900) { $notes = $notes.Substring(0, 3900).TrimEnd() + "`n..." }
-    return $notes
 }
+if ([string]::IsNullOrWhiteSpace($ApiKey)) { Fail 'No API key. Set PDFSTUDIO_MONITOR_KEY, create monitor-key.txt, or enter the key at the secure prompt.' }
+$script:endpoint = $primaryBase.Trim().TrimEnd('/') + '/upload.php'
+$script:fallbackEndpoint = if (-not [string]::IsNullOrWhiteSpace($fallbackBase)) { $fallbackBase.Trim().TrimEnd('/') + '/upload.php' } else { $null }
 
-function New-ExeZip([string]$SourceExe, [string]$Version) {
-    Add-Type -AssemblyName System.IO.Compression
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $path = Join-Path ([IO.Path]::GetTempPath()) ('PdfStudio-' + $Version + '-' + [Guid]::NewGuid().ToString('N') + '.zip')
-    $archive = $null; $inputStream = $null; $entryStream = $null
+if (-not (Test-Path $ExePath)) { Fail ('Exe not found: ' + $ExePath) }
+$ExePath = (Resolve-Path $ExePath).Path
+
+# ---------- version ----------
+$vi = (Get-Item $ExePath).VersionInfo
+$fv = $vi.FileVersion
+if ($vi.ProductName -ne 'PDF Studio') { Fail ('ProductName must be "PDF Studio"; the exe says "' + $vi.ProductName + '".') }
+if ([string]::IsNullOrWhiteSpace($fv)) { Fail 'The exe has no File version. Check "version" in package.json and rebuild.' }
+$p = $fv.Split('.')
+$version = '{0}.{1}.{2}' -f [int]$p[0], [int]$p[1], [int]$p[2]
+
+# ---------- release notes (CHANGELOG.md -> plain text for the update window) ----------
+if (-not (Test-Path $Changelog)) { Fail ('CHANGELOG.md not found: ' + $Changelog) }
+$log = Get-Content -Raw -Encoding UTF8 $Changelog
+$m = [regex]::Match($log, '(?ms)^##[ \t]+\[?v?' + [regex]::Escape($version) + '\]?(?=[\s\-:]|$)[^\r\n]*\r?\n(.*?)(?=^##[ \t]+(?!#)|\z)')
+if (-not $m.Success) { Fail ('CHANGELOG.md has no "## ' + $version + '" (or "## [' + $version + ']") section, so there are no release notes to send.') }
+$lines = New-Object System.Collections.Generic.List[string]
+foreach ($raw in ($m.Groups[1].Value -split '\r?\n')) {
+    $l = $raw.TrimEnd()
+    $l = [regex]::Replace($l, '\[([^\]]+)\]\([^)]*\)', '$1')   # [text](url) -> text
+    $l = $l -replace '\*\*', '' -replace '`', ''
+    if ($l -match '^###\s+(.*)$') { if ($lines.Count -gt 0) { $lines.Add('') }; $lines.Add($Matches[1].Trim().ToUpper()); continue }
+    if ($l -match '^_(.*)_$')     { $lines.Add($Matches[1].Trim()); continue }
+    if ($l.Trim() -eq '')         { continue }
+    if ($l -match '^\s*[-*]\s+(.*)$') { $lines.Add([string][char]0x2022 + ' ' + $Matches[1].Trim()); continue }
+    $lines.Add($l.Trim())
+}
+$notes = ($lines -join "`n").Trim()
+if ($notes.Length -gt 3900) { $notes = $notes.Substring(0, 3900).TrimEnd() + "`n..." }
+if ($notes -eq '') { Fail ('The CHANGELOG.md section for ' + $version + ' is empty.') }
+
+$exeSize = (Get-Item $ExePath).Length
+# Informational: electron-builder's portable file is an NSIS launcher (a 32-bit PE) that starts the 64-bit app. The Monitor accepts it.
+try {
+    $peBytes = New-Object byte[] 4096
+    $peStream = [IO.File]::OpenRead($ExePath); try { [void]$peStream.Read($peBytes, 0, 4096) } finally { $peStream.Dispose() }
+    $peAt = [BitConverter]::ToInt32($peBytes, 60)
+    if ($peAt -gt 0 -and $peAt -lt 4000) {
+        $machineCode = [BitConverter]::ToUInt16($peBytes, $peAt + 4)
+        $machineName = switch ($machineCode) { 0x14C { 'x86 launcher (normal for the electron-builder portable file)' } 0x8664 { 'x64' } 0xAA64 { 'ARM64' } default { ('0x{0:X}' -f $machineCode) } }
+        Write-Host ('EXE processor type : ' + $machineName) -ForegroundColor DarkGray
+    }
+} catch { }
+Write-Host ''
+Write-Host 'Calculating SHA-256...'
+$exeSha = (Get-FileHash -Algorithm SHA256 -Path $ExePath).Hash.ToLower()
+
+# ---------- pack: PdfStudio.exe -> PdfStudio.zip (the signed exe is zipped AFTER signing, so the signature is untouched) ----------
+$uploadPath = $ExePath
+$package = ''
+$tempZip = $null
+if (-not $NoZip) {
+    $tempZip = Join-Path ([IO.Path]::GetTempPath()) ('PdfStudio-' + $version + '-' + [Guid]::NewGuid().ToString('N') + '.zip')
+    Write-Host 'Compressing the exe for upload...'
+    $zip = [IO.Compression.ZipFile]::Open($tempZip, [IO.Compression.ZipArchiveMode]::Create)
+    # Written by hand (CreateEntry + copy) instead of ZipFileExtensions.CreateEntryFromFile, whose overloads differ between
+    # Windows PowerShell 5.1 and PowerShell 7.
+    $level = [IO.Compression.CompressionLevel]::Optimal
+    if ([Enum]::GetNames([IO.Compression.CompressionLevel]) -contains 'SmallestSize') { $level = [Enum]::Parse([IO.Compression.CompressionLevel], 'SmallestSize') }
+    $inStream = $null; $entryStream = $null
     try {
-        $archive = [IO.Compression.ZipFile]::Open($path, [IO.Compression.ZipArchiveMode]::Create)
-        $level = [IO.Compression.CompressionLevel]::Optimal
-        if ([Enum]::GetNames([IO.Compression.CompressionLevel]) -contains 'SmallestSize') { $level = [Enum]::Parse([IO.Compression.CompressionLevel], 'SmallestSize') }
-        $entry = $archive.CreateEntry('PdfStudio.exe', $level)
+        $entry = $zip.CreateEntry('PdfStudio.exe', $level)
         $entryStream = $entry.Open()
-        $inputStream = [IO.File]::OpenRead($SourceExe)
-        $inputStream.CopyTo($entryStream, 1MB)
-    }
-    catch {
-        $zipError = $_.Exception.Message
+        $inStream = [IO.File]::OpenRead($ExePath)
+        $inStream.CopyTo($entryStream, 1MB)
     }
     finally {
-        if ($inputStream) { $inputStream.Dispose() }
+        if ($inStream) { $inStream.Dispose() }
         if ($entryStream) { $entryStream.Dispose() }
-        if ($archive) { $archive.Dispose() }
+        $zip.Dispose()
     }
-    if ($zipError) {
-        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
-        throw "Could not create the compressed release package: $zipError"
+    if ((Get-Item $tempZip).Length -lt ($exeSize * 0.95)) {   # worth it only when it saves at least 5%
+        $uploadPath = $tempZip
+        $package = 'zip'
+    } else {
+        Write-Host 'ZIP would save less than 5% (the EXE is already compressed); uploading the raw EXE.' -ForegroundColor Yellow
+        Remove-Item -LiteralPath $tempZip -ErrorAction SilentlyContinue
+        $tempZip = $null
     }
-    return $path
 }
+$size = (Get-Item $uploadPath).Length
+$sha = (Get-FileHash -Algorithm SHA256 -Path $uploadPath).Hash.ToLower()
 
-function Remove-TempPackage {
-    if (-not [string]::IsNullOrWhiteSpace([string]$script:TempPackage) -and (Test-Path -LiteralPath $script:TempPackage)) {
-        Remove-Item -LiteralPath $script:TempPackage -Force -ErrorAction SilentlyContinue
-    }
-    $script:TempPackage = $null
-}
+Write-Host ''
+if ($package -eq 'zip') { Write-Host ('Uploading PDF Studio V3 v' + $version + ' (' + (Mb $size) + ' zipped, the exe is ' + (Mb $exeSize) + ' - saves ' + [int](100 - 100 * $size / $exeSize) + '%)') -ForegroundColor Cyan }
+else                    { Write-Host ('Uploading PDF Studio V3 v' + $version + ' (' + (Mb $size) + ', not compressed)') -ForegroundColor Cyan }
+Write-Host ('Monitor : ' + $script:endpoint + '  (target: ' + $Target + ')')
+Write-Host 'Release notes that will be sent:' -ForegroundColor Cyan
+foreach ($ln in ($notes -split "`n")) { Write-Host ('   ' + $ln) -ForegroundColor DarkGray }
+Write-Host ''
 
-function Invoke-MonitorApi([string]$Query, [string]$Method = 'Post', [object]$Body = '', [string]$ContentType = 'application/json; charset=utf-8') {
-    $headers = @{
-        'X-Api-Key' = $script:ApiKey
-        'Accept' = 'application/json'
-        'ngrok-skip-browser-warning' = '1'
-    }
-    $lastError = $null
-    # Probe alternate routes only for the first request. Once begin succeeds, pin every chunk/finish/abort request
-    # to that exact API route so upload IDs and raw-vs-base64 chunk encoding cannot cross endpoint variants.
-    if (-not [string]::IsNullOrWhiteSpace([string]$script:ActiveApiUrl)) { $candidates = @([string]$script:ActiveApiUrl) }
-    else { $candidates = @($script:ApiUrls) }
-    for ($i = 0; $i -lt $candidates.Count; $i++) {
-        $uri = $candidates[$i] + '?' + $Query
-        $script:LastApiUrl = $candidates[$i]
-        try {
-            if ($Method -eq 'Get') {
-                $result = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -TimeoutSec 180 -ErrorAction Stop
-            } else {
-                $result = Invoke-RestMethod -Method $Method -Uri $uri -Headers $headers -ContentType $ContentType -Body $Body -TimeoutSec 180 -ErrorAction Stop
-            }
-            # A tunnel/browser interstitial can return HTML with HTTP 200. Never treat it as an API success.
-            if ($result -is [string]) {
-                try { $result = $result | ConvertFrom-Json -ErrorAction Stop }
-                catch {
-                    if ($i -lt ($candidates.Count - 1)) { continue }
-                    throw 'Monitor endpoint returned non-JSON content instead of an upload API response.'
-                }
-            }
-            $propertyNames = @($result.PSObject.Properties | ForEach-Object { $_.Name })
-            if ($propertyNames -notcontains 'ok') {
-                if ($i -lt ($candidates.Count - 1)) { continue }
-                throw 'Monitor endpoint did not return the expected upload API JSON response.'
-            }
-            if ([string]::IsNullOrWhiteSpace([string]$script:ActiveApiUrl)) { $script:ActiveApiUrl = $candidates[$i] }
-            return $result
-        }
-        catch {
-            $lastError = $_
-            $status = Get-HttpStatus $_
-            # Retry an alternate route/base only while no upload session has been accepted.
-            # 0 means a connection/timeout failure; 401 also permits trying another configured Monitor
-            # deployment when its API-key configuration differs. Other statuses cover tunnel/WAF
-            # failures or a temporarily unavailable primary Monitor. Never switch
-            # after begin succeeds because upload IDs are scoped to the accepting endpoint.
-            $retryableRouteStatuses = @([int]0, [int]401, [int]403, [int]404, [int]408, [int]429)
-            if ($status -ge 500 -or ($i -lt ($candidates.Count - 1) -and $retryableRouteStatuses -contains $status)) {
-                if ($i -lt ($candidates.Count - 1)) { continue }
-            }
-            throw
-        }
-    }
-    if ($null -ne $lastError) { throw $lastError }
-    throw 'Monitor API request failed for an unknown reason.'
-}
+# ---------- http ----------
+$http = New-Object System.Net.Http.HttpClient
+$http.Timeout = [TimeSpan]::FromMinutes(45)   # finish hashes, publishes and prepares the delta manifest of a ~150 MB EXE on the server
+$http.DefaultRequestHeaders.Add('X-Api-Key', $ApiKey)
+$http.DefaultRequestHeaders.Add('ngrok-skip-browser-warning', '1')    # harmless on zrok; skips the ngrok free-plan interstitial when a tunnel is used
 
-function Test-MonitorTcpEndpoint([Uri]$Uri, [int]$TimeoutMs = 1800) {
-    $client = $null; $async = $null
+function Invoke-Monitor([string]$query, [System.Net.Http.HttpContent]$content) {
+    $resp = $null
     try {
-        $port = if ($Uri.IsDefaultPort) { if ($Uri.Scheme -eq 'https') { 443 } else { 80 } } else { $Uri.Port }
+        $resp = $http.PostAsync($script:endpoint + $query, $content).GetAwaiter().GetResult()
+        $text = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        $json = $null
+        try { $json = $text | ConvertFrom-Json } catch { }
+        if ($null -eq $json) {
+            $snippet = $text; if ($snippet.Length -gt 200) { $snippet = $snippet.Substring(0, 200) }
+            $json = [pscustomobject]@{ ok = $false; error = ('Unexpected reply (HTTP ' + [int]$resp.StatusCode + '): ' + $snippet) }
+        }
+        return [pscustomobject]@{ Status = [int]$resp.StatusCode; Json = $json }
+    }
+    finally {
+        if ($resp) { $resp.Dispose() }
+        if ($content) { $content.Dispose() }
+    }
+}
+function JsonBody($obj) {
+    return New-Object System.Net.Http.StringContent(($obj | ConvertTo-Json -Compress), [Text.Encoding]::UTF8, 'application/json')
+}
+function Test-RouteFailure($result) {
+    if ($null -eq $result) { return $true }
+    if ([int]$result.Status -eq 401 -or [int]$result.Status -eq 403 -or [int]$result.Status -eq 404 -or [int]$result.Status -eq 408 -or [int]$result.Status -eq 429 -or [int]$result.Status -ge 500) { return $true }
+    $err = [string]$result.Json.error
+    return ($err -match '^Unexpected reply \(HTTP ')
+}
+function Switch-ToFallback([string]$reason) {
+    if ([string]::IsNullOrWhiteSpace($script:fallbackEndpoint)) { return $false }
+    $script:endpoint = $script:fallbackEndpoint
+    $script:fallbackEndpoint = $null  # only switch once; do not loop between endpoints
+    Write-Host ''
+    Write-Host ('The first Monitor endpoint was blocked or returned an invalid response: ' + $reason) -ForegroundColor Yellow
+    Write-Host ('Retrying the release upload through the alternate endpoint: ' + $script:endpoint) -ForegroundColor Yellow
+    Write-Host 'If this is the LAN endpoint, ensure serve.bat is running on the Monitor host and the API key matches its private configuration.' -ForegroundColor DarkGray
+    return $true
+}
+function Test-MonitorTcpEndpoint([string]$url, [int]$timeoutMs = 1800) {
+    $client = $null
+    $async = $null
+    try {
+        $uri = [System.Uri]$url
         $client = New-Object System.Net.Sockets.TcpClient
-        $async = $client.BeginConnect($Uri.Host, $port, $null, $null)
-        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return $false }
+        $async = $client.BeginConnect($uri.Host, $uri.Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($timeoutMs, $false)) { return $false }
         $client.EndConnect($async)
         return $true
     } catch { return $false }
@@ -210,291 +232,131 @@ function Test-MonitorTcpEndpoint([Uri]$Uri, [int]$TimeoutMs = 1800) {
     }
 }
 
-function Get-MonitorPageFromApiUrl([string]$ApiUrl) {
-    $pageBase = $ApiUrl -replace '/(?:public/)?api/upload\.php$', '' -replace '/upload\.php$', ''
-    return $pageBase.TrimEnd('/') + '/releases.php'
+# ---------- begin: new / replace / identical ----------
+if ($Target -eq 'auto' -and -not (Test-MonitorTcpEndpoint $script:endpoint)) {
+    [void](Switch-ToFallback 'The LAN Monitor did not accept a TCP connection promptly.')
 }
-
-function Assert-ApiSuccess($Response, [string]$Context) {
-    if ($null -eq $Response) { throw "$Context returned an empty response." }
-    $propertyNames = @($Response.PSObject.Properties | ForEach-Object { $_.Name })
-    if ($propertyNames -notcontains 'ok') { throw "$Context did not return the expected Monitor API response." }
-    if ($Response.ok -ne $true) {
-        $message = [string]$Response.error
-        if ([string]::IsNullOrWhiteSpace($message)) { $message = 'Monitor returned ok=false.' }
-        throw "$Context failed: $message"
-    }
-}
-
-function Abort-Upload([string]$Id) {
-    if ([string]::IsNullOrWhiteSpace($Id)) { return }
-    try { [void](Invoke-MonitorApi -Query ('action=abort&upload_id=' + [Uri]::EscapeDataString($Id)) -Method 'Post' -Body '{}') } catch { }
-}
-
-function New-BeginBody([string]$Version, [long]$Size, [string]$Sha256, [string]$Notes, [bool]$UseZip, [long]$ExeSize, [string]$ExeSha256, [bool]$ForceRelease) {
-    $data = @{
-        app = 'pdfstudio'
-        version = $Version
-        size = $Size
-        sha256 = $Sha256
-        notes = $Notes
-        filename = 'PdfStudio.exe'
-        force = $ForceRelease
-    }
-    if ($UseZip) {
-        $data.package = 'zip'
-        $data.exe_size = $ExeSize
-        $data.exe_sha256 = $ExeSha256
-    }
-    return ($data | ConvertTo-Json -Depth 6 -Compress)
-}
-
+$beginPayload = @{ app = 'pdfstudio'; version = $version; size = $size; sha256 = $sha; notes = $notes; filename = 'PdfStudio.exe'; force = [bool]$Force; package = $package; exe_size = $exeSize; exe_sha256 = $exeSha }
+$begin = $null
 try {
-    if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) { throw "Portable EXE not found: $ExePath" }
-    if (-not (Test-Path -LiteralPath $Changelog -PathType Leaf)) { throw "Changelog not found: $Changelog" }
-    $base = $MonitorUrl.Trim().TrimEnd('/')
-    $baseUri = $null
-    if (-not [Uri]::TryCreate($base, [UriKind]::Absolute, [ref]$baseUri) -or $baseUri.Scheme -notin @('http', 'https')) {
-        throw 'MonitorUrl must be an absolute HTTP or HTTPS URL to the Monitor root, not releases.php.'
+    $begin = Invoke-Monitor '?action=begin' (JsonBody $beginPayload)
+} catch {
+    $firstError = $_.Exception.Message
+    if (Switch-ToFallback $firstError) {
+        try { $begin = Invoke-Monitor '?action=begin' (JsonBody $beginPayload) }
+        catch { if ($tempZip) { Remove-Item -LiteralPath $tempZip -ErrorAction SilentlyContinue }; Fail ('Both Monitor endpoints failed. Alternate endpoint error: ' + $_.Exception.Message) }
+    } else {
+        if ($tempZip) { Remove-Item -LiteralPath $tempZip -ErrorAction SilentlyContinue }
+        Fail ('Could not reach the monitor: ' + $firstError + '. Use -Target local if the public zrok endpoint is blocking POST requests.')
     }
-    if ($baseUri.Query -or $baseUri.Fragment) { throw 'MonitorUrl cannot contain a query string or fragment.' }
-    if ($baseUri.Scheme -eq 'http') {
-        Write-Host 'WARNING: this Monitor uses HTTP. The API key is sent across the network; use this only on a trusted private LAN.' -ForegroundColor Yellow
-    }
+}
+if ($null -ne $begin -and -not $begin.Json.ok -and (Test-RouteFailure $begin) -and (Switch-ToFallback ([string]$begin.Json.error))) {
+    try { $begin = Invoke-Monitor '?action=begin' (JsonBody $beginPayload) }
+    catch { if ($tempZip) { Remove-Item -LiteralPath $tempZip -ErrorAction SilentlyContinue }; Fail ('The primary endpoint failed and the alternate endpoint could not be reached: ' + $_.Exception.Message) }
+}
+if ($null -eq $begin -or -not $begin.Json.ok) {
+    if ($tempZip) { Remove-Item -LiteralPath $tempZip -ErrorAction SilentlyContinue }
+    Fail ([string]$begin.Json.error)
+}
+$mode = [string]$begin.Json.mode
 
-    $baseUrls = New-Object System.Collections.Generic.List[string]
-    [void]$baseUrls.Add($base)
-    $fallbackBase = $FallbackMonitorUrl.Trim().TrimEnd('/')
-    if (-not [string]::IsNullOrWhiteSpace($fallbackBase)) {
-        $fallbackUri = $null
-        if (-not [Uri]::TryCreate($fallbackBase, [UriKind]::Absolute, [ref]$fallbackUri) -or $fallbackUri.Scheme -notin @('http', 'https')) {
-            throw 'FallbackMonitorUrl must be an absolute HTTP or HTTPS URL to the Monitor root.'
-        }
-        if ($fallbackUri.Query -or $fallbackUri.Fragment) { throw 'FallbackMonitorUrl cannot contain a query string or fragment.' }
-        if ($fallbackBase -ne $base) {
-            # Avoid making users wait through long HTTP timeouts when the primary LAN server is offline.
-            # Once an upload session starts, all subsequent operations remain pinned to that exact URL.
-            if (-not (Test-MonitorTcpEndpoint $baseUri)) {
-                Write-Host 'Primary Monitor is not reachable; trying the configured fallback first.' -ForegroundColor Yellow
-                [void]$baseUrls.Insert(0, $fallbackBase)
-            } else {
-                [void]$baseUrls.Add($fallbackBase)
-            }
-        }
-    }
+# A monitor that predates zip support ignores "package" and would treat the zip as an exe. It does not echo "package" back,
+# so cancel that upload and send the plain exe instead (deploy the new monitor to get the smaller upload).
+if ($package -eq 'zip' -and $mode -ne 'identical' -and [string]$begin.Json.package -ne 'zip') {
+    Write-Host 'This monitor does not support zipped releases yet (it has not been updated) - uploading the plain exe instead.' -ForegroundColor Yellow
+    try { [void](Invoke-Monitor ('?action=abort&upload_id=' + [string]$begin.Json.upload_id) (JsonBody @{})) } catch { }
+    if ($tempZip) { Remove-Item -LiteralPath $tempZip -ErrorAction SilentlyContinue; $tempZip = $null }
+    $uploadPath = $ExePath; $package = ''; $size = $exeSize; $sha = $exeSha
+    try { $begin = Invoke-Monitor '?action=begin' (JsonBody @{ app = 'pdfstudio'; version = $version; size = $size; sha256 = $sha; notes = $notes; filename = 'PdfStudio.exe'; force = [bool]$Force }) }
+    catch { Fail ('Could not reach the monitor: ' + $_.Exception.Message) }
+    if (-not $begin.Json.ok) { Fail ([string]$begin.Json.error) }
+    $mode = [string]$begin.Json.mode
+}
 
-    $file = Get-Item -LiteralPath $ExePath
-    $info = $file.VersionInfo
-    if ($info.ProductName -ne 'PDF Studio') { throw "ProductName must be 'PDF Studio'; found '$($info.ProductName)' ." }
-    $versionMatch = [regex]::Match([string]$info.FileVersion, '^\s*v?(\d+\.\d+\.\d+)(?:\.\d+)?')
-    if (-not $versionMatch.Success) { throw "Could not read a valid 3-part version from EXE FileVersion '$($info.FileVersion)' ." }
-    $version = $versionMatch.Groups[1].Value
-    $notes = Get-ReleaseNotes -Path $Changelog -Version $version
-    $exeHash = (Get-FileHash -LiteralPath $ExePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $exeSize = [long]$file.Length
-    # Prefer the current Monitor API, then the public/API subdirectory used by some hosted configurations,
-    # then the legacy PDF Studio endpoint. The uploader validates JSON and never mistakes a web page for success.
-    $apiCandidates = New-Object System.Collections.Generic.List[string]
-    foreach ($apiBase in $baseUrls) {
-        [void]$apiCandidates.Add($apiBase + '/api/upload.php')
-        [void]$apiCandidates.Add($apiBase + '/public/api/upload.php')
-        [void]$apiCandidates.Add($apiBase + '/upload.php')
-    }
-    $script:ApiUrls = @($apiCandidates | Select-Object -Unique)
-    $script:ApiKey = Get-ApiKey
-
-    $uploadPath = $ExePath
-    $uploadSize = $exeSize
-    $uploadSha = $exeHash
-    $useZip = $false
-    if (-not $NoZip) {
-        Write-Host 'Compressing the portable EXE for upload...' -ForegroundColor Cyan
-        $script:TempPackage = New-ExeZip -SourceExe $ExePath -Version $version
-        $zipSize = [long](Get-Item -LiteralPath $script:TempPackage).Length
-        if ($zipSize -lt $exeSize) {
-            $uploadPath = $script:TempPackage
-            $uploadSize = $zipSize
-            $uploadSha = (Get-FileHash -LiteralPath $uploadPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            $useZip = $true
-        } else {
-            Write-Host 'ZIP is not smaller than the EXE; using the raw EXE for this release.' -ForegroundColor Yellow
-            Remove-TempPackage
-        }
-    }
-
-    Write-Host ''
-    Write-Host "PDF Studio V3 release : $version" -ForegroundColor Cyan
-    Write-Host ('EXE size             : {0:N1} MB' -f ($exeSize / 1MB))
-    $uploadKindLabel = if ($useZip) { ' (compressed ZIP)' } else { ' (raw EXE)' }
-    Write-Host ('Upload size          : {0:N1} MB{1}' -f ($uploadSize / 1MB), $uploadKindLabel)
-    if ($useZip) { Write-Host ('Upload reduction     : {0:N1}%' -f (100 * (1 - ($uploadSize / [double]$exeSize)))) }
-    Write-Host "Monitor              : $base"
-    Write-Host "SHA-256              : $uploadSha"
-    Write-Host 'Starting resumable upload...' -ForegroundColor Cyan
-
-    $beginBody = New-BeginBody -Version $version -Size $uploadSize -Sha256 $uploadSha -Notes $notes -UseZip $useZip -ExeSize $exeSize -ExeSha256 $exeHash -ForceRelease ([bool]$Force)
-    $begin = $null
-    try {
-        $begin = Invoke-MonitorApi -Query 'action=begin' -Method 'Post' -Body $beginBody
-    }
-    catch {
-        $status = Get-HttpStatus $_
-        $bodyText = Get-HttpErrorBody $_
-        if ($useZip -and $status -eq 400 -and $bodyText -match '(?i)(zip|package)') {
-            Write-Host 'This Monitor rejected the ZIP package format. Retrying with the raw EXE.' -ForegroundColor Yellow
-            Remove-TempPackage
-            $uploadPath = $ExePath; $uploadSize = $exeSize; $uploadSha = $exeHash; $useZip = $false
-            $beginBody = New-BeginBody -Version $version -Size $uploadSize -Sha256 $uploadSha -Notes $notes -UseZip $false -ExeSize $exeSize -ExeSha256 $exeHash -ForceRelease ([bool]$Force)
-            $begin = Invoke-MonitorApi -Query 'action=begin' -Method 'Post' -Body $beginBody
-        } else { throw }
-    }
-    if ($useZip -and $null -ne $begin -and $begin.ok -eq $false -and [string]$begin.error -match '(?i)(zip|package)') {
-        Write-Host 'This Monitor rejected the ZIP package format. Retrying with the raw EXE.' -ForegroundColor Yellow
-        Remove-TempPackage
-        $uploadPath = $ExePath; $uploadSize = $exeSize; $uploadSha = $exeHash; $useZip = $false
-        $beginBody = New-BeginBody -Version $version -Size $uploadSize -Sha256 $uploadSha -Notes $notes -UseZip $false -ExeSize $exeSize -ExeSha256 $exeHash -ForceRelease ([bool]$Force)
-        $begin = Invoke-MonitorApi -Query 'action=begin' -Method 'Post' -Body $beginBody
-    }
-    Assert-ApiSuccess $begin 'Start upload'
-    if ([string]$begin.mode -eq 'identical') {
-        Remove-TempPackage
-        Write-Host "PDF Studio $version is already published with the identical executable. No binary upload was needed." -ForegroundColor Green
-        if ($begin.notes_updated -eq $true) { Write-Host 'Release notes were refreshed.' }
-        exit 0
-    }
-    if ([string]::IsNullOrWhiteSpace([string]$begin.upload_id)) { throw 'Monitor did not return an upload ID for a non-identical release.' }
-
-    # A Monitor predating ZIP packages might accept the request but return no package=zip capability marker.
-    # Abort that provisional upload before sending the actual EXE, so a ZIP can never be published as PdfStudio.exe.
-    if ($useZip -and [string]$begin.package -ne 'zip') {
-        Write-Host 'This Monitor did not confirm ZIP package support. Restarting the upload with the raw EXE.' -ForegroundColor Yellow
-        Abort-Upload -Id ([string]$begin.upload_id)
-        Remove-TempPackage
-        $uploadPath = $ExePath
-        $uploadSize = $exeSize
-        $uploadSha = $exeHash
-        $useZip = $false
-        $beginBody = New-BeginBody -Version $version -Size $uploadSize -Sha256 $uploadSha -Notes $notes -UseZip $false -ExeSize $exeSize -ExeSha256 $exeHash -ForceRelease ([bool]$Force)
-        $begin = Invoke-MonitorApi -Query 'action=begin' -Method 'Post' -Body $beginBody
-        Assert-ApiSuccess $begin 'Start raw EXE upload'
-        if ([string]$begin.mode -eq 'identical') {
-            Write-Host "PDF Studio $version is already published with the identical executable. No binary upload was needed." -ForegroundColor Green
-            if ($begin.notes_updated -eq $true) { Write-Host 'Release notes were refreshed.' }
-            exit 0
-        }
-        if ([string]::IsNullOrWhiteSpace([string]$begin.upload_id)) { throw 'Monitor did not return an upload ID for the raw EXE upload.' }
-    }
-
-    $script:UploadId = [string]$begin.upload_id
-    if ([string]::IsNullOrWhiteSpace($script:UploadId)) { throw 'Monitor returned success but did not provide an upload ID.' }
-    $chunkSize = 4 * 1024 * 1024
-    if ($begin.chunk_size -and [int]$begin.chunk_size -ge 65536 -and [int]$begin.chunk_size -le (16 * 1024 * 1024)) { $chunkSize = [int]$begin.chunk_size }
-    $offset = [long]0
-    $stream = [System.IO.File]::Open($uploadPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-    try {
-        while ($offset -lt $uploadSize) {
-            $stream.Position = $offset
-            $want = [int][Math]::Min([long]$chunkSize, ($uploadSize - $offset))
-            $buffer = New-Object byte[] $want
-            $read = $stream.Read($buffer, 0, $want)
-            if ($read -le 0) { throw "Could not read upload data at byte $offset." }
-            if ($read -ne $want) {
-                $trimmed = New-Object byte[] $read
-                [Array]::Copy($buffer, $trimmed, $read)
-                $buffer = $trimmed
-            }
-            $nextOffset = $offset + $read
-            $retry = 0
-            $chunkAccepted = $false
-            while (-not $chunkAccepted -and $retry -lt 5) {
-                try {
-                    # Send a raw EXE as raw binary. Base64 is only needed for ZIP packages that may be
-                    # blocked by WAF/tunnel content inspection. Sending a 145 MB EXE as base64 adds
-                    # 33% transport overhead and creates an extra server-side decode path at finalization.
-                    $legacyEndpoint = $script:LastApiUrl -notmatch '/(?:public/)?api/upload\.php$'
-                    if ($legacyEndpoint -or -not $useZip) {
-                        $query = 'action=chunk&upload_id=' + [Uri]::EscapeDataString($script:UploadId) + '&offset=' + $offset
-                        $body = $buffer
-                        $contentType = 'application/octet-stream'
-                    } else {
-                        $query = 'action=chunk&upload_id=' + [Uri]::EscapeDataString($script:UploadId) + '&offset=' + $offset + '&enc=base64'
-                        $body = [Convert]::ToBase64String($buffer)
-                        $contentType = 'text/plain; charset=utf-8'
-                    }
-                    $chunkResult = Invoke-MonitorApi -Query $query -Method 'Post' -Body $body -ContentType $contentType
-                    Assert-ApiSuccess $chunkResult 'Upload chunk'
-                    $received = [long]$chunkResult.received
-                    if ($received -ne $nextOffset) { throw "Monitor acknowledged byte $received but expected $nextOffset." }
-                    $offset = $received
-                    $chunkAccepted = $true
-                }
-                catch {
-                    $status = Get-HttpStatus $_
-                    $bodyText = Get-HttpErrorBody $_
-                    $errorJson = $null
-                    if (-not [string]::IsNullOrWhiteSpace($bodyText)) { try { $errorJson = $bodyText | ConvertFrom-Json -ErrorAction Stop } catch { } }
-                    if ($status -eq 409 -and $null -ne $errorJson -and $null -ne $errorJson.expected_offset) {
-                        $expected = [long]$errorJson.expected_offset
-                        if ($expected -lt 0 -or $expected -gt $uploadSize) { throw "Monitor returned invalid resume offset $expected." }
-                        if ($expected -eq $nextOffset) {
-                            $offset = $expected # server committed the chunk but the response was lost
-                            $chunkAccepted = $true
-                        } elseif ($expected -ne $offset) {
-                            $offset = $expected # resume at the exact offset reported by the server
-                            $chunkAccepted = $true
-                        } else {
-                            $retry++
-                            if ($retry -lt 5) { Start-Sleep -Seconds ([Math]::Min(2 * $retry, 8)) }
-                        }
-                    } else {
-                        $retry++
-                        if ($retry -lt 5) {
-                            Write-Host "Chunk at byte $offset failed (attempt $retry/5); retrying... $($_.Exception.Message)" -ForegroundColor Yellow
-                            Start-Sleep -Seconds ([Math]::Min(2 * $retry, 8))
-                        } else {
-                            throw "Chunk upload failed at byte $offset after 5 attempts. $($_.Exception.Message)"
-                        }
-                    }
-                }
-            }
-            if (-not $chunkAccepted) { throw "Chunk upload did not complete at byte $offset." }
-            Write-Progress -Activity "Publishing PDF Studio $version" -Status ('Uploaded {0:N1} / {1:N1} MB' -f ($offset / 1MB), ($uploadSize / 1MB)) -PercentComplete ([int][Math]::Min(100, (($offset / [double]$uploadSize) * 100)))
-        }
-    }
-    finally { $stream.Dispose(); Write-Progress -Activity "Publishing PDF Studio $version" -Completed }
-
-    Write-Host ('Uploaded {0:N1} MB. Monitor is verifying and publishing...' -f ($uploadSize / 1MB))
-    try {
-        $finish = Invoke-MonitorApi -Query ('action=finish&upload_id=' + [Uri]::EscapeDataString($script:UploadId)) -Method 'Post' -Body '{}'
-    } catch {
-        $status = Get-HttpStatus $_
-        $bodyText = Get-HttpErrorBody $_
-        $errorMessage = ''
-        if (-not [string]::IsNullOrWhiteSpace($bodyText)) {
-            try {
-                $errorObject = $bodyText | ConvertFrom-Json -ErrorAction Stop
-                $errorMessage = [string]$errorObject.error
-            } catch { $errorMessage = $bodyText.Trim() }
-        }
-        if (-not [string]::IsNullOrWhiteSpace($errorMessage)) {
-            throw ("Finalize release failed (HTTP {0}): {1}" -f $status, $errorMessage)
-        }
-        if ($status -gt 0) { throw ("Finalize release failed (HTTP {0}); Monitor did not return a readable error body. Original error: {1}" -f $status, $_.Exception.Message) }
-        throw
-    }
-    Assert-ApiSuccess $finish 'Finalize release'
-    Remove-TempPackage
-    $script:UploadId = $null
-    Write-Host ''
-    Write-Host ([string]$finish.message) -ForegroundColor Green
-    Write-Host "Published version: $($finish.version)"
-    Write-Host ("Monitor release page: " + (Get-MonitorPageFromApiUrl $script:LastApiUrl))
+if ($mode -eq 'identical') {
+    if ($tempZip) { Remove-Item -LiteralPath $tempZip -ErrorAction SilentlyContinue }
+    Write-Host ('v' + $version + ' is already on the monitor with the SAME file - nothing to upload.') -ForegroundColor Yellow
+    if ($begin.Json.notes_updated) { Write-Host 'Release notes were refreshed from CHANGELOG.md.' -ForegroundColor Green }
+    Write-Host 'To upload anyway, run publish_to_monitor.ps1 -Force, or bump the version.'
     exit 0
 }
-catch {
-    if ($script:UploadId) { Abort-Upload -Id $script:UploadId }
-    Remove-TempPackage
-    Write-Host ''
-    Write-Host ('RELEASE UPLOAD FAILED: ' + $_.Exception.Message) -ForegroundColor Red
-    exit 1
+if ($mode -eq 'replace') { Write-Host ('v' + $version + ' already exists but the exe is DIFFERENT -> it will be OVERWRITTEN.') -ForegroundColor Yellow }
+else                     { Write-Host ('v' + $version + ' is a NEW version -> uploading as a new release.') -ForegroundColor Green }
+
+# ---------- chunks ----------
+$id = [string]$begin.Json.upload_id
+$chunk = [int]$begin.Json.chunk_size
+# The current Monitor advertises accepted encodings. On public/remote routes, prefer base64 so a tunnel/WAF
+# does not inspect raw ZIP bytes. A raw EXE and the LAN always use raw 4 MiB chunks (base64 would add 33% to ~150 MB).
+# Older Monitor versions that do not advertise base64 always receive raw chunks.
+$useBase64Chunks = $false
+$usingLanEndpoint = $false
+try {
+    $activeUri = [System.Uri]$script:endpoint
+    $lanUri = [System.Uri]$localDefault
+    $usingLanEndpoint = ($activeUri.Host -eq $lanUri.Host -and $activeUri.Port -eq $lanUri.Port)
+} catch { }
+if (-not $usingLanEndpoint -and $package -eq 'zip' -and $null -ne $begin.Json.chunk_encodings) {
+    foreach ($encoding in @($begin.Json.chunk_encodings)) { if ([string]$encoding -eq 'base64') { $useBase64Chunks = $true } }
 }
+if ($useBase64Chunks) { Write-Host 'Upload transport: base64-encoded chunks (public tunnel/WAF compatible).' -ForegroundColor DarkGray }
+else { Write-Host 'Upload transport: raw 4 MiB chunks (lowest overhead).' -ForegroundColor DarkGray }
+$fs = [IO.File]::OpenRead($uploadPath)
+$buf = New-Object byte[] $chunk
+$offset = [long]0
+$clock = [Diagnostics.Stopwatch]::StartNew()
+try {
+    while ($offset -lt $size) {
+        $fs.Position = $offset
+        $n = $fs.Read($buf, 0, $chunk)
+        if ($n -le 0) { throw 'Could not read the file to upload.' }
+        $sent = $false
+        for ($try = 1; $try -le 6 -and -not $sent; $try++) {
+            try {
+                if ($useBase64Chunks) {
+                    $encoded = [Convert]::ToBase64String($buf, 0, $n)
+                    $body = New-Object System.Net.Http.StringContent($encoded, [Text.Encoding]::ASCII, 'text/plain')
+                    $chunkQuery = '?action=chunk&upload_id=' + $id + '&offset=' + $offset + '&enc=base64'
+                } else {
+                    $body = New-Object System.Net.Http.ByteArrayContent($buf, 0, $n)
+                    $body.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
+                    $chunkQuery = '?action=chunk&upload_id=' + $id + '&offset=' + $offset
+                }
+                $r = Invoke-Monitor $chunkQuery $body
+                if ($r.Json.ok) { $offset = [long]$r.Json.received; $sent = $true }
+                elseif ($r.Status -eq 409 -and $null -ne $r.Json.expected_offset) { $offset = [long]$r.Json.expected_offset; $sent = $true }   # resume where the server is
+                elseif ($r.Status -eq 403) { throw (New-Object InvalidOperationException ('HTTP 403 during upload. The public proxy may be rejecting POST requests; restart with -Target local or release.bat auto. Response: ' + [string]$r.Json.error)) }
+                elseif ($r.Status -ge 400 -and $r.Status -lt 500 -and $r.Status -ne 408 -and $r.Status -ne 429) { throw (New-Object InvalidOperationException ([string]$r.Json.error)) }
+                else { throw (New-Object Net.WebException ([string]$r.Json.error)) }
+            } catch [InvalidOperationException] {
+                throw
+            } catch {
+                if ($try -ge 6) { throw }
+                Write-Host ('  piece failed (' + $_.Exception.Message + '), retrying ' + $try + '/5...') -ForegroundColor Yellow
+                Start-Sleep -Seconds ([Math]::Min(10, 2 * $try))
+            }
+        }
+        $pct = [int][Math]::Floor($offset * 100 / $size)
+        $rate = if ($clock.Elapsed.TotalSeconds -gt 0) { $offset / $clock.Elapsed.TotalSeconds } else { 0 }
+        Write-Progress -Activity ('Uploading PDF Studio V3 v' + $version + ' to the monitor') -Status ('{0}%  ({1} of {2})  {3}/s' -f $pct, (Mb $offset), (Mb $size), (Mb $rate)) -PercentComplete $pct
+    }
+} catch {
+    $fs.Dispose()
+    if ($tempZip) { Remove-Item -LiteralPath $tempZip -ErrorAction SilentlyContinue }
+    try { [void](Invoke-Monitor ('?action=abort&upload_id=' + $id) (JsonBody @{})) } catch { }
+    Write-Progress -Activity 'Uploading' -Completed
+    Fail $_.Exception.Message
+}
+$fs.Dispose()
+if ($tempZip) { Remove-Item -LiteralPath $tempZip -ErrorAction SilentlyContinue }
+Write-Progress -Activity 'Uploading' -Completed
+Write-Host ('Uploaded {0} in {1:N0} s. Verifying and publishing on the monitor...' -f (Mb $size), $clock.Elapsed.TotalSeconds)
+
+# ---------- finish ----------
+try { $fin = Invoke-Monitor ('?action=finish&upload_id=' + $id) (JsonBody @{}) } catch { Fail ('Could not finish: ' + $_.Exception.Message) }
+if (-not $fin.Json.ok) { Fail ('The Monitor rejected the release at the final step (HTTP ' + $fin.Status + '): ' + [string]$fin.Json.error) }
+Write-Host ''
+if ($fin.Json.replaced) { Write-Host ('DONE - v' + $version + ' was OVERWRITTEN on the monitor, with its release notes.') -ForegroundColor Green }
+else                    { Write-Host ('DONE - v' + $version + ' was PUBLISHED on the monitor as a new release, with its release notes.') -ForegroundColor Green }
+foreach ($w in @($fin.Json.warnings)) { if ($w) { Write-Host ('Note: ' + $w) -ForegroundColor Yellow } }
+exit 0
