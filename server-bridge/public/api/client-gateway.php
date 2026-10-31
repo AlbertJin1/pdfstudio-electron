@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 /**
- * PDF Studio client gateway.
+ * Universal App Monitor public desktop-client gateway (registry-enabled applications).
  *
  * Deploy this file as /pdfstudio-monitor/public/api/client-gateway.php (or the equivalent
  * /api path handled by your rewrite rules). The shared Monitor API key is loaded only by PHP
@@ -61,7 +61,7 @@ function gateway_rate_limit(string $bucket, int $limit, int $windowSeconds): ?bo
 {
     $ip = gateway_clean_string($_SERVER['REMOTE_ADDR'] ?? 'unknown', 64);
     $host = strtolower(gateway_clean_string($_SERVER['HTTP_HOST'] ?? 'monitor', 160));
-    $dir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'pdfstudio-client-gateway';
+    $dir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'universal-app-client-gateway';
     if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) return null;
     @chmod($dir, 0700);
     $path = $dir . DIRECTORY_SEPARATOR . hash('sha256', $host . '|' . $ip . '|' . $bucket) . '.json';
@@ -207,6 +207,28 @@ $monitorRoot = dirname(__DIR__, 2);
 require_once $monitorRoot . DIRECTORY_SEPARATOR . 'src' . DIRECTORY_SEPARATOR . 'bootstrap.php';
 $apiKey = trim((string) cfg('api_key', ''));
 
+/** Resolve the explicit application identifier. The legacy `app` field remains accepted; `app_id` is canonical. */
+function gateway_app_id(mixed $value, bool $allowLegacyPdfDefault = false): string
+{
+    $appId = strtolower(gateway_clean_string($value ?? '', 32));
+    if ($appId === '' && $allowLegacyPdfDefault) $appId = 'pdfstudio';
+    if ($appId === '' || !valid_app_id($appId) || !app_uses_client_gateway($appId)) {
+        gateway_json_error(400, 'A valid enabled application ID is required for this public desktop gateway resource.');
+    }
+    return $appId;
+}
+
+/** Reject conflicting aliases instead of silently choosing whichever application happens to be first. */
+function gateway_request_app_id(array $source, bool $allowLegacyPdfDefault = false): string
+{
+    $appId = gateway_clean_string($source['app_id'] ?? '', 32);
+    $legacyApp = gateway_clean_string($source['app'] ?? '', 32);
+    if ($appId !== '' && $legacyApp !== '' && strcasecmp($appId, $legacyApp) !== 0) {
+        gateway_json_error(400, 'The app_id and legacy app fields identify different applications.');
+    }
+    return gateway_app_id($appId !== '' ? $appId : $legacyApp, $allowLegacyPdfDefault);
+}
+
 /** Public-safe gateway routing settings; this file contains no API credentials. */
 $configFile = $monitorRoot . DIRECTORY_SEPARATOR . 'config' . DIRECTORY_SEPARATOR . 'client-gateway.php';
 $config = [];
@@ -233,7 +255,7 @@ if (!is_array($upstreamParts)
     || isset($upstreamParts['pass'])
     || !empty($upstreamParts['query'])
     || !empty($upstreamParts['fragment'])) {
-    gateway_json_error(503, 'The PDF Studio Monitor gateway upstream must be a valid HTTPS API base URL.');
+    gateway_json_error(503, 'The Monitor gateway upstream must be a valid HTTPS API base URL.');
 }
 
 $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
@@ -256,7 +278,8 @@ switch ($resource) {
             gateway_json_error(405, $needsPost ? 'Differential update requests require POST.' : 'This update action accepts GET only.');
         }
         $upstreamPath = 'update.php';
-        $upstreamQuery = ['action' => $action, 'app' => 'pdfstudio'];
+        $gatewayAppId = gateway_request_app_id($_GET, true);
+        $upstreamQuery = ['action' => $action, 'app_id' => $gatewayAppId, 'app' => $gatewayAppId];
         $version = gateway_clean_string($_GET['version'] ?? '', 96);
         if ($version !== '') {
             if (!gateway_valid_version($version)) gateway_json_error(400, 'Invalid release version.');
@@ -273,15 +296,15 @@ switch ($resource) {
             if ($hostname !== '') $upstreamQuery['hostname'] = $hostname;
             $localIp = gateway_clean_string($_GET['local_ip'] ?? '', 64);
             if ($localIp !== '' && filter_var($localIp, FILTER_VALIDATE_IP) !== false) $upstreamQuery['local_ip'] = $localIp;
-            $rateLimit = ['update-latest', 120, 60];
+            $rateLimit = ['update-latest-' . $gatewayAppId, 120, 60];
         } elseif ($action === 'download') {
             $format = strtolower(gateway_clean_string($_GET['format'] ?? '', 12));
             if ($format !== '' && $format !== 'zip') gateway_json_error(400, 'Unsupported update package format.');
             if ($format === 'zip') $upstreamQuery['format'] = 'zip';
             $streamDownload = true;
-            $rateLimit = ['update-download', 30, 3600];
+            $rateLimit = ['update-download-' . $gatewayAppId, 30, 3600];
         } elseif ($action === 'manifest') {
-            $rateLimit = ['update-manifest', 120, 3600];
+            $rateLimit = ['update-manifest-' . $gatewayAppId, 120, 3600];
         } else {
             // Differential requests may name only valid SHA-256 chunk ids. The API revalidates every
             // hash against its release manifest; this gateway also bounds incoming JSON before forwarding.
@@ -302,7 +325,7 @@ switch ($resource) {
             $requestBody = json_encode(['version' => ltrim($version, 'vV'), 'chunks' => array_keys($chunks)], JSON_UNESCAPED_SLASHES);
             if (!is_string($requestBody)) gateway_json_error(400, 'Differential request could not be serialized.');
             $streamDownload = true;
-            $rateLimit = ['update-delta', 60, 3600];
+            $rateLimit = ['update-delta-' . $gatewayAppId, 60, 3600];
         }
         break;
     }
@@ -315,9 +338,11 @@ switch ($resource) {
         if (!gateway_valid_install_id($installId)) gateway_json_error(400, 'A valid installation identifier is required.');
         $version = gateway_clean_string($_GET['version'] ?? '', 96);
         if ($version !== '' && !gateway_valid_version($version)) gateway_json_error(400, 'Invalid application version.');
+        $gatewayAppId = gateway_request_app_id($_GET, true);
         $upstreamPath = 'access.php';
         $upstreamQuery = [
-            'app' => 'pdfstudio',
+            'app_id' => $gatewayAppId,
+            'app' => $gatewayAppId,
             'install_id' => strtolower($installId),
         ];
         if ($version !== '') $upstreamQuery['version'] = ltrim($version, 'vV');
@@ -325,7 +350,7 @@ switch ($resource) {
         if ($hostname !== '') $upstreamQuery['hostname'] = $hostname;
         $localIp = gateway_clean_string($_GET['local_ip'] ?? '', 64);
         if ($localIp !== '' && filter_var($localIp, FILTER_VALIDATE_IP) !== false) $upstreamQuery['local_ip'] = $localIp;
-        $rateLimit = ['access-policy', 600, 60];
+        $rateLimit = ['access-policy-' . $gatewayAppId, 600, 60];
         break;
     }
     case 'telemetry': {
@@ -341,6 +366,7 @@ switch ($resource) {
         if (!is_array($body)) gateway_json_error(400, 'Telemetry payload must be a JSON object.');
         $event = gateway_clean_string($body['event'] ?? '', 16);
         if (!in_array($event, ['open', 'heartbeat', 'close', 'review'], true)) gateway_json_error(400, 'Unsupported telemetry event.');
+        $gatewayAppId = gateway_request_app_id($body, false);
         $installId = gateway_clean_string($body['install_id'] ?? '', 64);
         if (!gateway_valid_install_id($installId)) gateway_json_error(400, 'A valid installation identifier is required.');
         $version = gateway_clean_string($body['version'] ?? '', 96);
@@ -357,7 +383,8 @@ switch ($resource) {
             if ($reviewName === '') $reviewName = $hostname;
             $requestBody = json_encode([
                 'event' => 'review',
-                'app' => 'pdfstudio',
+                'app_id' => $gatewayAppId,
+                'app' => $gatewayAppId,
                 'install_id' => strtolower($installId),
                 'version' => ltrim($version, 'vV'),
                 'os' => $os,
@@ -368,10 +395,10 @@ switch ($resource) {
                 'message' => gateway_clean_text($body['message'] ?? '', 1500),
             ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
             if (!is_string($requestBody)) gateway_json_error(400, 'Review could not be serialized.');
-            gateway_rate_limit_or_reject('review-install-' . strtolower($installId), 10, 3600);
+            gateway_rate_limit_or_reject('review-install-' . $gatewayAppId . '-' . strtolower($installId), 10, 3600);
             $upstreamPath = '';
             $upstreamQuery = [];
-            $rateLimit = ['review', 60, 60];
+            $rateLimit = ['review-' . $gatewayAppId, 60, 60];
             break;
         }
         $sessionId = gateway_clean_string($body['session_id'] ?? '', 64);
@@ -385,7 +412,8 @@ switch ($resource) {
         if ($localIp !== '' && filter_var($localIp, FILTER_VALIDATE_IP) === false) $localIp = '';
         $requestBody = json_encode([
             'event' => $event,
-            'app' => 'pdfstudio',
+            'app_id' => $gatewayAppId,
+            'app' => $gatewayAppId,
             'session_id' => strtolower($sessionId),
             'install_id' => strtolower($installId),
             'version' => ltrim($version, 'vV'),
@@ -397,10 +425,10 @@ switch ($resource) {
         ], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         if (!is_string($requestBody)) gateway_json_error(400, 'Telemetry payload could not be serialized.');
         // Per-install limiting supplements IP limiting and prevents one install identifier from flooding telemetry.
-        gateway_rate_limit_or_reject('telemetry-install-' . strtolower($installId), 10, 60);
+        gateway_rate_limit_or_reject('telemetry-install-' . $gatewayAppId . '-' . strtolower($installId), 10, 60);
         $upstreamPath = '';
         $upstreamQuery = [];
-        $rateLimit = ['telemetry', 300, 60];
+        $rateLimit = ['telemetry-' . $gatewayAppId, 300, 60];
         break;
     }
     default:
@@ -415,7 +443,7 @@ if ($upstreamQuery !== []) $upstreamUrl .= '?' . http_build_query($upstreamQuery
 $headers = [
     'X-Api-Key: ' . $apiKey,
     'ngrok-skip-browser-warning: 1',
-    'User-Agent: PDF-Studio-Client-Gateway/1.0',
+    'User-Agent: Universal-App-Client-Gateway/1.0',
     'Accept: ' . ($streamDownload ? 'application/octet-stream, application/zip, */*' : 'application/json'),
 ];
 if ($requestBody !== null) $headers[] = 'Content-Type: application/json';

@@ -1,8 +1,8 @@
 {
   "name": "pdf-studio-windows",
-  "version": "3.0.4",
+  "version": "3.0.6",
   "private": true,
-  "description": "PDF Studio \u2014 a modern, local-first Windows PDF workspace built with Electron, React, Node.js and Tailwind CSS.",
+  "description": "PDF Studio — a modern, local-first Windows PDF workspace built with Electron, React, Node.js and Tailwind CSS.",
   "author": "Jessie Albert Regualos",
   "license": "UNLICENSED",
   "main": "electron/main.cjs",
@@ -140,7 +140,7 @@
         ]
       }
     ],
-    "copyright": "Copyright \u00a9 Jessie Albert Regualos",
+    "copyright": "Copyright © Jessie Albert Regualos",
     "electronFuses": {
       "runAsNode": false,
       "enableNodeOptionsEnvironmentVariable": false,

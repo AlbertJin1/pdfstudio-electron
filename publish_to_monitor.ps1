@@ -7,7 +7,7 @@
   This is the same uploader as the legacy 2.8.x project (System.Net.Http.HttpClient, begin/chunk/finish, LAN-first routing,
   resumable 4 MiB chunks, SHA-256 verification), adapted for the Electron portable EXE:
     * the version comes from the EXE's File version (what the Monitor reads) and must match package.json;
-    * release notes come from the CHANGELOG.md heading "## 3.0.4" or "## [3.0.4]";
+    * release notes come from the CHANGELOG.md heading matching the EXE File version;
     * the EXE is zipped only when the ZIP is actually smaller (an Electron/NSIS portable EXE is already compressed);
     * every Monitor error body is printed, so a rejected release always says WHY.
   API key: -ApiKey, PDFSTUDIO_MONITOR_KEY, monitor-key.txt next to this script, or a secure prompt. It is never stored in the app.

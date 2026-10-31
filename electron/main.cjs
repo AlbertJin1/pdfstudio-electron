@@ -118,13 +118,18 @@ nativeTheme.on('updated', () => {
 const PDF_STUDIO_MONITOR_BASE_URL = 'https://pdfstudio.shares.zrok.io/pdfstudio-monitor/api';
 // The shared Monitor API key belongs exclusively on the Monitor server. Electron never stores,
 // loads, decrypts, or sends it. All remote operations go through the allowlisted server-side gateway.
-// Deploy the matching public/api/client-gateway.php from Monitor 2.4.18 or this server-bridge copy.
+// Deploy the matching public/api/client-gateway.php from Universal App Monitor 2.4.26 or this server-bridge copy.
 // No client secret is needed; configure MONITOR_API_KEY only in the Monitor server .env/private config.
 const MONITOR_GATEWAY_SCRIPT = 'client-gateway.php';
 function monitorGatewayEndpoint(params = {}) {
   const endpoint = new URL(`${PDF_STUDIO_MONITOR_BASE_URL}/${MONITOR_GATEWAY_SCRIPT}`);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== '') endpoint.searchParams.set(key, String(value));
+  }
+  if (params.resource === 'update' || params.resource === 'access') {
+    // This package reports only to PDF Studio's app namespace; preserve `app` for old gateways.
+    endpoint.searchParams.set('app_id', 'pdfstudio');
+    endpoint.searchParams.set('app', 'pdfstudio');
   }
   return endpoint;
 }
@@ -1178,6 +1183,7 @@ function usageSessionPayload(eventName) {
   if (!usageSession || !usageIdentity) return null;
   return {
     event: eventName,
+    app_id: 'pdfstudio',
     app: 'pdfstudio',
     session_id: usageSession.id,
     install_id: usageIdentity.installId,
@@ -2735,7 +2741,7 @@ handle('review:submit', async (_event, review) => {
   await ensureUsageIdentity();
   const reviewId = crypto.randomBytes(16).toString('hex');
   const payload = {
-    event: 'review', app: 'pdfstudio', session_id: reviewId,
+    event: 'review', app_id: 'pdfstudio', app: 'pdfstudio', session_id: reviewId,
     client_review_id: reviewId,
     install_id: usageIdentity.installId, version: app.getVersion(), os: getUsageOsLabel(),
     hostname: getUsageHostname(), local_ip: getUsageLocalIp(),

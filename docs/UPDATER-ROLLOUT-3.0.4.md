@@ -20,7 +20,7 @@ This is a server-enforced staged release path, not remote control over an alread
 
 ## Deployment checklist
 
-1. Deploy the updated `public/api/client-gateway.php` from Monitor 2.4.18 (either the canonical public file or the matching `server-bridge/public/api/client-gateway.php` file in the Electron source). It exposes only allowlisted `latest`, raw/ZIP `download`, `manifest`, and POST `delta` operations, with the API key injected on the server only.
+1. Deploy the updated `public/api/client-gateway.php` from Universal App Monitor 2.4.26 (either the canonical public file or the matching `server-bridge/public/api/client-gateway.php` file in the Electron source). It exposes only allowlisted `latest`, raw/ZIP `download`, `manifest`, and POST `delta` operations, with the API key injected on the server only.
 2. Keep the existing Monitor server-side `MONITOR_API_KEY` configured. Do not place that key in Electron source or release artifacts.
 3. On a Windows build machine with supported Node/npm and network access, in the Electron project directory run:
 

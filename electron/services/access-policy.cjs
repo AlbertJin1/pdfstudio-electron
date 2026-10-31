@@ -94,6 +94,7 @@ function parseCache(raw) {
 /** Builds the query string the monitor expects. */
 function buildPolicyQuery({ installId, version, hostname, localIp }) {
   const params = new URLSearchParams();
+  params.set('app_id', 'pdfstudio');
   params.set('app', 'pdfstudio');
   params.set('install_id', String(installId || ''));
   params.set('version', String(version || ''));
@@ -138,7 +139,8 @@ async function fetchAccessPolicy({
       const text = await response.text().catch(() => '');
       let body = null;
       try { body = JSON.parse(text); } catch { /* not JSON */ }
-      const policy = response.ok ? parsePolicyResponse(body) : null;
+      const responseAppId = String(body?.app_id || body?.app || '').trim().toLowerCase();
+      const policy = response.ok && responseAppId === 'pdfstudio' ? parsePolicyResponse(body) : null;
       if (policy) return { ok: true, policy };
       lastMessage = `${endpoint.pathname} returned HTTP ${response.status}${body?.error ? `: ${cleanText(body.error, 160)}` : response.ok ? ' without a valid access policy' : ''}`;
       // Wrong route, auth layer, tunnel page: try the alternate deployment path before giving up.

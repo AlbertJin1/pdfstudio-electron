@@ -7,8 +7,8 @@ const policy = require('../electron/services/access-policy.cjs');
 const { monitorApiUrlCandidates } = require('../electron/services/monitor-api.cjs');
 
 const ID = 'a'.repeat(32);
-const enabledBody = { ok: true, enabled: true, access_state: 'enabled', install_id: ID, reason: '', updated_at: 0, updated_by: '', poll_after: 30 };
-const disabledBody = { ok: true, enabled: false, access_state: 'disabled', install_id: ID, reason: 'Laptop returned to IT', updated_at: 1790000000, updated_by: 'admin', poll_after: 30 };
+const enabledBody = { ok: true, app_id: 'pdfstudio', app: 'pdfstudio', enabled: true, access_state: 'enabled', install_id: ID, reason: '', updated_at: 0, updated_by: '', poll_after: 30 };
+const disabledBody = { ok: true, app_id: 'pdfstudio', app: 'pdfstudio', enabled: false, access_state: 'disabled', install_id: ID, reason: 'Laptop returned to IT', updated_at: 1790000000, updated_by: 'admin', poll_after: 30 };
 
 // ── parsePolicyResponse: only a well-formed answer may lock or unlock ──
 assert.equal(policy.parsePolicyResponse(enabledBody).enabled, true);
@@ -117,3 +117,8 @@ assert.ok(blankReason.reason.length > 0, 'a lock always has an explanation');
 
   console.log('Device access policy tests passed.');
 })().catch((error) => { console.error(error); process.exit(1); });
+
+// Application identity is explicit so shared Monitor gateways cannot infer the wrong client tab.
+const identityQuery = policy.buildPolicyQuery({ installId: 'a'.repeat(32), version: '3.0.4', hostname: 'TEST-PC', localIp: '192.168.1.20' });
+assert.equal(identityQuery.get('app_id'), 'pdfstudio');
+assert.equal(identityQuery.get('app'), 'pdfstudio');

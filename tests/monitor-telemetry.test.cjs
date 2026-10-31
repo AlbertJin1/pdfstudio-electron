@@ -31,6 +31,8 @@ assert.doesNotMatch(main, /if \(response\.status >= 400 && response\.status < 50
 const accessPolicy = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'access-policy.cjs'), 'utf8');
 assert.doesNotMatch(accessPolicy, /apiKey|X-Api-Key/, 'access policy polling does not carry a shared key');
 assert.match(main, /monitorGatewayEndpoint\(\{ resource: 'telemetry' \}\)/, 'telemetry flows through the server-side gateway');
+assert.match(main, /app_id: 'pdfstudio'/, 'PDF Studio telemetry includes an explicit canonical app_id');
+assert.match(main, /searchParams\.set\('app_id', 'pdfstudio'\)/, 'PDF Studio updater URLs always include the PDF Studio app_id');
 assert.doesNotMatch(main, /monitorApiKey|loadMonitorApiKey|X-Api-Key|PDF_STUDIO_MONITOR_API_KEY/, 'Electron never loads or sends the shared Monitor API key');
 const gateway = fs.readFileSync(path.join(__dirname, '..', 'server-bridge', 'public', 'api', 'client-gateway.php'), 'utf8');
 assert.match(gateway, /X-Api-Key: /, 'only the server-side gateway attaches the shared key upstream');
@@ -46,6 +48,8 @@ assert.match(gateway, /Invalid differential chunk identifier/, 'server bridge va
 {
   const gateway = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'server-bridge', 'public', 'api', 'client-gateway.php'), 'utf8');
   assert.match(gateway, /\['open', 'heartbeat', 'close', 'review'\]/, 'gateway accepts the review event');
+  assert.match(gateway, /gateway_request_app_id\(\$body, false\)/, 'telemetry requires an explicit application ID');
+  assert.match(gateway, /app_uses_client_gateway\(\$appId\)/, 'gateway uses the monitor application registry rather than a static app list');
   assert.match(gateway, /min_range' => 1, 'max_range' => 5/, 'gateway validates the 1-5 rating');
 }
 console.log('Monitor telemetry route and client reporting regression checks passed.');

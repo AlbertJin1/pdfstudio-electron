@@ -1,5 +1,18 @@
 # PDF Studio Changelog
 
+## 3.0.6
+
+_Application-aware monitoring and reliability update for PDF Studio 3._
+
+### Monitoring and compatibility
+- PDF Studio monitor requests identify the application explicitly with `app_id=pdfstudio`, while retaining the legacy `app=pdfstudio` field for older Monitor gateways.
+- Desktop telemetry, access checks, reviews, and update requests remain scoped to PDF Studio so they cannot be confused with sessions or releases from other applications hosted by the Universal App Monitor.
+- The existing Monitor gateway compatibility paths are retained, allowing the updated client to work with the multi-application routing fix.
+
+### Startup and packaging
+- Includes the hardened startup-splash handshake, watchdog, and renderer failure recovery.
+- Carries forward the portable packaging optimizations documented for the 3.0.5 build work, reducing unnecessary bundled OCR and native runtime assets while preserving the built-in PDF features.
+
 ## 3.0.4
 
 _PDF Studio 3 is a ground-up rebuild of PDF Studio on Electron, and the first release after the legacy 2.8.x line. Your documents are still processed on your own computer._
@@ -42,6 +55,19 @@ _PDF Studio 3 is a ground-up rebuild of PDF Studio on Electron, and the first re
 - PDF to Word is not Acrobat-grade. Check complex forms, scans and merged tables in Word.
 - Not carried over from 2.8.x: certified redaction and some legacy editor features.
 
+## Developer and release notes (3.0.6)
+
+_Not shown in the update window. The uploader only sends the `## 3.0.6` section above._
+
+### Build and release
+- Application version and lockfile are aligned at `3.0.6`; the renderer fallback version is aligned as well.
+- The release uploader discovers the matching changelog section from the built EXE version instead of relying on a hard-coded release number.
+- Monitor requests explicitly identify the PDF Studio application. The Universal App Monitor must include the multi-application gateway routing fix (2.4.26 or newer).
+
+### Validation
+- `tests/startup-splash.test.cjs` verifies the startup handshake and asserts that the package and lockfile versions are both `3.0.6`.
+- Rebuild the Windows portable EXE on the supported Windows build machine before publishing; this source package does not claim to contain a newly built `PdfStudio.exe`.
+
 ## Developer and release notes (3.0.4)
 
 _Not shown in the update window. The uploader only sends the `## 3.0.4` section above._
@@ -61,7 +87,7 @@ _Not shown in the update window. The uploader only sends the `## 3.0.4` section 
 - 3.0.3 clients lack this code, so their first update to 3.0.4 uses the full EXE.
 
 ### Known server requirement
-- Review submissions need Monitor 2.4.19 or newer, whose gateway accepts the `review` event. Older gateways return HTTP 400 and the app keeps the review queued.
+- Review submissions require Universal App Monitor 2.4.26 or newer, whose gateway validates review events and routes them under `app_id=pdfstudio`. Older gateways return HTTP 400 and the app keeps the review queued.
 
 ### Test commands
 - `npm run test:pdf`, `test:access`, `test:update`, `test:release-script`, `test:build-size`, `test:photo-editor`, `test:branding`, `test:theme-ux`, `test:workspace-ui`

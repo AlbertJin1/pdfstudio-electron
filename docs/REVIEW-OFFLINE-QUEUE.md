@@ -11,14 +11,14 @@
 
 ## Server compatibility requirement
 
-The uploaded PDF Studio Monitor 2.4.18 gateway only permits `open`, `heartbeat`, and `close` events at `resource=telemetry`, and rejects `review` as an unsupported telemetry event. The protected Monitor API itself accepts review events, but requires the server-only API key. PDF Studio therefore must not bypass the gateway or embed that secret in the desktop client.
+Universal App Monitor 2.4.26 validates and forwards `review` alongside `open`, `heartbeat`, and `close` through the public gateway. The review request carries `app_id=pdfstudio`; the gateway injects the server-only API key and the desktop client never bypasses the gateway.
 
-This app-side implementation safely keeps the review pending and retries it, but successful remote delivery requires the deployed Monitor gateway to allowlist and validate review submissions. The Monitor project is intentionally not modified in this patch. Once the gateway accepts the event, the queued review is delivered on a subsequent retry. Do not treat a locally queued review as already received by the Monitor.
+This app-side implementation safely keeps the review pending and retries it. Successful remote delivery requires the paired Monitor 2.4.26 deployment; once that gateway accepts the app-scoped event, the queued review is delivered on a subsequent retry. Do not treat a locally queued review as already received by the Monitor.
 
 ## Gateway requirement (important)
 
-The Monitor's `public/api/client-gateway.php` must be the version that accepts the `review` telemetry event
-(Monitor 2.4.19+ / `server-bridge/public/api/client-gateway.php`). An older gateway answers
+The Monitor's `public/api/client-gateway.php` must be the app-ID-aware version that accepts the `review` event
+(Universal App Monitor 2.4.26+ / `server-bridge/public/api/client-gateway.php`). An older gateway answers
 `HTTP 400: Unsupported telemetry event.` — the review is then kept in the encrypted queue and re-sent automatically:
 at every app start, and otherwise on the slower "permanent failure" schedule (hourly, backing off). No review is lost.
 

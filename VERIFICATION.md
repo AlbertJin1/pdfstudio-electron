@@ -161,7 +161,7 @@ Targeted mocked updater integration tests passed for Windows (legacy `action=lat
 
 ## App review integration note
 - Review prompt logic and persistent per-installation state were added to the Electron app, without changing the Monitor project.
-- The uploaded Monitor 2.4.18 gateway explicitly rejects `review` as a telemetry event; therefore its server-side submission cannot succeed through that gateway until review forwarding is enabled there. Failed submissions are not marked as complete.
+- The paired Universal App Monitor 2.4.26 gateway accepts validated review events under `app_id=pdfstudio`, and the client-side review test verifies that namespace is included in every submission. Failed submissions are not marked as complete.
 - PDF save IPC now opens the destination folder after a successful save.
 - Export watermark now uses bold Helvetica, uppercase text, a page-diagonal-based font size, and a higher-opacity default.
 
