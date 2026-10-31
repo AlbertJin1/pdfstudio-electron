@@ -47,7 +47,7 @@ assert.match(index, /within 18 seconds/,
   'the inline watchdog must report a frontend mount timeout');
 assert.match(splash, /html\.leaving #card\{animation:out/,
   'the branded splash must retain its deliberate exit animation');
-assert.equal(pkg.version, '3.0.6');
+assert.equal(pkg.version, '3.0.7');
 assert.equal(lock.version, pkg.version);
 assert.equal(lock.packages[''].version, pkg.version);
 console.log('Startup splash handshake, timeout, failure recovery, and release version tests passed.');

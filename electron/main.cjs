@@ -13,6 +13,7 @@ const ocrService = require('./ocr-service.cjs');
 const imageTextExtractor = require('./services/image-text-extractor.cjs');
 const ghostscriptCompression = require('./services/ghostscript-compression.cjs');
 const portableUpdateEngine = require('./services/portable-update-engine.cjs');
+const oldVersionCleanup = require('./services/old-version-cleanup.cjs');
 
 // All settings, caches and staged updates live in the per-user app-data folder (%AppData%\PDF Studio), so the
 // portable EXE never creates any folder next to itself. The folder name is set explicitly because the package name
@@ -526,8 +527,11 @@ async function getStagedUpdatePath(fileName) {
   return candidate;
 }
 
+// After an update the new EXE renames itself to the old file's name; the env var still holds the pre-rename path.
+let launcherPathOverride = null;
+function getPortableEnvLauncher() { return launcherPathOverride || process.env.PORTABLE_EXECUTABLE_FILE; }
 function getPortableLauncherPath() {
-  const candidates = [process.env.PORTABLE_EXECUTABLE_FILE, process.execPath];
+  const candidates = [getPortableEnvLauncher(), process.execPath];
   for (const candidate of candidates) {
     if (!candidate || !path.isAbsolute(candidate) || !fsSync.existsSync(candidate)) continue;
     try {
@@ -1754,6 +1758,24 @@ function markUpdatePromptShown(version) {
   if (pendingUpdate && pendingUpdate.version === String(version || '')) promptedVersionThisSession = pendingUpdate.version;
 }
 
+function getOldVersionCleanupPath() {
+  return path.join(app.getPath('userData'), oldVersionCleanup.MARKER_NAME);
+}
+// Runs in the new version after an update: deletes the previous EXE once its process has exited (retries for ~30 s).
+async function removeOldVersionAfterUpdate() {
+  try {
+    const result = await oldVersionCleanup.runCleanup({
+      markerPath: getOldVersionCleanupPath(),
+      currentExe: getPortableLauncherPath(),
+      currentVersion: app.getVersion(),
+      compareVersions,
+    });
+    for (const file of result.removed) console.log('[PDF Studio] Removed old version:', file);
+    if (result.renamedTo) { launcherPathOverride = result.renamedTo; console.log('[PDF Studio] Updated EXE now uses the previous file name:', result.renamedTo); }
+  } catch (error) {
+    console.warn('[PDF Studio] Old version cleanup failed:', error?.message || error);
+  }
+}
 async function uniqueUpdateTarget(dir, version) {
   let candidate = path.join(dir, `PdfStudio-${version}.exe`);
   for (let n = 2; fsSync.existsSync(candidate); n += 1) candidate = path.join(dir, `PdfStudio-${version} (${n}).exe`);
@@ -1768,7 +1790,7 @@ async function applyPendingUpdateNow() {
     await removePendingUpdate({ removePayload: true });
     throw new Error('The update package did not pass its integrity check. Please check for updates again.');
   }
-  const launcher = process.env.PORTABLE_EXECUTABLE_FILE;
+  const launcher = getPortableEnvLauncher();
   const dirs = [launcher && fsSync.existsSync(launcher) ? path.dirname(path.resolve(launcher)) : null, app.getPath('downloads')].filter(Boolean);
   let installed = null;
   for (const dir of dirs) {
@@ -1781,9 +1803,22 @@ async function applyPendingUpdateNow() {
   }
   if (!installed) throw new Error('The verified update could not be copied to a writable folder.');
   publishUpdaterState({ status: 'applying', latestVersion: pendingUpdate.version, message: 'Starting the new version of PDF Studio…' });
+  // The running EXE is locked by Windows, so it cannot delete itself. Leave a note for the new version, which removes this
+  // old EXE as soon as it starts and then takes over its file name (see old-version-cleanup.cjs). Only the copy next to the old launcher is ever replaced.
+  const oldLauncher = getPortableLauncherPath();
+  const cleanupMarker = getOldVersionCleanupPath();
+  if (oldLauncher && path.dirname(installed) === path.dirname(path.resolve(oldLauncher))) {
+    await oldVersionCleanup.writeMarker(cleanupMarker, {
+      oldPath: path.resolve(oldLauncher), oldVersion: app.getVersion(), newPath: installed, newVersion: pendingUpdate.version,
+      oldSize: (await fs.stat(oldLauncher).catch(() => null))?.size || 0,
+    }).catch((error) => console.warn('[PDF Studio] Could not schedule removal of the old version:', error?.message || error));
+  }
   app.releaseSingleInstanceLock();
   const failure = await shell.openPath(installed);
-  if (failure) throw new Error(`The new version could not be started: ${failure}`);
+  if (failure) {
+    await fs.rm(cleanupMarker, { force: true }).catch(() => {});
+    throw new Error(`The new version could not be started: ${failure}`);
+  }
   setTimeout(() => app.quit(), 400);
   return { started: true, path: installed };
 }
@@ -2281,6 +2316,7 @@ function runBackgroundStartup() {
   if (backgroundStartupDone) return;
   backgroundStartupDone = true;
   void startUsageMonitoring();
+  void removeOldVersionAfterUpdate();
   // Validate any previously staged package before doing a fresh release lookup.
   // Every launch checks in the background; repeat checks during long sessions without interrupting document work.
   void restorePendingUpdate().then(() => {

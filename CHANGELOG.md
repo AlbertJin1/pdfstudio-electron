@@ -1,5 +1,14 @@
 # PDF Studio Changelog
 
+## 3.0.7
+
+_Update reliability release for PDF Studio 3._
+
+### Updates
+- After an update installs successfully, the new version deletes the previous PDF Studio EXE and then renames itself to that EXE's file name, so a copy the user renamed (and any shortcut or taskbar pin pointing to it) keeps working. Older `PdfStudio-<version>.exe` copies left by earlier updates are removed too.
+- The old file is locked while it runs, so this happens a few seconds after the new version starts, retrying until the old process has exited. If the rename is refused, the new EXE simply keeps its versioned name.
+- Guarded: only the EXE the old version recorded for itself (same folder, same size), only when the running version is newer, and never the running file.
+
 ## 3.0.6
 
 _Application-aware monitoring and reliability update for PDF Studio 3._
@@ -54,6 +63,16 @@ _PDF Studio 3 is a ground-up rebuild of PDF Studio on Electron, and the first re
 - Whiteout and text cover-ups are visual only. They are not secure redaction.
 - PDF to Word is not Acrobat-grade. Check complex forms, scans and merged tables in Word.
 - Not carried over from 2.8.x: certified redaction and some legacy editor features.
+
+## Developer and release notes (3.0.7)
+
+_Not shown in the update window. The uploader only sends the `## 3.0.7` section above._
+
+### Build and release
+- Application version, lockfile and the renderer fallback version are aligned at `3.0.7`.
+- `electron/services/old-version-cleanup.cjs` is new; `npm run test:update` now also runs `tests/old-version-cleanup.test.cjs`.
+- Rebuild the Windows portable EXE on the supported Windows build machine before publishing; this source package does not claim to contain a newly built `PdfStudio.exe`.
+- Test the rename path once with a custom-named EXE on real Windows before shipping.
 
 ## Developer and release notes (3.0.6)
 
