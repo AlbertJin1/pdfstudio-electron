@@ -34,8 +34,44 @@ function configureUserData() {
 configureUserData();
 
 // One running copy only: a second launch just brings the existing window forward.
-const gotInstanceLock = app.requestSingleInstanceLock();
-if (!gotInstanceLock) app.quit();
+// Update helper mode: the verified new build is started under a temporary name (see old-version-cleanup.cjs) only to swap
+// files once the old app has exited. It must not open a window, take the instance lock or report anything.
+const FINISH_UPDATE_TARGET = process.env.PDFSTUDIO_FINISH_UPDATE_TARGET || '';
+const FINISH_UPDATE_MODE = Boolean(FINISH_UPDATE_TARGET);
+const gotInstanceLock = FINISH_UPDATE_MODE ? false : app.requestSingleInstanceLock();
+if (!gotInstanceLock && !FINISH_UPDATE_MODE) app.quit();
+function writeUpdateLog(message) {
+  try {
+    const file = path.join(app.getPath('userData'), 'update.log');
+    fsSync.mkdirSync(path.dirname(file), { recursive: true });
+    try { if (fsSync.statSync(file).size > 128 * 1024) fsSync.renameSync(file, `${file}.old`); } catch {}
+    fsSync.appendFileSync(file, `${new Date().toISOString()} | v${app.getVersion()} | ${FINISH_UPDATE_MODE ? 'helper' : 'app'} | ${String(message).replace(/[\r\n]+/g, ' ').slice(0, 500)}\n`, 'utf8');
+  } catch { /* logging must never break an update */ }
+}
+function launchDetached(exePath) {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env };
+    delete env.PDFSTUDIO_FINISH_UPDATE_TARGET; delete env.PDFSTUDIO_FINISH_UPDATE_SOURCE;
+    // The portable launcher sets these for itself; a stale value would point the new build at the helper's file.
+    delete env.PORTABLE_EXECUTABLE_FILE; delete env.PORTABLE_EXECUTABLE_DIR; delete env.PORTABLE_EXECUTABLE_APP_FILENAME;
+    const child = require('node:child_process').spawn(exePath, [], { detached: true, stdio: 'ignore', cwd: path.dirname(exePath), env });
+    child.once('error', reject);
+    child.once('spawn', () => { child.unref(); resolve(); });
+  });
+}
+if (FINISH_UPDATE_MODE) {
+  app.whenReady().then(async () => {
+    let code = 0;
+    try {
+      const result = await oldVersionCleanup.runHelperSwap({
+        target: FINISH_UPDATE_TARGET, source: process.env.PDFSTUDIO_FINISH_UPDATE_SOURCE || '', sha256File,
+        launch: launchDetached, log: writeUpdateLog,
+      });
+      if (!result.ok) { writeUpdateLog(`update helper did not finish: ${result.reason}`); code = 1; }
+    } catch (error) { writeUpdateLog(`update helper crashed: ${error?.message || error}`); code = 1; }
+    app.exit(code);
+  });
+}
 app.on('second-instance', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -1761,7 +1797,7 @@ function markUpdatePromptShown(version) {
 function getOldVersionCleanupPath() {
   return path.join(app.getPath('userData'), oldVersionCleanup.MARKER_NAME);
 }
-// Runs in the new version after an update: deletes the previous EXE once its process has exited (retries for ~30 s).
+// Runs in the new version after an update: deletes the previous EXE ("<name>.old") once its process has exited (retries for ~30 s).
 async function removeOldVersionAfterUpdate() {
   try {
     const result = await oldVersionCleanup.runCleanup({
@@ -1781,8 +1817,12 @@ async function uniqueUpdateTarget(dir, version) {
   for (let n = 2; fsSync.existsSync(candidate); n += 1) candidate = path.join(dir, `PdfStudio-${version} (${n}).exe`);
   return candidate;
 }
-// No scripts, no hidden shells, no overwriting of the running file: the verified package is copied beside the launcher
-// (or into Downloads), re-verified, and started as a normal visible process. Self-replacing droppers are a classic antivirus trigger.
+// The update keeps the SAME file name. Order of events (see old-version-cleanup.cjs):
+//   verified package -> copied beside the launcher as "<name>.new" and re-verified -> the running EXE is renamed to
+//   "<name>.old" -> "<name>.new" becomes "<name>" -> the new build is started and this one quits -> the new build deletes
+//   "<name>.old" once this process has exited.
+// No scripts and no hidden shells are used: a self-replacing dropper is a classic antivirus trigger, so the swap is plain
+// file renames from the app itself and the new build is started as a normal visible process.
 async function applyPendingUpdateNow() {
   if (!pendingUpdate) throw new Error('No verified update is ready to install.');
   const digest = await sha256File(pendingUpdate.path);
@@ -1791,6 +1831,71 @@ async function applyPendingUpdateNow() {
     throw new Error('The update package did not pass its integrity check. Please check for updates again.');
   }
   const launcher = getPortableEnvLauncher();
+  const cleanupMarker = getOldVersionCleanupPath();
+
+  // Preferred path: replace the EXE in place, under its current name. Only a real portable launcher is ever swapped
+  // (never electron.exe during development).
+  if (launcher && path.isAbsolute(launcher) && path.extname(launcher).toLowerCase() === '.exe' && fsSync.existsSync(launcher)) {
+    let swap = null;
+    try {
+      swap = await oldVersionCleanup.prepareSwap({
+        launcher, stagedPath: pendingUpdate.path, sha256: digest, sha256File, markerPath: cleanupMarker,
+        oldVersion: app.getVersion(), newVersion: pendingUpdate.version,
+      });
+    } catch (error) {
+      console.warn('[PDF Studio] In-place rename was not possible, using the helper swap:', error?.message || error);
+      writeUpdateLog(`direct rename refused (${error?.code || error?.message}); using the helper swap`);
+    }
+    if (swap) {
+      publishUpdaterState({ status: 'applying', latestVersion: pendingUpdate.version, message: 'Starting the new version of PDF Studio…' });
+      app.releaseSingleInstanceLock();
+      const failure = await shell.openPath(swap.finalPath);
+      if (failure) {
+        await oldVersionCleanup.rollbackSwap({ ...swap, markerPath: cleanupMarker }).catch((error) => console.warn('[PDF Studio] Rollback failed:', error?.message || error));
+        app.requestSingleInstanceLock();
+        throw new Error(`The new version could not be started: ${failure}`);
+      }
+      setTimeout(() => app.quit(), 400);
+      return { started: true, path: swap.finalPath };
+    }
+  }
+
+  // Second choice: a running portable EXE usually cannot be renamed, so a helper (the verified new build under a temporary name)
+  // waits until this app has exited, then renames this EXE to "<name>.old" and starts the new build under the original name.
+  if (launcher && path.isAbsolute(launcher) && path.extname(launcher).toLowerCase() === '.exe' && fsSync.existsSync(launcher)) {
+    let helper = null;
+    try {
+      helper = await oldVersionCleanup.prepareHelper({
+        launcher, stagedPath: pendingUpdate.path, sha256: digest, sha256File, markerPath: cleanupMarker,
+        oldVersion: app.getVersion(), newVersion: pendingUpdate.version,
+      });
+    } catch (error) {
+      writeUpdateLog(`helper swap not possible (${error?.code || error?.message}); using the fallback install`);
+    }
+    if (helper) {
+      publishUpdaterState({ status: 'applying', latestVersion: pendingUpdate.version, message: 'Starting the new version of PDF Studio…' });
+      app.releaseSingleInstanceLock();
+      try {
+        const child = require('node:child_process').spawn(helper.helperPath, [], {
+          detached: true, stdio: 'ignore', cwd: path.dirname(helper.helperPath),
+          env: { ...process.env, PORTABLE_EXECUTABLE_FILE: undefined, PORTABLE_EXECUTABLE_DIR: undefined, PDFSTUDIO_FINISH_UPDATE_TARGET: helper.finalPath, PDFSTUDIO_FINISH_UPDATE_SOURCE: helper.helperPath },
+        });
+        await new Promise((resolve, reject) => { child.once('error', reject); child.once('spawn', () => { child.unref(); resolve(); }); });
+        writeUpdateLog(`helper started for ${path.basename(helper.finalPath)}; closing this version`);
+        setTimeout(() => app.quit(), 400);
+        return { started: true, path: helper.finalPath };
+      } catch (error) {
+        writeUpdateLog(`helper could not be started: ${error?.message || error}`);
+        await fs.rm(cleanupMarker, { force: true }).catch(() => {});
+        await fs.rm(helper.helperPath, { force: true }).catch(() => {});
+        app.requestSingleInstanceLock();
+      }
+    }
+  }
+
+  // Last resort (the EXE's folder is read-only, or the helper could not be used): the verified package is copied
+  // beside the launcher (or into Downloads) under a versioned name and started; the new build then removes the old EXE and
+  // takes over its file name as soon as it can (see old-version-cleanup.cjs).
   const dirs = [launcher && fsSync.existsSync(launcher) ? path.dirname(path.resolve(launcher)) : null, app.getPath('downloads')].filter(Boolean);
   let installed = null;
   for (const dir of dirs) {
@@ -1803,10 +1908,7 @@ async function applyPendingUpdateNow() {
   }
   if (!installed) throw new Error('The verified update could not be copied to a writable folder.');
   publishUpdaterState({ status: 'applying', latestVersion: pendingUpdate.version, message: 'Starting the new version of PDF Studio…' });
-  // The running EXE is locked by Windows, so it cannot delete itself. Leave a note for the new version, which removes this
-  // old EXE as soon as it starts and then takes over its file name (see old-version-cleanup.cjs). Only the copy next to the old launcher is ever replaced.
   const oldLauncher = getPortableLauncherPath();
-  const cleanupMarker = getOldVersionCleanupPath();
   if (oldLauncher && path.dirname(installed) === path.dirname(path.resolve(oldLauncher))) {
     await oldVersionCleanup.writeMarker(cleanupMarker, {
       oldPath: path.resolve(oldLauncher), oldVersion: app.getVersion(), newPath: installed, newVersion: pendingUpdate.version,
@@ -1817,6 +1919,7 @@ async function applyPendingUpdateNow() {
   const failure = await shell.openPath(installed);
   if (failure) {
     await fs.rm(cleanupMarker, { force: true }).catch(() => {});
+    app.requestSingleInstanceLock();
     throw new Error(`The new version could not be started: ${failure}`);
   }
   setTimeout(() => app.quit(), 400);

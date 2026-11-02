@@ -1,5 +1,19 @@
 # PDF Studio Changelog
 
+## 3.0.9
+
+_Test release for the in-place update: installing this from 3.0.8 should keep the same file name and leave no `.old` file behind._
+
+## 3.0.8
+
+_In-place update release: the app keeps the same file name when it updates._
+
+### Updates
+- Updates now replace the app **in place under the same file name** (no more `PdfStudio-<version>.exe` copies). A running portable EXE cannot be renamed by Windows, so a short helper step finishes the update: the old app closes, the helper renames the old EXE to `<name>.old`, puts the new build under the original name and starts it. The new version then deletes `<name>.old` (and the helper's temporary `<name>.updating.exe`) as soon as the old process has exited.
+- Every step is written to `%AppData%\PDF Studio\update.log` for troubleshooting.
+- If anything fails, the previous EXE is restored under its original name. If the EXE's folder is read-only or the rename is refused, the previous behavior (versioned name, then taking over the old name) is used as a fallback.
+- Updating *from* 3.0.7 or older still uses the old flow once, because the old version performs that step; the new version tidies up and takes the original name. Every update after that uses the in-place swap.
+
 ## 3.0.7
 
 _Update reliability release for PDF Studio 3._
