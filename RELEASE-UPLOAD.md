@@ -18,7 +18,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File publish_to_monitor.ps1 -Targ
 ```
 
 ## What it does
-1. Validates the EXE: product name `PDF Studio`, File version equals `package.json`, and CHANGELOG.md has a heading matching the EXE File version (for this source release, `## 3.0.9`).
+1. Validates the EXE: product name `PDF Studio`, File version equals `package.json`, and CHANGELOG.md has a heading matching the EXE File version (for this source release, `## 3.0.10`).
 2. Zips the EXE only if that saves at least 5% (the NSIS portable file is already compressed, so it normally uploads raw).
 3. Uploads resumable 4 MiB chunks (`begin` / `chunk` / `finish`) with SHA-256 verification. Raw chunks are used on the LAN and for raw EXEs; base64 chunks are used only for ZIPs on a public route.
 4. **Prints the Monitor's own error text** if anything is rejected (`UPLOAD FAILED: ... (HTTP 422): <reason>`).

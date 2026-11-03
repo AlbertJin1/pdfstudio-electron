@@ -73,8 +73,11 @@ if (FINISH_UPDATE_MODE) {
   });
 }
 app.on('second-instance', () => {
+  // A second launch (double-clicking the EXE or a pinned icon again) never opens another window or taskbar button:
+  // it only brings the one running window forward.
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
     mainWindow.focus();
   }
 });
@@ -92,7 +95,9 @@ function getAppIconPath() {
   return app.isPackaged ? packagedPath : developmentPath;
 }
 
-app.setAppUserModelId('com.regualos.pdfstudio');
+// One stable identity for every window, shortcut and pin of this app. Windows groups taskbar buttons by this ID.
+const APP_USER_MODEL_ID = 'com.regualos.pdfstudio';
+app.setAppUserModelId(APP_USER_MODEL_ID);
 
 // Log stray async failures instead of surfacing Node's UnhandledPromiseRejection warning.
 process.on('unhandledRejection', (reason) => console.error('[pdf-studio] Unhandled rejection:', reason));
@@ -576,6 +581,68 @@ function getPortableLauncherPath() {
     } catch { /* try the next candidate */ }
   }
   return null;
+}
+
+// ───────────────────────── Taskbar identity (Windows) ─────────────────────────
+// The portable build unpacks itself to a temporary folder and runs from there, so the running process is NOT the file the
+// user double-clicked or pinned. Without help, Windows shows the running window as a second button next to the pinned icon.
+// Two things make both resolve to ONE button:
+//   1. every window carries the same AppUserModelID plus a relaunch command that points at the real portable EXE, so pinning
+//      the running window (or "Pin to taskbar") stores the launcher, not the temp copy;
+//   2. an already-pinned shortcut that points at this EXE gets the same AppUserModelID written into it (once, best effort).
+function applyTaskbarIdentity(win) {
+  if (process.platform !== 'win32' || !app.isPackaged) return;
+  if (!win || win.isDestroyed() || typeof win.setAppDetails !== 'function') return;
+  const launcher = getPortableLauncherPath();
+  if (!launcher) return;
+  try {
+    win.setAppDetails({
+      appId: APP_USER_MODEL_ID,
+      appIconPath: launcher,
+      appIconIndex: 0,
+      relaunchCommand: `"${launcher}"`,
+      relaunchDisplayName: 'PDF Studio',
+    });
+  } catch (error) {
+    console.warn('[PDF Studio] Could not set the taskbar identity:', error?.message || error);
+  }
+}
+function repairPinnedTaskbarShortcut() {
+  if (process.platform !== 'win32' || !app.isPackaged) return;
+  try {
+    const launcher = getPortableLauncherPath();
+    if (!launcher) return;
+    const pinDir = path.join(app.getPath('appData'), 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'TaskBar');
+    if (!fsSync.existsSync(pinDir)) return;
+    const sameFile = (a, b) => path.resolve(String(a || '')).toLowerCase() === path.resolve(String(b || '')).toLowerCase();
+    for (const name of fsSync.readdirSync(pinDir)) {
+      if (path.extname(name).toLowerCase() !== '.lnk') continue;
+      const lnk = path.join(pinDir, name);
+      let details;
+      try { details = shell.readShortcutLink(lnk); } catch { continue; }
+      const target = details?.target || '';
+      // Only a pin of this very EXE (or an earlier versioned copy of it in the same folder) is touched.
+      const isOurs = sameFile(target, launcher)
+        || (/^pdfstudio.*\.exe$/i.test(path.basename(target)) && sameFile(path.dirname(target), path.dirname(launcher)));
+      if (!isOurs || details.appUserModelId === APP_USER_MODEL_ID) continue;
+      const update = { appUserModelId: APP_USER_MODEL_ID };
+      if (!sameFile(target, launcher)) { update.target = launcher; update.cwd = path.dirname(launcher); }
+      shell.writeShortcutLink(lnk, 'update', update);
+      console.log('[PDF Studio] Linked the pinned taskbar shortcut to the running app:', name);
+    }
+  } catch (error) {
+    console.warn('[PDF Studio] Pinned shortcut check failed:', error?.message || error);
+  }
+}
+// During an update the new build starts while this one is still closing. Hiding the window first removes its taskbar
+// button immediately, so the user never sees two buttons (or two windows) side by side.
+function releaseForRestart() {
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide(); } catch { /* best effort */ }
+  app.releaseSingleInstanceLock();
+}
+function reclaimAfterFailedRestart() {
+  app.requestSingleInstanceLock();
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show(); } catch { /* best effort */ }
 }
 
 function reportUpdateProgress(sender, { percent = null, downloadedBytes = 0, totalBytes = null, message }) {
@@ -1848,11 +1915,11 @@ async function applyPendingUpdateNow() {
     }
     if (swap) {
       publishUpdaterState({ status: 'applying', latestVersion: pendingUpdate.version, message: 'Starting the new version of PDF Studio…' });
-      app.releaseSingleInstanceLock();
+      releaseForRestart();
       const failure = await shell.openPath(swap.finalPath);
       if (failure) {
         await oldVersionCleanup.rollbackSwap({ ...swap, markerPath: cleanupMarker }).catch((error) => console.warn('[PDF Studio] Rollback failed:', error?.message || error));
-        app.requestSingleInstanceLock();
+        reclaimAfterFailedRestart();
         throw new Error(`The new version could not be started: ${failure}`);
       }
       setTimeout(() => app.quit(), 400);
@@ -1874,7 +1941,7 @@ async function applyPendingUpdateNow() {
     }
     if (helper) {
       publishUpdaterState({ status: 'applying', latestVersion: pendingUpdate.version, message: 'Starting the new version of PDF Studio…' });
-      app.releaseSingleInstanceLock();
+      releaseForRestart();
       try {
         const child = require('node:child_process').spawn(helper.helperPath, [], {
           detached: true, stdio: 'ignore', cwd: path.dirname(helper.helperPath),
@@ -1888,7 +1955,7 @@ async function applyPendingUpdateNow() {
         writeUpdateLog(`helper could not be started: ${error?.message || error}`);
         await fs.rm(cleanupMarker, { force: true }).catch(() => {});
         await fs.rm(helper.helperPath, { force: true }).catch(() => {});
-        app.requestSingleInstanceLock();
+        reclaimAfterFailedRestart();
       }
     }
   }
@@ -1915,11 +1982,11 @@ async function applyPendingUpdateNow() {
       oldSize: (await fs.stat(oldLauncher).catch(() => null))?.size || 0,
     }).catch((error) => console.warn('[PDF Studio] Could not schedule removal of the old version:', error?.message || error));
   }
-  app.releaseSingleInstanceLock();
+  releaseForRestart();
   const failure = await shell.openPath(installed);
   if (failure) {
     await fs.rm(cleanupMarker, { force: true }).catch(() => {});
-    app.requestSingleInstanceLock();
+    reclaimAfterFailedRestart();
     throw new Error(`The new version could not be started: ${failure}`);
   }
   setTimeout(() => app.quit(), 400);
@@ -2358,6 +2425,7 @@ function createWindow() {
       devTools: !app.isPackaged,
     },
   });
+  applyTaskbarIdentity(mainWindow);
   // The window stays hidden behind the splash until the renderer reports that the UI is mounted.
   mainWindow.webContents.once('did-start-loading', () => sendSplash({ step: 2 }));
   mainWindow.webContents.once('dom-ready', () => sendSplash({ step: 3 }));
@@ -2419,7 +2487,11 @@ function runBackgroundStartup() {
   if (backgroundStartupDone) return;
   backgroundStartupDone = true;
   void startUsageMonitoring();
-  void removeOldVersionAfterUpdate();
+  void removeOldVersionAfterUpdate().finally(() => {
+    // The launcher may have just taken over its previous file name; refresh the taskbar identity and the pinned shortcut.
+    applyTaskbarIdentity(mainWindow);
+    repairPinnedTaskbarShortcut();
+  });
   // Validate any previously staged package before doing a fresh release lookup.
   // Every launch checks in the background; repeat checks during long sessions without interrupting document work.
   void restorePendingUpdate().then(() => {

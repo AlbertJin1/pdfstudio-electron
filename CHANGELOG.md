@@ -1,5 +1,15 @@
 # PDF Studio Changelog
 
+## 3.0.10
+
+_Taskbar fix: the running app and its pinned icon now share one taskbar button._
+
+### Taskbar
+- Every window now carries the app's stable Windows identity plus a relaunch command that points at the real portable EXE (not the temporary unpacked copy), so the pinned icon and the running window group into a single taskbar button.
+- On startup, an existing taskbar pin of this EXE is linked to the same identity (best effort; only the pin's app ID is changed). Windows may need Explorer restarted or a sign-out/sign-in to show the change once.
+- Launching the app again only brings the running window forward (and shows it if hidden); it never opens a second window.
+- During an update, the old window is hidden before the new build starts so two taskbar buttons never appear side by side. If the new build cannot start, the window comes back.
+
 ## 3.0.9
 
 _Test release for the in-place update: installing this from 3.0.8 should keep the same file name and leave no `.old` file behind._

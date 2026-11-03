@@ -1,6 +1,6 @@
 {
   "name": "pdf-studio-windows",
-  "version": "3.0.9",
+  "version": "3.0.10",
   "private": true,
   "description": "PDF Studio — a modern, local-first Windows PDF workspace built with Electron, React, Node.js and Tailwind CSS.",
   "author": "Jessie Albert Regualos",
