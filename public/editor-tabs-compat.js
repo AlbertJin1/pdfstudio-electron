@@ -56,7 +56,7 @@
     style.textContent = `
       .titlebar { justify-content:flex-start!important; gap:8px!important; padding-left:16px!important; background:#f4f6f9!important; }
       .titlebar-brand { flex:0 0 196px!important; width:196px!important; min-width:0!important; }
-      .titlebar-tabs { display:flex; flex:1 1 auto; align-self:stretch; align-items:stretch; gap:3px; min-width:0; padding:7px 0 0 2px; overflow:hidden; -webkit-app-region:no-drag; }
+      .titlebar-tabs { display:flex; flex:1 1 auto; align-self:stretch; align-items:stretch; gap:3px; min-width:0; padding:7px 0 0 2px; overflow:hidden; -webkit-app-region:drag; }
       .titlebar-tab { position:relative; display:flex; align-items:center; gap:8px; height:100%; min-width:0; max-width:260px; flex:0 1 205px; padding:0 30px 0 12px; border:1px solid transparent; border-bottom:0; border-radius:9px 9px 0 0; background:transparent; color:#647086; text-align:left; -webkit-app-region:no-drag; }
       .titlebar-tab:hover:not(.is-active) { background:#e9edf3; color:#303b4b; }
       .titlebar-tab.is-active,.titlebar-tab-wrap.is-active .titlebar-tab { background:#fff; color:#283446; border-color:#dce2e9; box-shadow:0 1px 0 #fff; }
