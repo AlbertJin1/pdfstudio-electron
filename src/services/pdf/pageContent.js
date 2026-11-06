@@ -83,11 +83,28 @@ function collectLines(content, page, viewport) {
 
 function guessAlign(lines) {
   if (lines.length < 2) return 'left';
-  const near = (a, b) => Math.abs(a - b) < 1.5;
-  if (lines.every((l) => near(l.x, lines[0].x))) return 'left';
+  const near = (a, b, tol = 1.5) => Math.abs(a - b) < tol;
+  const body = lines.slice(1);
+  const bodyLeft = Math.min(...body.map((l) => l.x));
+  const nonLast = lines.slice(0, -1);
+  const right = Math.max(...nonLast.map((l) => l.right));
+  // Justified: every line except the last ends on the same right edge, and the body shares a left edge.
+  if (nonLast.every((l) => near(l.right, right)) && body.every((l) => near(l.x, bodyLeft)) && lines.some((l) => !near(l.x, lines[0].x) || near(l.right, right))
+    && lines.length >= 2 && nonLast.every((l) => (l.text.match(/ /g) || []).length >= 2)) {
+    const last = lines[lines.length - 1];
+    if (!near(last.right, right) || lines.length > 2) return 'justify';
+  }
+  if (lines.every((l) => near(l.x, bodyLeft) || l === lines[0])) return 'left';
   if (lines.every((l) => near(l.right, lines[0].right))) return 'right';
   if (lines.every((l) => near((l.x + l.right) / 2, (lines[0].x + lines[0].right) / 2))) return 'center';
   return 'left';
+}
+
+/** True when line `next` continues the paragraph because `prev` was wrapped (the next word did not fit). */
+function wrappedInto(prev, next, measureRight) {
+  const firstWord = String(next.text).split(' ')[0] || '';
+  const wordW = next.items[0] ? (next.items[0].w * Math.min(1, (firstWord.length + 0.5) / Math.max(1, next.items[0].str.length))) : firstWord.length * next.size * 0.5;
+  return prev.right + prev.size * 0.28 + wordW > measureRight - prev.size * 0.4;
 }
 
 function toBlock(lines, index, pageIndex) {
@@ -98,11 +115,22 @@ function toBlock(lines, index, pageIndex) {
   const first = lines[0];
   const size = Math.round(first.size * 10) / 10;
   const spacing = lines.length > 1 ? (lines[lines.length - 1].base - first.base) / (lines.length - 1) / first.size : 1.2;
+  const align = guessAlign(lines);
+  // A paragraph whose lines wrapped (rather than ending with hard breaks) is edited as flowing text, like Acrobat:
+  // typing re-wraps it inside the original measure instead of producing over-long lines.
+  const nonLast = lines.slice(0, -1);
+  const measure = Math.max(...nonLast.map((l) => l.right), first.right);
+  const reflow = lines.length > 1 && nonLast.every((l, k) => wrappedInto(l, lines[k + 1], measure));
+  const bodyLeft = lines.length > 1 ? Math.min(...lines.slice(1).map((l) => l.x)) : first.x;
+  const firstIndent = reflow && (align === 'left' || align === 'justify') ? Math.max(-bodyLeft + x, Math.min(first.size * 8, first.x - bodyLeft)) : 0;
+  const joined = reflow
+    ? lines.map((l) => l.text).reduce((text, line) => (text ? (/[-‐­]$/.test(text) ? text + line : `${text} ${line}`) : line), '')
+    : lines.map((l) => l.text).join('\n');
   return {
     id: `blk:${pageIndex}:${index}`, kind: 'text', x, y: top, w: right - x, h: bottom - top,
-    text: lines.map((l) => l.text).join('\n'), size, font: first.font, align: guessAlign(lines),
+    text: joined, size, font: first.font, align,
     lineHeight: Math.min(2.2, Math.max(0.9, Math.round(spacing * 100) / 100)),
-    firstBaseline: first.base, firstX: first.x,
+    firstBaseline: first.base, firstX: first.x, reflow, firstIndent: Math.abs(firstIndent) >= 0.5 ? firstIndent : 0,
     lines: lines.map((l) => ({ x: l.x, right: l.right, base: l.base, size: l.size })),
   };
 }
@@ -111,17 +139,26 @@ function groupBlocks(lines, pageIndex) {
   const blocks = [];
   let current = [];
   const flush = () => { if (current.length) blocks.push(toBlock(current, blocks.length, pageIndex)); current = []; };
+  const sameStyle = (a, b) => a.font.family === b.font.family && a.font.bold === b.font.bold && a.font.italic === b.font.italic && a.font.name === b.font.name;
   for (const line of lines) {
     const prev = current[current.length - 1];
     if (prev) {
       const step = line.base - prev.base;
       const sizeOk = Math.abs(line.size - prev.size) < Math.max(prev.size, line.size) * 0.15;
-      const left = current[0];
-      const aligned = Math.abs(line.x - left.x) < line.size * 0.6
-        || Math.abs(line.right - left.right) < line.size * 0.6
-        || Math.abs((line.x + line.right) / 2 - (left.x + left.right) / 2) < line.size * 0.6;
+      const firstLine = current[0];
+      const bodyLeft = current.length >= 2 ? current[1].x : null;
+      const tol = line.size * 0.6;
+      // Body lines share a left edge; the first line may be indented or outdented (hanging), and a ragged last
+      // line still belongs to the paragraph when the line above it wrapped.
+      const leftOk = bodyLeft != null ? Math.abs(line.x - bodyLeft) < tol : (Math.abs(line.x - firstLine.x) < tol || (line.x < firstLine.x && firstLine.x - line.x < line.size * 6));
+      const rightOk = Math.abs(line.right - firstLine.right) < tol;
+      const centerOk = Math.abs((line.x + line.right) / 2 - (firstLine.x + firstLine.right) / 2) < tol;
       const overlaps = line.x < Math.max(...current.map((l) => l.right)) && line.right > Math.min(...current.map((l) => l.x));
-      if (!(sizeOk && aligned && overlaps && step > line.size * 0.7 && step < line.size * 1.7 && prev.font.family === line.font.family && prev.font.bold === line.font.bold && prev.font.italic === line.font.italic && prev.font.name === line.font.name && prev.font.ref === line.font.ref)) flush();
+      const consistentStep = current.length < 2 || Math.abs(step - (prev.base - current[current.length - 2].base)) < line.size * 0.25;
+      // One editable block carries one font, so lines in a different font start a new block.
+      const styleOk = prev.font.ref === line.font.ref || sameStyle(prev, line);
+      const stepOk = step > line.size * 0.7 && step < line.size * 1.75;
+      if (!(sizeOk && styleOk && stepOk && consistentStep && overlaps && (leftOk || rightOk || centerOk))) flush();
     }
     current.push(line);
   }

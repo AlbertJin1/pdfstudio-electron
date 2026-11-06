@@ -30,6 +30,9 @@ export default function CompressionModal({ setModal, compressPdfFile }) {
   const [password, setPassword] = useState('');
   const [quality, setQuality] = useState(Math.round(COMPRESSION_PRESETS.balanced.quality * 100));
   const [resolutionDpi, setResolutionDpi] = useState(COMPRESSION_PRESETS.balanced.dpi);
+  // In target-size mode the quality/DPI fields are limits only once the user changes them; untouched, the
+  // compressor is free to pick the mildest setting that fits the requested size.
+  const [capsTouched, setCapsTouched] = useState(false);
   const [colorMode, setColorMode] = useState('color');
   const [preserveMetadata, setPreserveMetadata] = useState(true);
   const [includeAnnotations, setIncludeAnnotations] = useState(true);
@@ -124,7 +127,10 @@ export default function CompressionModal({ setModal, compressPdfFile }) {
 
   const currentOptions = () => ({
     file, preset: mode === 'target' ? 'balanced' : preset, targetBytes: mode === 'target' ? targetBytes : null,
-    password, resolutionDpi, quality, colorMode, preserveMetadata, includeAnnotations, allowRasterFallback,
+    password,
+    resolutionDpi: mode === 'target' && !capsTouched ? undefined : resolutionDpi,
+    quality: mode === 'target' && !capsTouched ? undefined : quality,
+    colorMode, preserveMetadata, includeAnnotations, allowRasterFallback,
     outputPassword: protectOutput ? outputPassword : '',
     hasDigitalSignatures: Boolean(analysis?.hasDigitalSignatures),
     scanLike: Boolean(analysis && analysis.pageCount && analysis.imagePaintOperations >= analysis.pageCount && analysis.textCharacters < 40 * analysis.pageCount),
@@ -269,13 +275,13 @@ export default function CompressionModal({ setModal, compressPdfFile }) {
         <p className="compress-help">The compressor measures each result. It reports when the target is unreachable without sacrificing excessive quality or document structure.</p>
       </div>}
 
-      <button type="button" className="compress-advanced-toggle" aria-expanded={showAdvanced} onClick={() => setShowAdvanced((value) => !value)}><Settings2 size={15}/><span>{showAdvanced ? 'Hide' : 'Show'} advanced settings</span><span className="compress-advanced-current">{colorMode === 'color' ? 'Color' : colorMode === 'grayscale' ? 'Grayscale' : 'Black & white'} · {resolutionDpi} DPI</span></button>
+      <button type="button" className="compress-advanced-toggle" aria-expanded={showAdvanced} onClick={() => setShowAdvanced((value) => !value)}><Settings2 size={15}/><span>{showAdvanced ? 'Hide' : 'Show'} advanced settings</span><span className="compress-advanced-current">{colorMode === 'color' ? 'Color' : colorMode === 'grayscale' ? 'Grayscale' : 'Black & white'} · {mode === 'target' && !capsTouched ? 'Auto quality' : `${resolutionDpi} DPI`}</span></button>
       {showAdvanced && <div className="compress-advanced-panel">
         <label className="form-label" htmlFor="compress-dpi">Maximum output resolution <strong>{resolutionDpi} DPI</strong>
-          <Select id="compress-dpi" className="form-input" value={resolutionDpi} onChange={setResolutionDpi} options={DPI_OPTIONS} ariaLabel="Image resolution" disabled={mode === 'preset' && preset === 'lossless'} />
+          <Select id="compress-dpi" className="form-input" value={resolutionDpi} onChange={(next) => { setResolutionDpi(next); setCapsTouched(true); }} options={DPI_OPTIONS} ariaLabel="Image resolution" disabled={mode === 'preset' && preset === 'lossless'} />
         </label>
         <label className="form-label" htmlFor="compress-quality">Image quality <strong>{quality}%</strong>
-          <input id="compress-quality" className="compress-quality-range" type="range" min="15" max="95" step="5" value={quality} onChange={(event) => setQuality(Number(event.target.value))} disabled={mode === 'preset' && preset === 'lossless'} />
+          <input id="compress-quality" className="compress-quality-range" type="range" min="15" max="95" step="5" value={quality} onChange={(event) => { setQuality(Number(event.target.value)); setCapsTouched(true); }} disabled={mode === 'preset' && preset === 'lossless'} />
           <span className="compress-field-help">Applies to compressed image streams. Vector text and shapes remain resolution independent when smart optimization is used.</span>
         </label>
         <label className="form-label" htmlFor="compress-colormode">Color handling

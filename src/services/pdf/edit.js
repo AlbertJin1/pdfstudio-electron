@@ -26,7 +26,10 @@ const safeText = (text) => [...String(text)].map((ch) => (isEncodable(ch) ? ch :
  * All geometry is in points measured from the top-left of the displayed (rotated) page.
  */
 export async function exportEditedPdf(sourceBytes, pdfJsDocument, annotationsByPage, metadata = {}) {
-  const { PDFDocument, StandardFonts, rgb, degrees, BlendMode } = await import('pdf-lib');
+  const pdfLib = await import('pdf-lib');
+  const { PDFDocument, StandardFonts, rgb, degrees, BlendMode } = pdfLib;
+  const { removeOriginalContent } = await import('./contentEdit.js');
+  const report = { removedText: 0, removedImages: 0, coveredText: 0, coveredImages: 0 };
   const output = await PDFDocument.load(normalizeBytes(sourceBytes).slice(), { ignoreEncryption: false });
   const pages = output.getPages();
   const fontCache = new Map();
@@ -97,7 +100,26 @@ export async function exportEditedPdf(sourceBytes, pdfJsDocument, annotationsByP
     const page = pages[pageIndex];
     const pdfJsPage = await pdfJsDocument.getPage(pageIndex + 1);
     const viewport = pdfJsPage.getViewport({ scale: 1, rotation: ((Number(pdfJsPage.rotate) || 0) % 360 + 360) % 360 });
-    const P = (x, y) => viewport.convertToPdfPoint(x, y);
+    // Inverse of the viewport transform: editor (top-left, rotated view) points → PDF user space.
+    const vt = viewport.transform;
+    const det = vt[0] * vt[3] - vt[1] * vt[2];
+    const P = (x, y) => {
+      const dx = x - vt[4]; const dy = y - vt[5];
+      return [(vt[3] * dx - vt[2] * dy) / det, (-vt[1] * dx + vt[0] * dy) / det];
+    };
+
+    // Remove the original glyphs/images that are being edited, moved, replaced or deleted (real editing instead
+    // of hiding them under a rectangle). Items that cannot be removed safely fall back to the cover below.
+    let removed = { text: new Set(), images: new Set() };
+    try {
+      removed = await removeOriginalContent({
+        pdfLib, output, page, pdfJsPage,
+        textRegions: items.filter((i) => i?.type === 'textedit' && i.src && !i.hidden).map((i) => ({ id: i.id, rect: i.src })),
+        imageRegions: items.filter((i) => i?.type === 'imageedit' && i.src && !i.hidden && (i.data || i.deleted)).map((i) => ({ id: i.id, rect: i.src })),
+      });
+    } catch (error) {
+      console.warn('Original content could not be removed; covering it instead.', error);
+    }
     const origin = P(0, 0);
     const unitX = P(1, 0);
     const angle = Math.atan2(unitX[1] - origin[1], unitX[0] - origin[0]) * 180 / Math.PI;
@@ -127,7 +149,11 @@ export async function exportEditedPdf(sourceBytes, pdfJsDocument, annotationsByP
       const w = Math.max(0.2, Number(item.w) || 0.2); const h = Math.max(0.2, Number(item.h) || 0.2);
 
       if (item.type === 'textedit' || item.type === 'imageedit') {
-        if (item.src && (item.type === 'textedit' || item.data || item.deleted)) cover(item.src, item.cover);
+        if (item.src && (item.type === 'textedit' || item.data || item.deleted)) {
+          const done = item.type === 'textedit' ? removed.text.has(item.id) : removed.images.has(item.id);
+          if (done) report[item.type === 'textedit' ? 'removedText' : 'removedImages'] += 1;
+          else { cover(item.src, item.cover); report[item.type === 'textedit' ? 'coveredText' : 'coveredImages'] += 1; }
+        }
       }
 
       if (TEXT_TYPES.has(item.type)) {
@@ -151,15 +177,31 @@ export async function exportEditedPdf(sourceBytes, pdfJsDocument, annotationsByP
         const thickness = Math.max(0.5, layout.size * 0.065);
         layout.lines.forEach((rawLine, index) => {
           if (!rawLine.trim()) return;
+          const info = layout.lineInfo?.[index] || { indent: 0, last: true };
           const text = canUseCustom ? rawLine : safeText(rawLine);
           const lineW = font.widthOfTextAtSize(text, layout.size);
-          const dx = layout.align === 'center' ? (inner - lineW) / 2 : layout.align === 'right' ? inner - lineW : 0;
+          const avail = inner - info.indent;
+          const dx = info.indent + (layout.align === 'center' ? (avail - lineW) / 2 : layout.align === 'right' ? avail - lineW : 0);
           const lx = x + layout.pad + dx;
           const base = baselineOf(layout, y, index) + offsetY;
-          const [px, py] = P(lx, base);
-          page.drawText(text, { x: px, y: py, size: layout.size, font, color, opacity, rotate });
-          if (layout.underline) line({ x: lx, y: base + layout.size * 0.12 }, { x: lx + lineW, y: base + layout.size * 0.12 }, color, thickness, opacity);
-          if (layout.strike) line({ x: lx, y: base - layout.size * 0.3 }, { x: lx + lineW, y: base - layout.size * 0.3 }, color, thickness, opacity);
+          const words = text.split(' ');
+          let drawnW = lineW;
+          if (layout.align === 'justify' && !info.last && words.length > 1 && avail > lineW) {
+            // Justified line: spread the spare width over the word gaps, exactly like the source paragraph.
+            const space = font.widthOfTextAtSize(' ', layout.size);
+            const extra = (avail - lineW) / (words.length - 1);
+            let cursor = lx;
+            for (const word of words) {
+              if (word) { const [wx, wy] = P(cursor, base); page.drawText(word, { x: wx, y: wy, size: layout.size, font, color, opacity, rotate }); }
+              cursor += font.widthOfTextAtSize(word, layout.size) + space + extra;
+            }
+            drawnW = avail;
+          } else {
+            const [px, py] = P(lx, base);
+            page.drawText(text, { x: px, y: py, size: layout.size, font, color, opacity, rotate });
+          }
+          if (layout.underline) line({ x: lx, y: base + layout.size * 0.12 }, { x: lx + drawnW, y: base + layout.size * 0.12 }, color, thickness, opacity);
+          if (layout.strike) line({ x: lx, y: base - layout.size * 0.3 }, { x: lx + drawnW, y: base - layout.size * 0.3 }, color, thickness, opacity);
         });
       } else if (item.type === 'highlight') {
         const b = box(x, y, w, h);
@@ -197,5 +239,7 @@ export async function exportEditedPdf(sourceBytes, pdfJsDocument, annotationsByP
   output.setProducer('PDF Studio');
   output.setCreator('PDF Studio');
   if (metadata.title) output.setTitle(String(metadata.title).slice(0, 240));
-  return output.save({ useObjectStreams: true, objectsPerTick: 50 });
+  const bytes = await output.save({ useObjectStreams: true, objectsPerTick: 50 });
+  if (typeof metadata.onReport === 'function') metadata.onReport(report);
+  return bytes;
 }

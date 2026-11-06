@@ -2383,6 +2383,22 @@ function shouldRunPageOcr({ enabled = true, engineUnavailable = false, nativeTex
  * proprietary conversion engine.
  */
 export async function pdfToDocx(pdfBytes, pdfSource, options = {}) {
+  // Default: the vector-based flowing-document engine (src/services/pdf/word). It reads the PDF's real text,
+  // fonts, colours, rules, fills and images and rebuilds native Word paragraphs, tables, columns and pictures.
+  // The legacy raster-assisted strategies below remain available as explicit modes and as a safety net.
+  const requestedMode = String(options.mode || 'flow');
+  if (requestedMode === 'flow' || requestedMode === 'auto' && options.engine !== 'legacy') {
+    try {
+      const { pdfToWordFlow } = await import('./word/index.js');
+      return await pdfToWordFlow(pdfBytes, pdfSource, options);
+    } catch (error) {
+      if (options.strictEngine) throw error;
+      console.warn('Flowing Word conversion failed; falling back to the layout-assisted converter.', error);
+      const fallback = await pdfToDocx(pdfBytes, pdfSource, { ...options, mode: 'auto', engine: 'legacy' });
+      fallback.quality?.warnings?.unshift(`The standard converter could not process this PDF (${String(error?.message || error).slice(0, 160)}); a layout-assisted conversion was used instead.`);
+      return fallback;
+    }
+  }
   const docxApi = await import('docx');
   const { Document, Paragraph, TextRun, ImageRun, Table, TableRow, TableCell, Packer } = docxApi;
   const pdfjsLib = await getPdfJsLib();

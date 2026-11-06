@@ -20,6 +20,13 @@ const SMART_LADDER = [
   { dpi: 50, quality: 20, imageFilterMode: 'jpeg', label: 'Extreme (smart)' },
 ];
 
+// Extra-mild steps used only when the user asks for a specific size: a 50% target on a photo PDF should keep
+// near-original quality, not jump straight to 150 DPI.
+const TARGET_MILD_STEPS = [
+  { dpi: 400, quality: 92, imageFilterMode: 'jpeg', label: 'Near-original (smart)' },
+  { dpi: 300, quality: 88, imageFilterMode: 'jpeg', label: 'Very high quality (smart)' },
+];
+
 const TARGET_PROFILES = [
   { maxDimension: 3600, quality: 0.88, label: 'High quality' },
   { maxDimension: 3200, quality: 0.83, label: 'Very good quality' },
@@ -438,13 +445,15 @@ const IMAGE_OBJECT_TARGET_PROFILES = [
   { quality: 26, scale: 0.28, label: 'Extreme compression (embedded images)' },
 ];
 
-function imageObjectProfiles({ targetBytes, originalSize, preset, quality, resolutionDpi }) {
+function imageObjectProfiles({ targetBytes, originalSize, preset, quality, resolutionDpi, userTarget = false }) {
   const qualityCap = Math.max(25, Math.min(95, Math.round(Number(quality) * 100)));
   const dpiScale = Math.max(0.16, Math.min(1, Number(resolutionDpi || 300) / 300));
   if (targetBytes) {
     const ratio = targetBytes / Math.max(1, originalSize);
-    const start = ratio >= 0.85 ? 0 : ratio >= 0.65 ? 1 : ratio >= 0.45 ? 2 : ratio >= 0.3 ? 3 : ratio >= 0.2 ? 4 : 5;
-    return IMAGE_OBJECT_TARGET_PROFILES.slice(start, start + 5).map((profile) => ({
+    // A user-chosen size walks the whole ladder from the mildest step so the first output that fits is also the
+    // best-looking one; the automatic preset goals keep their faster estimated start.
+    const start = userTarget ? 0 : ratio >= 0.85 ? 0 : ratio >= 0.65 ? 1 : ratio >= 0.45 ? 2 : ratio >= 0.3 ? 3 : ratio >= 0.2 ? 4 : 5;
+    return IMAGE_OBJECT_TARGET_PROFILES.slice(start, userTarget ? undefined : start + 5).map((profile) => ({
       ...profile,
       quality: Math.min(profile.quality, qualityCap),
       scale: Math.min(profile.scale, dpiScale),
@@ -552,8 +561,9 @@ async function compressPdfCore(inputBytes, options = {}) {
     try {
       const result = await smartOptimize(losslessBytes || input, {
         preset: profile.preset || preset,
-        resolutionDpi: Math.min(Number(profile.dpi ?? resolutionDpi), resolutionDpi),
-        quality: Math.min(Number(profile.quality ?? quality * 100), quality * 100),
+        // Target-ladder profiles arrive already limited by the caller's explicit caps.
+        resolutionDpi: profile.uncapped ? Number(profile.dpi) : Math.min(Number(profile.dpi ?? resolutionDpi), resolutionDpi),
+        quality: profile.uncapped ? Number(profile.quality) : Math.min(Number(profile.quality ?? quality * 100), quality * 100),
         colorMode,
         preserveMetadata,
         includeAnnotations,
@@ -592,12 +602,60 @@ async function compressPdfCore(inputBytes, options = {}) {
         return true;
       });
     })();
-    for (let index = 0; index < smartProfiles.length; index += 1) {
-      const candidate = await trySmart(smartProfiles[index], index + 1, smartProfiles.length);
-      if (!candidate) break;
-      if (candidate.outputSize < best.outputSize) best = candidate;
-      if (targetBytes && candidate.outputSize <= targetBytes) break;
-      if (!targetBytes && !hasTarget) break;
+    if (targetBytes && !options.__autoGoal) {
+      // User size target: bracket-search the full ladder (mild → strong) and keep the MILDEST setting whose output
+      // fits, so the file lands as close under the target as possible with the best image quality.
+      // Caps apply only when the caller set them explicitly; otherwise the search may use near-original settings.
+      const capDpi = Number(options.resolutionDpi) > 0 ? resolutionDpi : 400;
+      const capQuality = Number(options.quality) > 0 ? quality * 100 : 95;
+      const ladder = [...TARGET_MILD_STEPS, ...SMART_LADDER].map((profile) => ({
+        ...profile, preset: 'target', uncapped: true, dpi: Math.min(Number(profile.dpi), capDpi), quality: Math.min(Number(profile.quality), capQuality),
+      })).filter((profile, index, list) => list.findIndex((other) => other.dpi === profile.dpi && other.quality === profile.quality) === index);
+      const ratio = targetBytes / originalSize;
+      let index = ratio >= 0.6 ? 0 : ratio >= 0.4 ? 1 : ratio >= 0.25 ? 2 : ratio >= 0.12 ? 3 : 4;
+      index = Math.min(index, ladder.length - 1);
+      const results = new Map();
+      let fitting = null; let smallest = null;
+      for (let step = 0; step < ladder.length + 2 && index >= 0 && index < ladder.length; step += 1) {
+        if (results.has(index)) break;
+        const candidate = await trySmart(ladder[index], step + 1, ladder.length);
+        if (!candidate) break;
+        results.set(index, candidate);
+        if (!smallest || candidate.outputSize < smallest.outputSize) smallest = candidate;
+        if (candidate.outputSize <= targetBytes) {
+          if (!fitting || index < fitting.index) fitting = { index, candidate };
+          if (index === 0 || results.has(index - 1)) break;
+          index -= 1; // fits: try one milder step
+        } else {
+          if (fitting) break; // the milder step already overshoots; the fitting one is the answer
+          index += 1; // too big: go stronger
+        }
+      }
+      // Refine between the step that was too large and the step that fit, so the result lands close to the target
+      // instead of far below it.
+      if (fitting && fitting.index > 0 && results.has(fitting.index - 1) && fitting.candidate.outputSize < targetBytes * 0.8) {
+        let lo = ladder[fitting.index - 1]; let hi = ladder[fitting.index];
+        for (let pass = 0; pass < 2; pass += 1) {
+          const mid = { ...hi, uncapped: true, dpi: Math.round((lo.dpi + hi.dpi) / 2), quality: Math.round((lo.quality + hi.quality) / 2), label: `${hi.label.replace(/ \(smart\)$/, '')} – refined (smart)` };
+          if (mid.dpi === hi.dpi && mid.quality === hi.quality) break;
+          const candidate = await trySmart(mid, ladder.length + pass + 1, ladder.length + 2);
+          if (!candidate) break;
+          if (candidate.outputSize <= targetBytes) { if (candidate.outputSize > fitting.candidate.outputSize) fitting = { index: fitting.index, candidate }; hi = mid; }
+          else lo = mid;
+          if (fitting.candidate.outputSize >= targetBytes * 0.85) break;
+        }
+      }
+      const chosen = fitting?.candidate || smallest;
+      if (chosen && chosen.outputSize < best.outputSize) best = chosen;
+      else if (chosen && fitting) best = chosen;
+    } else {
+      for (let index = 0; index < smartProfiles.length; index += 1) {
+        const candidate = await trySmart(smartProfiles[index], index + 1, smartProfiles.length);
+        if (!candidate) break;
+        if (candidate.outputSize < best.outputSize) best = candidate;
+        if (targetBytes && candidate.outputSize <= targetBytes) break;
+        if (!targetBytes && !hasTarget) break;
+      }
     }
     const candidateToValidate = best.engine === 'Ghostscript pdfwrite' && best.outputSize < originalSize ? best : null;
     if (candidateToValidate && candidateToValidate.outputSize < originalSize) {
@@ -645,7 +703,8 @@ async function compressPdfCore(inputBytes, options = {}) {
     else if (!preserveMetadata) imageObjectWarning = 'The built-in image-object fallback cannot guarantee complete metadata/XMP removal; the selected metadata-removal setting requires Ghostscript.';
   }
   if (shouldTryImageObjectOptimizer) {
-    const profiles = imageObjectProfiles({ targetBytes, originalSize, preset, quality, resolutionDpi });
+    const explicitCaps = !targetBytes || options.__autoGoal || Number(options.resolutionDpi) > 0 || Number(options.quality) > 0;
+    const profiles = imageObjectProfiles({ targetBytes, originalSize, preset, quality: explicitCaps ? quality : 0.95, resolutionDpi: explicitCaps ? resolutionDpi : 300, userTarget: Boolean(targetBytes && !options.__autoGoal) });
     const baseInput = (best.engine === 'Ghostscript pdfwrite' && best.outputSize < originalSize ? best.bytes : null) || losslessBytes || input;
     const attempts = profiles.length;
     let acceptedImageCandidate = null;

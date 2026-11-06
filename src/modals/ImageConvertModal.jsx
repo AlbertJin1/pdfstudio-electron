@@ -51,7 +51,8 @@ export default function ImageConvertModal({ setModal, notify }) {
   const spec = OUTPUT_FORMATS.find((entry) => entry.value === format) || OUTPUT_FORMATS[0];
   // Only JPG can carry camera details; every other output is always clean.
   const effectiveMode = format === 'jpg' ? metadata : 'strip';
-  const settingsKey = `${format}|${quality}|${maxSide}|${spec.lossy ? target : 0}|${spec.alpha ? '' : background}|${effectiveMode}`;
+  const sizeLimitAllowed = spec.lossy || format === 'png';
+  const settingsKey = `${format}|${quality}|${maxSide}|${sizeLimitAllowed ? target : 0}|${spec.alpha ? '' : background}|${effectiveMode}`;
   const folder = useExportFolder({ sourcePath: items.find((item) => item.path)?.path || '' });
 
   useEffect(() => () => { itemsRef.current.forEach((item) => item.thumb && URL.revokeObjectURL(item.thumb)); }, []);
@@ -121,7 +122,7 @@ export default function ImageConvertModal({ setModal, notify }) {
     const used = new Set();
     // Names already taken by finished files in this batch keep their numbering stable.
     itemsRef.current.filter((item) => item.doneKey === settingsKey && item.result).forEach((item) => used.add(item.result.name.toLowerCase()));
-    const options = { format, quality: quality / 100, maxSide, targetBytes: spec.lossy ? target : 0, background, metadata: effectiveMode };
+    const options = { format, quality: quality / 100, maxSide, targetBytes: sizeLimitAllowed ? target : 0, background, metadata: effectiveMode };
     try {
       for (const item of pending) {
         patch(item.id, { status: 'working', error: '', step: 'Starting' });
@@ -280,8 +281,8 @@ export default function ImageConvertModal({ setModal, notify }) {
           <Select className="form-input" value={maxSide} options={SIZE_LIMITS} onChange={setMaxSide} ariaLabel="Image size" disabled={working} />
         </label>
         <label className="form-label">File size limit
-          <Select className="form-input" value={spec.lossy ? target : 0} options={TARGET_SIZES} onChange={setTarget} ariaLabel="File size limit" disabled={!spec.lossy || working} />
-          <small className="cvt-hint">{spec.lossy ? (target ? 'Each image gets the best quality that fits; it is shrunk slightly only if it must be.' : 'Handy for upload forms that cap the file size.') : `Not available for ${spec.label}.`}</small>
+          <Select className="form-input" value={sizeLimitAllowed ? target : 0} options={TARGET_SIZES} onChange={setTarget} ariaLabel="File size limit" disabled={!sizeLimitAllowed || working} />
+          <small className="cvt-hint">{spec.lossy ? (target ? 'Each image gets the best quality that fits; it is shrunk slightly only if it must be.' : 'Handy for upload forms that cap the file size.') : sizeLimitAllowed ? (target ? 'PNG stays lossless; the picture is scaled down just enough to fit.' : 'PNG is lossless, so a size limit is met by scaling the picture down.') : `Not available for ${spec.label}.`}</small>
         </label>
         {!spec.alpha && <label className="form-label">Background for transparent areas
           <span className="cvt-color"><input type="color" value={background} disabled={working} onChange={(event) => setBackground(event.target.value)} aria-label="Background color" /><code>{background.toUpperCase()}</code></span>

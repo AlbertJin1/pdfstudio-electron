@@ -81,9 +81,9 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
   }, [documents, exportAuthor, exportCompression, exportPageNumbers, exportPaperSize, exportPassword, exportTitle, exportWatermark, exportWatermarkAngle, exportWatermarkColor, exportWatermarkMode, exportWatermarkOpacity, notify, pages, selectedPages, setIsLoading, setLoadingLabel, setModal, sourcesRef]);
 
 
-  const convertToWord = useCallback(async (request = 'editable') => {
+  const convertToWord = useCallback(async (request = 'flow') => {
     const conversionOptions = typeof request === 'string' ? { mode: request } : (request && typeof request === 'object' ? request : {});
-    const conversionMode = ['auto', 'editable', 'layout', 'visual'].includes(conversionOptions.mode) ? conversionOptions.mode : 'auto';
+    const conversionMode = ['flow', 'auto', 'editable', 'layout', 'visual'].includes(conversionOptions.mode) ? conversionOptions.mode : 'flow';
     const standalone = conversionOptions.file?.bytes ? conversionOptions.file : null; // PDF picked directly for Word: never enters the workspace
     if (!standalone && !pages.length) return notify('Open a PDF before converting it to Word.', 'info');
     setIsLoading(true); setLoadingLabel('Reading PDF layout and text');
@@ -93,6 +93,7 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
         mode: conversionMode,
         ocrEnabled: conversionOptions.ocrEnabled !== false,
         ocrLanguage: conversionOptions.ocrLanguage || 'eng',
+        title: standalone ? standalone.name.replace(/\.[^.]+$/, '') : (exportTitle || ''),
         onProgress: ({ page, pages: total, phase, profile }) => setLoadingLabel(phase === 'building' ? (profile || 'Building Word document') : phase === 'ocr' ? `OCR · page ${page} of ${total}` : phase === 'validation' ? 'Verifying Word package and text' : (profile || `Reconstructing page ${page} of ${total}`)),
       });
       const baseName = (standalone ? standalone.name.replace(/\.[^.]+$/, '') : exportTitle || (documents.length === 1 ? documents[0].name.replace(/\.[^.]+$/, '') : 'PDF-Studio-converted')).replace(/[\\/:*?"<>|]/g, '-').slice(0, 100);
@@ -101,10 +102,12 @@ export function useExporters({ pages, selectedPages, documents, sourcesRef, noti
         setModal(null);
         const quality = conversion.quality || {};
         const needsReview = conversion.mode !== 'visual'
-          && (conversion.pagesWithoutText || conversion.pagesWithPartialText || quality.warnings?.length);
+          && (conversion.pagesWithPartialText || quality.warnings?.length);
         if (conversion.mode !== 'visual') console.info('PDF to Word quality report', quality);
         notify(
-          needsReview ? (conversion.mode === 'layout' ? 'Saved as layout-preserving Word. Review the result in Word.' : 'Saved as Word. Some content may need review in Word.') : 'Saved as Word document.',
+          needsReview
+            ? (conversion.mode === 'layout' ? 'Saved as layout-preserving Word. Review the result in Word.' : `Saved as Word. ${quality.warnings?.[0] || 'Some content may need review in Word.'}`)
+            : `Saved as Word document (${conversion.pages} page${conversion.pages === 1 ? '' : 's'}${quality.tablesReconstructed ? `, ${quality.tablesReconstructed} table${quality.tablesReconstructed === 1 ? '' : 's'}` : ''}${quality.separateWordImageAssets ? `, ${quality.separateWordImageAssets} picture${quality.separateWordImageAssets === 1 ? '' : 's'}` : ''}).`,
           needsReview ? 'info' : 'success',
         );
       }

@@ -42,11 +42,14 @@ function EditableText({ item, scale, editing, onTextChange, onFinish, onFormatKe
     ...TEXT_RENDER_STYLE,
     fontFamily: t.cssFamily, fontSize: `${t.size * scale}px`, lineHeight: `${t.size * t.lineHeight * scale}px`,
     fontWeight: t.cssBold ? 700 : 400, fontStyle: t.cssItalic ? 'italic' : 'normal', textAlign: t.align,
+    textAlignLast: t.align === 'justify' ? 'left' : 'auto',
     textDecoration: [t.underline && 'underline', t.strike && 'line-through'].filter(Boolean).join(' ') || 'none',
     letterSpacing: item.type === 'stamp' ? '.06em' : 'normal',
     padding: `${t.pad * scale}px`, color: item.color || '#000',
     whiteSpace: t.reflow ? 'pre-wrap' : 'pre', overflowWrap: t.reflow ? 'anywhere' : 'normal',
     minHeight: `${boxH * scale}px`,
+    // After TEXT_RENDER_STYLE (which resets text-indent): flowing paragraphs keep their first-line indent.
+    textIndent: `${(t.firstIndent || 0) * scale}px`,
   };
   if (editing) {
     const middle = t.valign === 'middle';

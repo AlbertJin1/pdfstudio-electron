@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   AlignCenter, AlignCenterHorizontal, AlignCenterVertical, AlignEndHorizontal, AlignEndVertical, AlignHorizontalSpaceBetween,
-  AlignLeft, AlignRight, AlignStartHorizontal, AlignStartVertical, AlignVerticalSpaceBetween, Bold, BringToFront,
+  AlignLeft, AlignRight, AlignJustify, AlignStartHorizontal, AlignStartVertical, AlignVerticalSpaceBetween, Bold, BringToFront,
   Circle, Copy, Strikethrough, Eraser, FileText, Frame, Grid3x3, Highlighter, ImagePlus, Italic, Lock, Magnet, Minus, MousePointer2, PenLine,
   Pencil, Redo2, Ruler, SendToBack, Signature, Square, Stamp, StickyNote, Trash2, Type, Underline as UnderlineIcon, Undo2, Unlock, ZoomIn, ZoomOut,
   MoveHorizontal, Replace, Plus, X, Scan, Check, FolderOpen, Save, SlidersHorizontal, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ChevronsLeft, ChevronsRight,
@@ -175,6 +175,7 @@ export function FormatBar({ original, style, onStyle, hasTextTarget, selectionCo
         <Btn icon={AlignLeft} label="Align text left" active={style.align === 'left'} onClick={() => onStyle({ align: 'left' })} />
         <Btn icon={AlignCenter} label="Centre text" active={style.align === 'center'} onClick={() => onStyle({ align: 'center' })} />
         <Btn icon={AlignRight} label="Align text right" active={style.align === 'right'} onClick={() => onStyle({ align: 'right' })} />
+        <Btn icon={AlignJustify} label="Justify text" active={style.align === 'justify'} onClick={() => onStyle({ align: 'justify' })} />
         <Select className="ep-select ep-select-narrow" ariaLabel="Line spacing" title="Line spacing" value={String(style.lineHeight)} onChange={(next) => onStyle({ lineHeight: Number(next) })} options={[1, 1.15, 1.2, 1.5, 2].map((v) => ({ value: String(v), label: `${v}×` }))} />
         <label className="ep-color" title="Text colour"><input type="color" value={style.color} onChange={(event) => onStyle({ color: event.target.value })} aria-label="Text colour" /></label>
       </div>

@@ -213,6 +213,8 @@ export async function convertImage({ bytes, name }, options, onStep = () => {}) 
     const exif = format.value === 'jpg' ? prepareExifForJpeg(bytes, options.metadata) : null;
     const reserve = exif ? exif.length + 12 : 0;
     const target = format.lossy && options.targetBytes > 0 ? options.targetBytes : 0;
+    // Lossless PNG has no quality knob: a size limit is met by reducing the pixel dimensions instead.
+    const losslessTarget = !format.lossy && format.value === 'png' && options.targetBytes > 0 ? options.targetBytes : 0;
 
     const render = (factor) => {
       const width = Math.max(1, Math.round(decoded.width * factor)); const height = Math.max(1, Math.round(decoded.height * factor));
@@ -227,7 +229,21 @@ export async function convertImage({ bytes, name }, options, onStep = () => {}) 
 
     onStep('Encoding');
     let data; let width; let height; let used = quality; let fits = true;
-    if (!target) {
+    if (losslessTarget) {
+      fits = false;
+      for (let attempt = 0; attempt < 12 && !fits; attempt += 1) {
+        const canvas = render(scale);
+        width = canvas.width; height = canvas.height;
+        data = await encodeCanvas(canvas, format, quality);
+        canvas.width = 0; canvas.height = 0;
+        if (data.length <= losslessTarget) fits = true;
+        else {
+          // PNG size scales roughly with pixel count: jump close to the needed scale, then refine.
+          scale *= Math.max(0.5, Math.min(0.9, Math.sqrt(losslessTarget / data.length) * 0.97));
+          onStep('Shrinking to fit'); await tick();
+        }
+      }
+    } else if (!target) {
       const canvas = render(scale);
       width = canvas.width; height = canvas.height;
       data = await encodeCanvas(canvas, format, quality);

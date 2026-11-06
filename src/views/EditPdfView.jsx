@@ -537,7 +537,7 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
       item = {
         id: uid(), type: 'textedit', blockId: block.id, src: { x: block.x, y: block.y, w: block.w, h: block.h }, cover: colors.bg,
         text: block.text, size: block.size, font: f.family, fontName: f.name || '', fontRef: f.ref || '', bold: f.bold, italic: f.italic, origBold: f.bold, origItalic: f.italic,
-        underline, strike: false, color: colors.fg, align: block.align, lineHeight: block.lineHeight, reflow: false, pad: 0, x: block.x, w: block.w, h: block.h,
+        underline, strike: false, color: colors.fg, align: block.align, lineHeight: block.lineHeight, reflow: !!block.reflow, firstIndent: block.firstIndent || 0, pad: 0, x: block.x, w: block.w, h: block.h,
         origFont: { font: f.family, fontName: f.name || '', fontRef: f.ref || '' },
       };
       const layout = layoutItem(item);
@@ -546,9 +546,11 @@ export default function EditPdfView({ active = true, documents = [], sourcesRef,
       // entering edit mode and typing never change its size or move the text. (Sizing it to the PDF's glyph bounds
       // made the outline shorter than the text field and, with padded PDF runs, far wider than the text.)
       item.h = layout.autoH;
-      const hugs = (block.lines?.length || 1) === 1 || block.align === 'left';
-      item.w = hugs ? Math.max(layout.size * 0.6, layout.autoW) : Math.max(block.w, layout.autoW);
-      item.orig = { x: item.x, y: item.y, text: item.text, size: item.size, font: item.font, fontName: item.fontName, bold: item.bold, italic: item.italic, underline, strike: false, color: item.color, align: item.align, lineHeight: item.lineHeight };
+      const hugs = !block.reflow && ((block.lines?.length || 1) === 1 || block.align === 'left');
+      // Flowing paragraphs keep the source measure (+ a hair of slack so the first render wraps like the PDF).
+      item.w = block.reflow ? block.w + Math.max(0.8, block.size * 0.08) : hugs ? Math.max(layout.size * 0.6, layout.autoW) : Math.max(block.w, layout.autoW);
+      if (block.reflow) item.h = layoutItem(item).autoH;
+      item.orig = { x: item.x, y: item.y, text: item.text, size: item.size, font: item.font, fontName: item.fontName, bold: item.bold, italic: item.italic, underline, strike: false, color: item.color, align: item.align, lineHeight: item.lineHeight, reflow: item.reflow, firstIndent: item.firstIndent };
     }
     applyAnn(withList([...pageList(), item]), false);
     if (block.kind === 'image' && pdfDoc) {

@@ -1,5 +1,31 @@
 # PDF Studio Changelog
 
+## 3.1.0
+
+_PDF to Word rebuilt to Acrobat-style accuracy, true in-place text editing, and size targets that keep the best quality._
+
+### PDF to Word (new default engine)
+- New conversion engine that reads the PDF's real content — every glyph's position, font, size and colour, every ruling line and filled area, every image — instead of guessing from a page picture. The Word file contains normal, editable Word content; there is no page-image background and no per-line text frames.
+- Text becomes **flowing paragraphs** with the source alignment (left, centred, right, justified), left/right/first-line/hanging indents, exact line pitch and paragraph spacing, tab stops for tab-separated text, bullet and numbered-list markers with hanging indents, bold/italic/underline/strikeout, super/subscript, true text colours and hyperlinks. Fonts map to their Word equivalents (Helvetica → Arial, Times → Times New Roman, Carlito → Calibri, Caladea → Cambria, …).
+- **Real Word tables**: ruled grids become Word tables with the exact column widths and row heights, merged cells (horizontal and vertical), per-side borders with the original weight and colour, and cell shading. Tables drawn without a full grid — only horizontal rules, zebra-striped rows, or plain aligned columns — are detected too, with rules turned into row borders and stripes into shading. Numeric columns stay right-aligned, centred columns stay centred. Shaded title bars and call-out boxes (including rounded CSS cards with borders) become single-cell shaded tables; side-by-side text such as letterheads becomes borderless tables.
+- Two- and three-column layouts become Word column sections; pages with sideways text are turned upright; charts and diagrams (including their labels) become pictures instead of broken text; photos, logos and signatures are separate Word pictures (inline when alone, anchored beside text otherwise); stand-alone lines and coloured panels become native Word shapes.
+- Each PDF page is its own Word section with the original page size and orientation; margins sit on the real text edge.
+- Scanned pages are OCRed when OCR is enabled (desktop app); otherwise they are kept as images and reported.
+- "Exact page layout" (fixed-position text) and "Visual replica" remain available in the Word dialog. If the new engine ever fails on a file, the layout-assisted converter is used automatically.
+
+### Edit PDF
+- Editing or deleting existing text now **removes the original glyphs from the page content** (Acrobat behaviour) instead of hiding them under a white rectangle: the old text is no longer searchable or copyable, table lines and backgrounds under it are preserved, and every other character stays exactly in place. Moving, replacing or deleting an existing image removes the original image as well. The cover rectangle is used only as a fallback for content that cannot be removed safely (for example text inside form XObjects).
+- Paragraph detection now matches the PDF: first-line indents, ragged last lines and justified text are recognised, so a whole paragraph is selected as one block. Wrapped paragraphs re-flow inside their original width while you type, keep their first-line indent, and justified paragraphs stay justified in the editor and in the saved PDF. A Justify button was added to the text toolbar.
+
+### Compression
+- Target size (percent or MB) now picks the **best-quality setting that still fits** instead of the first strong setting: it searches from near-original quality downwards and refines between steps, so a 50 % target no longer produces a 99 % smaller, blurry file. Applies to both the Ghostscript engine and the built-in image optimizer.
+- In target-size mode, the DPI/quality fields only act as limits after you change them (shown as "Auto quality" until then).
+- Image converter: a file-size limit now also works for PNG (the picture is scaled down just enough, staying lossless).
+
+### Fixes
+- Hyperlink positions use the current PDF.js API (`convertToViewportRectangle` no longer exists in PDF.js 6).
+- Extracted pictures no longer get a transparent hairline at the bottom edge.
+
 ## 3.0.10
 
 _Taskbar fix: the running app and its pinned icon now share one taskbar button._

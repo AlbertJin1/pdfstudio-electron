@@ -1,6 +1,6 @@
 {
   "name": "pdf-studio-windows",
-  "version": "3.0.10",
+  "version": "3.1.0",
   "private": true,
   "description": "PDF Studio — a modern, local-first Windows PDF workspace built with Electron, React, Node.js and Tailwind CSS.",
   "author": "Jessie Albert Regualos",
@@ -20,7 +20,7 @@
     "check": "npm run web:build",
     "test:access": "node tests/access-policy.test.cjs && node tests/monitor-telemetry.test.cjs && node tests/review-queue-policy.test.cjs",
     "prepare:pdfjs-assets": "node scripts/copy-pdfjs-assets.cjs",
-    "test:pdf": "node tests/ghostscript-compression.test.cjs && node tests/pdf-compression.test.mjs && node tests/pdf-word-policy.test.cjs && node tests/ocr-service.test.cjs && node tests/image-text-extractor.test.cjs && node tests/emoji-merge.test.mjs && node --experimental-default-type=module tests/pdf-word-layout.test.mjs && node tests/pdf-to-docx-e2e.test.mjs",
+    "test:pdf": "node tests/ghostscript-compression.test.cjs && node tests/pdf-compression.test.mjs && node tests/pdf-word-policy.test.cjs && node tests/ocr-service.test.cjs && node tests/image-text-extractor.test.cjs && node tests/emoji-merge.test.mjs && node --experimental-default-type=module tests/pdf-word-layout.test.mjs && node tests/pdf-to-docx-e2e.test.mjs && node tests/pdf-to-word-flow.test.mjs && node tests/pdf-edit-content.test.mjs",
     "test:branding": "node tests/branding-ui.test.cjs",
     "test:theme-ux": "node tests/theme-ux.test.cjs",
     "test:workspace-ui": "node tests/workspace-ui.test.cjs",

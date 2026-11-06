@@ -85,6 +85,8 @@ export function resolveText(item) {
     size: Math.max(4, Math.min(300, Number(item.size) || 12)),
     lineHeight: Number(item.lineHeight) || 1.2,
     align: item.align || (type === 'stamp' ? 'center' : 'left'),
+    // First-line indent (points) of each paragraph — only meaningful for flowing (reflow) text.
+    firstIndent: item.reflow ? Math.max(-200, Math.min(400, Number(item.firstIndent) || 0)) : 0,
     pad: item.pad ?? (type === 'note' ? 4 : type === 'stamp' || type === 'textedit' ? 0 : 2),
     reflow: type === 'note' || type === 'stamp' ? true : !!item.reflow,
     valign: type === 'stamp' ? 'middle' : 'top',
@@ -92,36 +94,45 @@ export function resolveText(item) {
   return { ...t, ...cssFontOf(item, t) };
 }
 
-export function wrapLines(text, style, size, maxWidth) {
+export function wrapLines(text, style, size, maxWidth, firstIndent = 0) {
+  return wrapLinesInfo(text, style, size, maxWidth, firstIndent).map((entry) => entry.text);
+}
+
+/** Wrap text; each line reports its indent and whether it ends a paragraph (needed for justification). */
+export function wrapLinesInfo(text, style, size, maxWidth, firstIndent = 0) {
   const paragraphs = String(text ?? '').split('\n');
-  if (!maxWidth) return paragraphs;
-  const lines = [];
+  if (!maxWidth) return paragraphs.map((line) => ({ text: line, indent: 0, last: true }));
+  const out = [];
   for (const paragraph of paragraphs) {
-    if (!paragraph) { lines.push(''); continue; }
+    if (!paragraph) { out.push({ text: '', indent: 0, last: true }); continue; }
+    const lines = [];
+    const width = () => maxWidth - (lines.length === 0 ? firstIndent : 0);
     let line = '';
     for (const word of paragraph.split(' ')) {
       const attempt = line ? `${line} ${word}` : word;
-      if (!line || textWidth(attempt, style, size) <= maxWidth) { line = attempt; continue; }
+      if (!line || textWidth(attempt, style, size) <= width()) { line = attempt; continue; }
       lines.push(line);
       line = word;
-      while (textWidth(line, style, size) > maxWidth && line.length > 1) {
+      while (textWidth(line, style, size) > width() && line.length > 1) {
         let cut = line.length - 1;
-        while (cut > 1 && textWidth(line.slice(0, cut), style, size) > maxWidth) cut -= 1;
+        while (cut > 1 && textWidth(line.slice(0, cut), style, size) > width()) cut -= 1;
         lines.push(line.slice(0, cut));
         line = line.slice(cut);
       }
     }
     lines.push(line);
+    lines.forEach((entry, index) => out.push({ text: entry, indent: index === 0 ? firstIndent : 0, last: index === lines.length - 1 }));
   }
-  return lines;
+  return out;
 }
 
 export function layoutItem(item) {
   const t = resolveText(item);
   const lineH = t.size * t.lineHeight;
-  const lines = wrapLines(item.text, t, t.size, t.reflow ? Math.max(t.size, (item.w || 0) - 2 * t.pad) : 0);
-  const widest = Math.max(0, ...lines.map((line) => textWidth(line, t, t.size)));
-  return { ...t, lines, lineH, textW: widest, autoW: widest + 2 * t.pad, autoH: lines.length * lineH + 2 * t.pad };
+  const lineInfo = wrapLinesInfo(item.text, t, t.size, t.reflow ? Math.max(t.size, (item.w || 0) - 2 * t.pad) : 0, t.firstIndent);
+  const lines = lineInfo.map((entry) => entry.text);
+  const widest = Math.max(0, ...lineInfo.map((entry) => textWidth(entry.text, t, t.size) + Math.max(0, entry.indent)));
+  return { ...t, lines, lineInfo, lineH, textW: widest, autoW: widest + 2 * t.pad, autoH: lines.length * lineH + 2 * t.pad };
 }
 
 /** Patch that makes an auto-sized text box fit its content. */
